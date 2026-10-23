@@ -140,6 +140,55 @@ Installed with `./install.sh`, the panel also runs as a launchd service (`local.
 `launchctl kickstart -k gui/$UID/local.agent-panel` restarts it, and its log is
 `~/Library/Logs/Agent Panel/daemon-<port>.log`. `node server.mjs daemon install|remove|status` manages it.
 
+## Fleet
+
+`http://127.0.0.1:4747/` is Fleet: every agent on this Mac and on the machines you list, on one screen, so you can see
+what each one is working on, talk to it, and decide where the next one goes. The board is at `/board`.
+
+- **Accounts**, one line each and across machines: every Claude Code profile (`~/.claude`, `~/.claude-<name>`), every
+  Codex home (`~/.codex`), and Muse where its CLI is signed in. Each shows its 5-hour and weekly limits, a cap and when it
+  lifts, and its sessions by state; the one with the most room is first. Click one to launch with it.
+- **Machines**, one line each: dev servers, database stacks, containers, load, memory and disk.
+- **Launch**: write what it should do, pick the account, machine, folder, model and effort, and ⌘↵. `claude --bg` for a
+  Claude account, `codex exec --sandbox workspace-write` for Codex, `muse exec` for Muse, or a fleet dispatch
+  (`fleet-workers --dispatch`) on a machine with the fleet kit.
+- **Sessions**, grouped by epic (`epics` in `fleet.json`): each with a title of a few words and a stage (planning,
+  building, testing, promoting, deploying) that haiku writes from what you asked it, its machine, account, effort, how
+  full its context is, and about how much of its account's weekly limit it used. Every session is listed: open ones
+  first, closed ones greyed under them. An epic's closed sessions archive in one go.
+- **Click a session** and it opens on the right, full height: its conversation as it goes (what you asked, what it said,
+  set as text, and the steps in between), with a box to message it at the bottom, its effort to change, and one control
+  that closes an open session or archives a closed one. **TEST** opens the epic's TEST site in a window beside the panel.
+
+How a message gets in. A session with Remote Control on (a bridge's session, or any session started with
+`"remoteControlAtStartup": true` in its profile's settings) takes it through its claude.ai session:
+`claude -p --cloud session_<id> <text>`, which also runs `/effort` and other commands. A background job without it gets
+it the way agent view's reply does (`claude --resume <id> -- <text>`), after `claude respawn` when it still runs an older
+Claude Code than the one installed. A terminal or desktop-app session started before Remote Control was on says to type
+`/rc` in it once.
+
+Where the numbers come from. Claude Code shows an account's limits only to its status line, so `fleet/statusline.mjs`
+keeps the newest one per session in `<profile>/fleet-status/` (set it as each profile's `statusLine`; it prints
+`ctx 20% · 5h 22% · 7d 2%`). Without a reading, an account's card shows the last limit stop its sessions met. Codex writes
+its limits into each session's log. A session's weekly share is the account's weekly figure split by each session's
+tokens this week, weighted as usage is priced; transcripts are read once from the week's start and then only their new
+lines (`~/.fleet-panel/usage.json`).
+
+Other machines, names and epics go in `fleet.json` beside `prefs.json`:
+
+```json
+{ "self": "Mac",
+  "machines": [ { "name": "server", "ssh": "my-server", "user": "agents" } ],
+  "names": { "claude:me@example.com": "personal", "codex:me@example.com": "codex" },
+  "epics": [ { "name": "Web app", "about": "the web app: features, CI, deploys", "test": "https://test.example.com" } ] }
+```
+
+`ssh` is a host or `~/.ssh/config` alias that logs in without a password; `user` is who the agents run as there (`sudo
+-u`). Nothing is installed on it: each read sends `fleet/machine.mjs` over SSH to `node --input-type=module -`, so it needs
+Node 20+. `names` labels an account (keyed `engine:email`), `self` names this Mac, and each epic's `about` is what haiku
+files sessions by. Titles are one haiku call for every session whose ask changed (no tools, hooks, MCP servers or saved
+session), kept in `fleet-titles.json`; archived sessions in `fleet-archived.json`.
+
 ## The Mac app
 
 `app/build.sh` builds **Agent Panel.app** in `~/Applications`: the panel in a window of its own, with

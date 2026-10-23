@@ -55,13 +55,16 @@ test('an order placed on the hub is run by the Mac and answered in its own words
   assert.match(order.result.error, /costs 300 credit/);
 });
 
-test('/world is the same page opened on the world, and / opens the board', async () => {
+test('/world is the same page opened on the world, /board opens the board, and / is Fleet', async () => {
   const world = await fetch(`http://127.0.0.1:${panelPort}/world`);
   assert.equal(world.status, 200);
   const html = await world.text();
   assert.match(html, /ACP_VIEW = 'world'/);
   assert.doesNotMatch(html, /__ACP_(VIEW|TOKEN)__/);
-  assert.match(await fetch(`http://127.0.0.1:${panelPort}/`).then((r) => r.text()), /ACP_VIEW = 'board'/);
+  assert.match(await fetch(`http://127.0.0.1:${panelPort}/board`).then((r) => r.text()), /ACP_VIEW = 'board'/);
+  const home = await fetch(`http://127.0.0.1:${panelPort}/`).then((r) => r.text());
+  assert.match(home, /<title>Fleet<\/title>/);
+  assert.doesNotMatch(home, /__ACP_TOKEN__/);
 });
 
 /** Runs `node server.mjs <args>` against this hub with a prefs folder of its own; `open` is a stand-in that opens nothing. */

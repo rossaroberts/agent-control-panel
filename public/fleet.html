@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* After iA Writer: paper, ink, one typeface, one blue. Structure is whitespace and tone, never boxes; words only where a
+   glyph can't say it. */
+:root {
+  --paper: #f6f7f7; --ink: #1e2124; --grey: #7b8287; --faint: #b9bec2; --rule: #e3e6e8;
+  --blue: #1aa3e0; --orange: #e5832e; --red: #d4574b; --green: #3f9d6b;
+  --font: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #191b1d; --ink: #d9dcde; --grey: #868d92; --faint: #50565a; --rule: #2c3033;
+          --blue: #2fb2ec; --orange: #ee9442; --red: #e06a5e; --green: #57b483; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html { background: var(--paper); }
+body { margin: 0; color: var(--ink); font: 15px/1.7 var(--font); -webkit-font-smoothing: antialiased; }
+main { width: min(1500px, 100% - 64px); margin: 0 auto; padding: 48px 0 120px; }
+button, input, select, textarea { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; }
+button, select { cursor: pointer; }
+a { color: var(--blue); text-decoration: none; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 2px; }
+.faint { color: var(--faint); }
+
+.top { display: flex; align-items: baseline; gap: 22px; margin-bottom: 40px; }
+.top h1 { font-size: 15px; font-weight: 500; margin: 0; flex: 1; }
+.top a, .top button { color: var(--faint); }
+.top a:hover, .top button:hover { color: var(--ink); }
+.err { color: var(--red); font-size: 13px; margin: -20px 0 24px; white-space: pre-line; }
+
+/* accounts: one line each, the chosen one marked in blue */
+.acct { display: grid; grid-template-columns: 8ch 1fr auto; gap: 0 18px; align-items: baseline; padding: 2px 0 2px 14px; margin-left: -16px; border-left: 2px solid transparent; cursor: pointer; }
+.acct .name { color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct:hover .name, .acct.on .name { color: var(--ink); }
+.acct.on { border-left-color: var(--blue); }
+.room { display: flex; gap: 24px; align-items: baseline; font-size: 13px; color: var(--grey); white-space: nowrap; }
+.room i { font-style: normal; color: var(--faint); margin-right: 8px; }
+.line { position: relative; display: inline-block; width: 64px; height: 2px; background: var(--rule); top: -3px; margin-right: 8px; }
+.line b { position: absolute; inset: 0 auto 0 0; background: var(--grey); }
+.line b.mid { background: var(--orange); } .line b.hi { background: var(--red); }
+.cap { color: var(--red); }
+.tally { display: flex; gap: 12px; font-size: 13px; color: var(--faint); }
+.tally span { display: inline-flex; align-items: baseline; gap: 5px; }
+
+/* the prompt: the one large thing */
+.write { margin: 48px 0 56px; }
+.write textarea { display: block; width: 100%; font-size: 22px; line-height: 1.5; resize: none; overflow: hidden; caret-color: var(--blue); }
+.write textarea::placeholder { color: var(--faint); }
+.how { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 22px; margin-top: 12px; font-size: 13px; }
+.how select, .how input { color: var(--grey); border-bottom: 1px dotted transparent; }
+.how select { appearance: none; -webkit-appearance: none; }
+.how select:hover, .how input:hover, .how input:focus { color: var(--ink); border-bottom-color: var(--faint); outline: none; }
+.how .sp { flex: 1; }
+.fire { color: var(--blue); }
+.fire:disabled { color: var(--faint); cursor: default; }
+.said { font-size: 13px; margin-top: 8px; min-height: 1.7em; color: var(--grey); }
+.said.ok { color: var(--green); } .said.no { color: var(--red); }
+
+/* machines: one line each */
+.machines { margin-top: 26px; }
+.mline { display: grid; grid-template-columns: 8ch 1fr auto; gap: 0 18px; align-items: baseline; }
+.mline .nm { color: var(--grey); }
+.mline .tally { justify-content: flex-end; }
+
+/* epics */
+.epic { margin-top: 40px; }
+.epic header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 20px; margin-bottom: 6px; }
+.epic h2 { font: inherit; font-weight: 500; margin: 0; }
+.epic header .test { font-size: 13px; }
+.epic header .tally { margin-left: auto; }
+.epic header .sweep { font-size: 13px; color: var(--faint); }
+.epic header .sweep:hover { color: var(--ink); } .epic header .sweep.armed { color: var(--red); }
+.vitals { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px; color: var(--grey); }
+.vitals i { font-style: normal; color: var(--faint); margin-right: 6px; }
+.vitals .hi { color: var(--red); } .vitals .mid { color: var(--orange); }
+
+/* sessions */
+.s { display: grid; grid-template-columns: 10px minmax(0, 36ch) 9ch 7ch 6ch 6ch 4ch 4ch minmax(0, 1fr); gap: 0 18px; align-items: baseline; padding: 1px 0; cursor: pointer; }
+.s .use { color: var(--faint); font-size: 13px; text-align: right; }
+.s .use.mid { color: var(--orange); } .s .use.hi { color: var(--red); }
+.s .at { font-size: 13px; color: var(--faint); white-space: nowrap; overflow: hidden; }
+.s .eff { font-size: 13px; color: var(--faint); white-space: nowrap; }
+.s .stage { font-size: 13px; color: var(--grey); white-space: nowrap; }
+.s .stage.testing { color: var(--orange); } .s .stage.promoting { color: var(--green); } .s .stage.deploying { color: var(--red); }
+.s:hover .ttl, .s.open .ttl { color: var(--ink); }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; position: relative; top: -1px; }
+.dot.working { background: var(--blue); }
+.dot.needs-you { background: var(--orange); }
+.dot.capped { background: var(--red); }
+.dot.ready { box-shadow: inset 0 0 0 1.5px var(--grey); }
+.dot.closed { background: var(--faint); }
+.s .ttl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s .who { color: var(--faint); font-size: 13px; white-space: nowrap; overflow: hidden; }
+.s .ctx { color: var(--faint); font-size: 13px; text-align: right; }
+.s .ctx.mid { color: var(--orange); } .s .ctx.hi { color: var(--red); }
+.s .what { color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+
+/* a closed session: still listed, quietly */
+.s.gone .ttl, .s.gone .stage, .s.gone .ctx { color: var(--faint); }
+
+/* the session open on the right: full height, its conversation scrolling, the message box at the bottom */
+:root { --pane: min(46vw, 820px); }
+body.has-pane main { width: calc(100% - var(--pane) - 64px); margin-left: 32px; }
+.s.open .ttl { color: var(--ink); }
+.s.open { box-shadow: inset 2px 0 0 var(--blue); }
+#pane { position: fixed; top: 0; right: 0; bottom: 0; width: var(--pane); display: flex; flex-direction: column; background: var(--paper); border-left: 1px solid var(--rule); z-index: 5; }
+#pane[hidden] { display: none; }
+#p-head { padding: 22px 28px 12px; border-bottom: 1px solid var(--rule); }
+.p-top { display: flex; align-items: baseline; gap: 12px; }
+.p-title { font-size: 18px; font-weight: 500; flex: 1; }
+.p-x { color: var(--faint); font-size: 20px; line-height: 1; } .p-x:hover { color: var(--ink); }
+.p-meta { font-size: 13px; color: var(--grey); margin-top: 4px; white-space: pre-wrap; }
+.p-acts { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 10px; font-size: 13px; }
+.p-acts .act { color: var(--faint); } .p-acts .act:hover { color: var(--ink); }
+.p-acts .act.armed { color: var(--red); } .p-acts .act.test, .p-acts a.act { color: var(--blue); }
+#p-body { flex: 1; overflow-y: auto; padding: 16px 28px 24px; font-size: 14px; }
+#p-body .it { margin: 6px 0; overflow-wrap: anywhere; }
+#p-body .it.ask { color: var(--ink); margin-top: 18px; }
+#p-body .it.ask::before { content: '› '; color: var(--blue); }
+#p-body .it.ask.pending { opacity: .55; }
+#p-body .it.said { color: var(--grey); }
+#p-body .it.said.long { max-height: 15em; overflow: hidden; cursor: pointer; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+#p-body .it p { margin: 0 0 .55em; } #p-body .it p:last-child { margin-bottom: 0; }
+#p-body .it ul, #p-body .it ol { margin: 0 0 .55em; padding-left: 2.2ch; }
+#p-body .it b { color: var(--ink); font-weight: 500; }
+#p-body .it code { background: var(--rule); border-radius: 3px; padding: 0 3px; font-size: 13px; }
+#p-body .it pre { margin: 0 0 .55em; white-space: pre; overflow-x: auto; font-size: 12px; color: var(--grey); }
+#p-body .it .hd { color: var(--ink); font-weight: 500; }
+#p-body .it.step { color: var(--faint); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 2px 0; }
+#p-body .it.step::before { content: '· '; }
+#p-foot { border-top: 1px solid var(--rule); padding: 12px 28px 18px; }
+#p-reply { display: block; width: 100%; font-size: 15px; line-height: 1.5; resize: none; overflow-y: auto; caret-color: var(--blue); min-height: 1.5em; }
+#p-reply:focus { outline: none; } #p-reply::placeholder { color: var(--faint); }
+#p-reply[hidden] { display: none; }
+#p-tools { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; font-size: 13px; min-height: 1.4em; }
+#p-tools .sp { flex: 1; } #p-tools .note { color: var(--faint); }
+#p-tools .no { color: var(--red); } #p-tools .ok { color: var(--green); }
+#p-tools select.effort { color: var(--grey); appearance: none; -webkit-appearance: none; }
+#p-tools select.effort:hover { color: var(--ink); }
+@media (max-width: 720px) {
+  main { padding-top: 32px; }
+  .acct { grid-template-columns: 7ch 1fr; } .acct .tally { display: none; }
+  .line { width: 36px; }
+  .s { grid-template-columns: 10px minmax(0, 1fr) 9ch 4ch 4ch; } .s .who, .s .what, .s .eff, .s .at { display: none; }
+  .mline { grid-template-columns: 7ch 1fr; } .mline .tally { display: none; }
+  :root { --pane: 100vw; }
+  body.has-pane main { display: none; }
+  .write textarea { font-size: 19px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <div class="top"><h1>Fleet</h1><a href="/board" title="Your colleague's board: answer permission prompts for terminal sessions">Board</a><button id="refresh" title="Read again">↻</button></div>
+  <div class="err" id="err" hidden></div>
+  <div id="accts"></div>
+  <div class="machines" id="mlines"></div>
+  <div class="write">
+    <textarea id="prompt" rows="1" placeholder="What should it do?" aria-label="Prompt"></textarea>
+    <div class="how">
+      <select id="acct" aria-label="Account" title="Account"></select>
+      <select id="mach" aria-label="Machine" title="Machine"></select>
+      <input id="cwd" spellcheck="false" aria-label="Folder" title="Folder">
+      <select id="model" aria-label="Model" title="Model">
+        <option value="">default</option><option value="opus">opus</option><option value="opus[1m]">opus 1m</option>
+        <option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="fable">fable</option></select>
+      <select id="effort" aria-label="Effort" title="Effort">
+        <option value="">default effort</option><option value="low">low</option><option value="medium">medium</option>
+        <option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+      <span class="sp"></span><button class="fire" id="fire" title="⌘↵">Fire</button>
+    </div>
+    <div class="said" id="said"></div>
+  </div>
+  <div id="machines"></div>
+</main>
+<aside id="pane" hidden aria-label="Session">
+  <div id="p-head"></div>
+  <div id="p-body"></div>
+  <div id="p-foot"><textarea id="p-reply" rows="1" placeholder="Message it" aria-label="Message"></textarea><div id="p-tools"></div></div>
+</aside>
+<script>
+const TOKEN = '__ACP_TOKEN__';
+const $ = (id) => document.getElementById(id);
+const store = { get(k) { try { return localStorage.getItem('fleet.' + k); } catch { return null; } }, set(k, v) { try { localStorage.setItem('fleet.' + k, v); } catch {} } };
+/** Elements are built with textContent only: session text comes from transcripts. */
+function h(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+async function api(p, body = {}) {
+  const r = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN }, body: JSON.stringify(body) });
+  if (r.status === 403) { location.reload(); throw new Error('reloading'); }
+  return r.json();
+}
+const ago = (t) => { if (!t) return ''; const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
+const until = (t) => { const s = (t - Date.now()) / 1000; return s <= 0 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.floor(s / 86400)}d ${Math.round((s % 86400) / 3600)}h`; };
+const level = (p) => (p >= 90 ? 'hi' : p >= 70 ? 'mid' : '');
+const shortModel = (m) => (typeof m !== 'string' ? null : m.replace(/^claude-/, '').replace(/-(\d+)-(\d+)/, ' $1.$2').replace(/-(\d+)$/, ' $1').replace('[1m]', ' 1m'));
+const lastPart = (p) => (typeof p === 'string' ? p.split('/').filter(Boolean).at(-1) ?? p : null);
+const ORDER = { 'needs-you': 0, working: 1, capped: 2, ready: 3, closed: 4 };
+const WORD = { 'needs-you': 'needs you', working: 'working', capped: 'stopped at a limit', ready: 'open', closed: 'closed' };
+
+// ---------------------------------------------------------------- reading the snapshot
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+/** When a limit stop says it lifts: "resets Oct 24, 10am (UTC)", or "resets 2am (UTC)" (the next 2am). Null otherwise. */
+function resetOf(hit) {
+  const m = /resets\s+(?:([a-z]{3})\w*\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i.exec(hit?.text ?? '');
+  if (!m) return null;
+  const hr = (Number(m[3]) % 12) + (m[5].toLowerCase() === 'pm' ? 12 : 0), min = Number(m[4] ?? 0), seen = new Date(hit.at);
+  if (m[1]) {
+    const mo = MONTHS.indexOf(m[1].toLowerCase());
+    if (mo < 0) return null;
+    let t = Date.UTC(seen.getUTCFullYear(), mo, Number(m[2]), hr, min);
+    if (t < hit.at - 86400_000) t = Date.UTC(seen.getUTCFullYear() + 1, mo, Number(m[2]), hr, min);
+    return t;
+  }
+  let t = Date.UTC(seen.getUTCFullYear(), seen.getUTCMonth(), seen.getUTCDate(), hr, min);
+  if (t <= hit.at) t += 86400_000;
+  return t;
+}
+const baseModel = (m) => (typeof m === 'string' ? m.replace(/\[1m\]$/, '') : null);
+
+/** One account per engine + email, across machines: the same account on two machines is one budget. */
+function accounts(s) {
+  const subs = new Map();
+  for (const m of s.machines) for (const a of m.accounts ?? []) {
+    const email = a.account?.email ?? null;
+    const key = `${a.engine}:${email ?? m.name + ':' + a.dir}`;
+    let sub = subs.get(key);
+    if (!sub) subs.set(key, sub = { key, engine: a.engine, email, plan: a.account?.plan ?? null,
+      label: s.names?.[key] ?? email ?? (a.engine === 'muse' ? 'muse' : a.dir), places: [], sessions: [], bridges: [], limits: null, limitHit: null });
+    sub.places.push({ machine: m.name, local: m.local, profile: a.id, dir: a.dir, loggedIn: a.account?.loggedIn !== false });
+    for (const x of a.sessions ?? []) sub.sessions.push(Object.assign(x, { machine: m.name, local: m.local, ssh: m.ssh, user: m.user, profile: a.id, dir: a.dir, sub: null }));
+    for (const b of a.bridges ?? []) sub.bridges.push({ ...b, machine: m.name });
+    if (a.limits && (!sub.limits || a.limits.at > sub.limits.at)) sub.limits = a.limits;
+    if (a.limitHit && (!sub.limitHit || a.limitHit.at > sub.limitHit.at)) sub.limitHit = a.limitHit;
+  }
+  // A window one machine read from a status line holds for the same model everywhere.
+  const learned = new Map();
+  for (const sub of subs.values()) for (const x of sub.sessions) if (x.context && !x.context.guessed && x.context.size) learned.set(baseModel(x.model), Math.max(learned.get(baseModel(x.model)) ?? 0, x.context.size));
+  for (const sub of subs.values()) for (const x of sub.sessions) {
+    x.sub = sub.label;
+    const size = x.context?.guessed && learned.get(baseModel(x.model));
+    if (size && x.context.tokens != null) x.context = { ...x.context, size, pct: Math.round((1000 * x.context.tokens) / size) / 10, guessed: false };
+  }
+  const capped = s.machines.flatMap((m) => (m.fleet?.capped ?? []).map((c) => ({ ...c, machine: m.name })));
+  for (const sub of subs.values()) {
+    sub.windows = windows(sub);
+    const fleetCap = capped.find((c) => sub.places.some((p) => c.machine === p.machine && c.account === String(p.dir).replace(/^~\/\./, '')));
+    const worst = Math.max(-1, ...sub.windows.map((w) => w.pct));
+    // A limit stop counts until the time it names, else 12 hours, unless a newer status-line reading says otherwise.
+    const hit = sub.limitHit, lifts = hit && resetOf(hit);
+    const hitNow = hit && (!sub.limits || hit.at > sub.limits.at) && (lifts ? lifts > Date.now() : Date.now() - hit.at < 12 * 3600_000);
+    sub.cappedUntil = hitNow ? lifts : fleetCap ? fleetCap.until : null;
+    sub.capped = worst >= 100 || Boolean(hitNow) || Boolean(fleetCap);
+    sub.score = sub.capped ? 999 : worst < 0 ? 500 : worst; // unknown sits between a known one with room and a capped one
+  }
+  // Each session's share of its account's weekly figure, split by how much each used this week.
+  for (const sub of subs.values()) {
+    const week = sub.windows.find((w) => w.k === '7d')?.pct ?? null;
+    const total = sub.sessions.reduce((n, x) => n + (x.unitsWeek ?? 0), 0);
+    for (const x of sub.sessions) x.shareWeek = week != null && total > 0 && x.unitsWeek ? (week * x.unitsWeek) / total : null;
+  }
+  // Most room first.
+  return [...subs.values()].sort((a, b) => a.score - b.score || a.label.localeCompare(b.label));
+}
+
+/** Its limit windows, a window that has reset since it was read shown at 0. */
+function windows(sub) {
+  const L = sub.limits, out = [];
+  if (!L) return out;
+  const add = (k, pct, resetsSec) => {
+    if (typeof pct !== 'number') return;
+    const resetsAt = resetsSec ? resetsSec * 1000 : null, past = resetsAt && resetsAt < Date.now();
+    out.push({ k, pct: past ? 0 : pct, resetsAt: past ? null : resetsAt });
+  };
+  if (sub.engine === 'claude') { add('5h', L.five_hour?.used_percentage, L.five_hour?.resets_at); add('7d', L.seven_day?.used_percentage, L.seven_day?.resets_at); }
+  else for (const w of [L.primary, L.secondary]) if (w) add(w.window_minutes >= 10080 ? '7d' : `${Math.round((w.window_minutes ?? 300) / 60)}h`, w.used_percent, w.resets_at);
+  return out;
+}
+
+// ---------------------------------------------------------------- accounts
+let snap = null, subs = [], pickKey = store.get('account'), pickMachine = store.get('machine');
+const tally = (list) => h('span', { class: 'tally' }, ['needs-you', 'working', 'capped', 'ready'].map((st) => [st, list.filter((x) => x.live && x.state === st).length])
+  .filter(([, n]) => n).map(([st, n]) => h('span', { title: WORD[st] }, h('span', { class: `dot ${st}` }), n)));
+function renderAccounts() {
+  $('accts').replaceChildren(...subs.map((sub) => {
+    const room = sub.capped
+      ? h('span', { class: 'cap', text: sub.cappedUntil ? `capped ${until(sub.cappedUntil)}` : 'capped', title: sub.limitHit?.text ?? '' })
+      : sub.windows.length
+        ? sub.windows.map((w) => h('span', { title: w.resetsAt ? `resets in ${until(w.resetsAt)}` : '' },
+            h('i', { text: w.k }), h('span', { class: 'line' }, h('b', { class: level(w.pct), style: `width:${Math.min(100, w.pct)}%` })), `${Math.round(w.pct)}%`))
+        : h('span', { class: 'faint', text: '·', title: 'no reading yet' });
+    const where = sub.places.map((p) => p.machine).join(', ');
+    return h('div', { class: `acct${sub.key === pickKey ? ' on' : ''}`, title: [sub.email, sub.plan, where].filter(Boolean).join('\n'), onclick: () => pick(sub.key) },
+      h('span', { class: 'name', text: sub.label }), h('span', { class: 'room' }, room), tally(sub.sessions));
+  }));
+}
+function pick(key) { pickKey = key; store.set('account', key); renderHow(); $('prompt').focus(); }
+
+// ---------------------------------------------------------------- the prompt
+const isFleet = () => pickKey === 'fleet';
+function renderHow() {
+  if (!snap) return;
+  const machines = snap.machines.filter((m) => m.ok !== false);
+  const opts = [...subs.filter((s) => s.places.some((p) => p.loggedIn)).map((s) => [s.key, s.label]),
+                ...(machines.some((m) => m.fleet) ? [['fleet', 'fleet']] : [])];
+  if (!opts.some(([k]) => k === pickKey)) pickKey = subs.find((s) => !s.capped)?.key ?? opts[0]?.[0];
+  $('acct').replaceChildren(...opts.map(([k, l]) => h('option', { value: k, text: l, selected: k === pickKey })));
+  const sub = subs.find((s) => s.key === pickKey);
+  const where = isFleet() ? machines.filter((m) => m.fleet).map((m) => m.name) : (sub?.places ?? []).filter((p) => p.loggedIn).map((p) => p.machine);
+  if (!where.includes(pickMachine)) pickMachine = where[0];
+  $('mach').replaceChildren(...where.map((n) => h('option', { value: n, text: n, selected: n === pickMachine })));
+  $('cwd').hidden = isFleet();
+  $('model').hidden = $('effort').hidden = sub?.engine !== 'claude';
+  if (document.activeElement !== $('cwd')) $('cwd').value = store.get('cwd.' + pickMachine) ?? (machines.find((m) => m.name === pickMachine)?.local ? '~/projects' : '~/dev');
+  $('cwd').style.width = `${Math.max(8, $('cwd').value.length + 1)}ch`;
+  $('prompt').placeholder = isFleet() ? 'Issue number, or what it should do' : 'What should it do?';
+  renderAccounts();
+}
+$('acct').addEventListener('change', (e) => pick(e.target.value));
+$('mach').addEventListener('change', (e) => { pickMachine = e.target.value; store.set('machine', pickMachine); renderHow(); });
+$('cwd').addEventListener('input', (e) => { e.target.style.width = `${Math.max(8, e.target.value.length + 1)}ch`; });
+const grow = () => { const t = $('prompt'); t.style.height = 'auto'; t.style.height = `${t.scrollHeight}px`; };
+$('prompt').addEventListener('input', grow);
+$('prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); fire(); } });
+$('fire').addEventListener('click', fire);
+async function fire() {
+  const prompt = $('prompt').value.trim(), said = $('said');
+  if ($('fire').disabled) return;
+  if (!prompt) { $('prompt').focus(); return; }
+  const sub = subs.find((s) => s.key === pickKey), place = sub?.places.find((p) => p.machine === pickMachine);
+  const body = { machine: pickMachine, engine: isFleet() ? 'fleet' : sub.engine, profile: place?.profile ?? '', cwd: $('cwd').value, prompt,
+                 model: sub?.engine === 'claude' ? $('model').value : '', effort: sub?.engine === 'claude' ? $('effort').value : '' };
+  said.className = 'said'; said.textContent = '…'; $('fire').disabled = true;
+  store.set('machine', pickMachine); if (!isFleet()) store.set('cwd.' + pickMachine, body.cwd);
+  try {
+    const r = await api('/api/fleet/launch', body);
+    if (r.ok) { said.className = 'said ok'; said.textContent = `Started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500); }
+    else { said.className = 'said no'; said.textContent = r.error ?? 'Did not start'; }
+  } catch (e) { said.className = 'said no'; said.textContent = String(e.message); }
+  $('fire').disabled = false;
+}
+
+// ---------------------------------------------------------------- what a session said, set as text
+/** Markdown as agents write it, read into DOM nodes (never HTML): paragraphs, lists, headings, code, bold and links. */
+function inline(text) {
+  const out = [], re = /(`[^`\n]+`)|(\*\*(?:(?!\*\*).)+\*\*)|(\[([^\]\n]+)\]\(([^)\s]+)\))/g;
+  let at = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > at) out.push(text.slice(at, m.index));
+    if (m[1]) out.push(h('code', { text: m[1].slice(1, -1) }));
+    else if (m[2]) out.push(h('b', { text: m[2].slice(2, -2) }));
+    else out.push(/^https?:\/\//.test(m[5]) ? h('a', { href: m[5], target: '_blank', rel: 'noopener', text: m[4] }) : m[4]);
+    at = re.lastIndex;
+  }
+  if (at < text.length) out.push(text.slice(at));
+  return out;
+}
+function md(text) {
+  const blocks = [], lines = String(text).replace(/\r/g, '').split('\n');
+  for (let i = 0; i < lines.length;) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    if (/^\s*```/.test(l)) { const code = []; for (i++; i < lines.length && !/^\s*```/.test(lines[i]); i++) code.push(lines[i]); i++; blocks.push(h('pre', { text: code.join('\n') })); continue; }
+    if (/^\s*\|/.test(l)) { const rows = []; for (; i < lines.length && /^\s*\|/.test(lines[i]); i++) if (!/^\s*\|[\s:|-]+\|\s*$/.test(lines[i])) rows.push(lines[i].trim().replace(/\*\*|`/g, '')); blocks.push(h('pre', { text: rows.join('\n') })); continue; }
+    if (/^#{1,6}\s/.test(l)) { blocks.push(h('p', { class: 'hd' }, inline(l.replace(/^#+\s*/, '')))); i++; continue; }
+    const bullet = /^\s*([-*•]|\d+[.)])\s+/;
+    if (bullet.test(l)) {
+      const ordered = /^\s*\d/.test(l), items = [];
+      for (; i < lines.length && bullet.test(lines[i]); i++) items.push(h('li', {}, inline(lines[i].replace(bullet, ''))));
+      blocks.push(h(ordered ? 'ol' : 'ul', {}, items)); continue;
+    }
+    const para = [];
+    for (; i < lines.length && lines[i].trim() && !bullet.test(lines[i]) && !/^#{1,6}\s|^\s*```|^\s*\|/.test(lines[i]); i++) para.push(lines[i].trim());
+    blocks.push(h('p', {}, inline(para.join(' '))));
+  }
+  return blocks;
+}
+
+// ---------------------------------------------------------------- TEST, to try it yourself
+/** An epic's TEST site in one browser window of its own beside the panel, reused each time. (TEST won't load inside the
+ *  page: it sends X-Frame-Options: DENY.) */
+const openTest = (url) => { const w = Math.min(1240, screen.availWidth - 420); window.open(url, 'fleet-test', `popup=yes,width=${w},height=${screen.availHeight},left=${screen.availWidth - w},top=0`)?.focus(); };
+const testOf = (x) => (snap.epics ?? []).find((e) => e.name === x.epic)?.test ?? null;
+
+// ---------------------------------------------------------------- machines and their sessions
+function vitals(m) {
+  const st = m.status;
+  if (!st) return h('span', { class: 'vitals' });
+  const v = (k, val, cls, title) => (val == null ? null : h('span', { class: cls ?? '', title: title ?? '' }, h('i', { text: k }), val));
+  return h('span', { class: 'vitals' },
+    v('dev', st.dev.length, null, st.dev.map((d) => `:${d.port}  ${d.cwd ?? ''}`).join('\n')),
+    v('stacks', st.stacks.length, null, st.stacks.join('\n')),
+    v('containers', st.containers),
+    v('load', `${Math.round((100 * st.load) / st.cpus)}%`, level((100 * st.load) / st.cpus), `${st.load} on ${st.cpus} cores`),
+    v('mem', st.memPct != null ? `${st.memPct}%` : null, level(st.memPct ?? 0)),
+    v('disk', st.diskPct != null ? `${st.diskPct}%` : null, level(st.diskPct ?? 0)));
+}
+/** The command that opens a background Claude session where it runs. */
+function attachCommand(x) {
+  if (x.engine !== 'claude' || !/^[0-9a-f]{8}$/.test(x.id ?? '')) return null;
+  const env = x.profile === 'default' ? '' : `CLAUDE_CONFIG_DIR=${String(x.dir).replace(/^~/, x.local || !x.user ? '~' : `/home/${x.user}`)} `;
+  if (x.local) return `${env}claude attach ${x.id}`;
+  return `ssh -t ${x.ssh} "${x.user ? `sudo -u ${x.user} -H ` : ''}bash -lc '${env}claude attach ${x.id}'"`;
+}
+const keyOf = (x) => `${x.machine}:${x.sessionId ?? x.id ?? x.pid}`;
+
+// ---------------------------------------------------------------- the session open on the right
+// One session at a time, full height on the right: its conversation scrolls, the message box stays at the bottom. The
+// panel's parts are built once and updated in place, so a refresh never takes the caret or a half-typed message.
+const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, wide: new Set(), timer: null };
+const drafts = new Map(); // what you had typed to each session, kept when you switch away
+let everything = [];
+const current = () => everything.find((x) => keyOf(x) === pane.key) ?? null;
+function select(x) {
+  const key = keyOf(x);
+  if (pane.key === key) return deselect();
+  if (pane.key) drafts.set(pane.key, $('p-reply').value);
+  Object.assign(pane, { key, items: null, error: null, said: null, sending: false, arm: false, wide: new Set() });
+  $('p-reply').value = drafts.get(key) ?? '';
+  clearInterval(pane.timer);
+  pane.timer = setInterval(() => { if (!document.hidden) peek(); }, 4000);
+  document.body.classList.add('has-pane');
+  renderMachines(); renderPane(true); peek();
+}
+function deselect() {
+  if (pane.key) drafts.set(pane.key, $('p-reply').value);
+  clearInterval(pane.timer);
+  pane.key = null;
+  document.body.classList.remove('has-pane');
+  renderMachines(); renderPane();
+}
+async function peek() {
+  const x = current(), key = pane.key;
+  if (!x?.sessionId) return renderPane();
+  try {
+    const r = await api('/api/fleet/peek', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId });
+    if (pane.key !== key) return; // switched away while it read
+    // Keep what you just sent on show until the transcript has it.
+    const sent = (pane.items ?? []).filter((it) => it.pending && !(r.items ?? []).some((n) => n.kind === 'ask' && n.text.includes(it.text.slice(0, 80))));
+    Object.assign(pane, r.ok ? { items: [...r.items, ...sent], error: null } : { error: r.error });
+  } catch (e) { if (pane.key === key) pane.error = String(e.message); }
+  renderPane();
+}
+/** Its conversation as you'd read it: what you asked and what it said, set as text, with each run of steps in between
+ *  folded to its last step and a count. */
+function conversation(items) {
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.kind === 'step') {
+      let j = i;
+      while (j + 1 < items.length && items[j + 1].kind === 'step') j++;
+      const run = items.slice(i, j + 1);
+      out.push(h('div', { class: 'it step', title: run.map((r) => r.text).join('\n') }, run.at(-1).text, run.length > 1 ? h('span', { class: 'more', text: `  +${run.length - 1}` }) : null));
+      i = j;
+      continue;
+    }
+    const id = `${it.at}:${it.text.length}`, long = it.kind === 'said' && it.text.length > 900 && !pane.wide.has(id);
+    out.push(h('div', { class: `it ${it.kind}${long ? ' long' : ''}${it.pending ? ' pending' : ''}`, title: it.at ? new Date(it.at).toLocaleString() : '',
+      onclick: long ? () => { pane.wide.add(id); renderPane(); } : null }, md(it.text)));
+  }
+  return out;
+}
+async function sendText(text) {
+  const x = current();
+  if (!x || !text.trim() || pane.sending) return;
+  pane.sending = true; pane.said = { cls: 'note', text: 'sending…' };
+  pane.items = [...(pane.items ?? []), { kind: 'ask', text: text.trim(), at: Date.now(), pending: true }];
+  renderPane(true);
+  const r = await api('/api/fleet/send', { machine: x.machine, profile: x.profile, sessionId: x.sessionId, text: text.trim() }).catch((err) => ({ ok: false, error: String(err.message) }));
+  pane.sending = false;
+  pane.said = r.ok ? (r.respawned ? { cls: 'ok', text: `restarted on ${r.respawned}, sent` } : null) : { cls: 'no', text: r.error };
+  if (!r.ok) { pane.items = (pane.items ?? []).filter((it) => !it.pending); if (!$('p-reply').value) $('p-reply').value = text; }
+  renderPane(true); peek();
+}
+function renderPane(toEnd = false) {
+  const aside = $('pane'), x = current();
+  aside.hidden = !pane.key;
+  if (!pane.key) return;
+  if (!x) { $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' })); $('p-body').replaceChildren(); $('p-foot').hidden = true; return; }
+  const c = x.context, cmd = attachCommand(x);
+  // One control: close an open session, archive a closed one. A second click does it.
+  const verb = x.live ? (x.via === 'app' || !x.sessionId ? null : 'close') : (x.sessionId || x.id ? 'archive' : null);
+  const act = verb && h('button', { class: `act${pane.arm ? ' armed' : ''}`, text: pane.arm ? `${verb}?` : verb,
+    onclick: async () => {
+      if (!pane.arm) { pane.arm = true; renderPane(); setTimeout(() => { if (pane.arm) { pane.arm = false; renderPane(); } }, 4000); return; }
+      pane.arm = false; pane.said = { cls: 'note', text: '…' }; renderPane();
+      const r = await api(`/api/fleet/${verb}`, { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id }).catch((err) => ({ ok: false, error: String(err.message) }));
+      pane.said = r.ok ? { cls: 'ok', text: verb === 'archive' ? 'archived' : 'closed' } : { cls: 'no', text: r.error };
+      renderPane(); await load();
+      if (r.ok && verb === 'archive') deselect();
+    } });
+  const test = testOf(x) ? h('button', { class: 'act test', text: 'TEST ↗', title: testOf(x), onclick: () => openTest(testOf(x)) }) : null;
+  $('p-head').replaceChildren(
+    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}` }), h('div', { class: 'p-title', text: x.title ?? x.name ?? x.engine, title: x.name ?? '' }),
+      h('button', { class: 'p-x', text: '×', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect })),
+    h('div', { class: 'p-meta' }, [WORD[x.state], x.stage, x.epic, ago(x.lastAt ?? x.since ?? x.startedAt) && `${ago(x.lastAt ?? x.since ?? x.startedAt)} ago`].filter(Boolean).join('   ')),
+    h('div', { class: 'p-meta', title: [x.name, x.cwd, x.model].filter(Boolean).join('\n') },
+      [x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% context`, x.shareWeek != null && `${Math.round(x.shareWeek)}% of the week`].filter(Boolean).join('   ')),
+    h('div', { class: 'p-acts' }, act, test,
+      x.web ? h('a', { class: 'act', href: x.web, target: '_blank', rel: 'noopener', text: 'claude.ai ↗' }) : null,
+      cmd ? h('button', { class: 'act', text: 'copy attach', title: cmd, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null));
+  // The conversation: stay at the bottom if you were there; leave your place if you had scrolled up to read.
+  const body = $('p-body'), atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+  body.replaceChildren(...(pane.error ? [h('div', { class: 'it said', text: pane.error })] : pane.items ? conversation(pane.items.slice(-60)) : x.sessionId ? [h('div', { class: 'it step', text: 'reading…' })] : []));
+  if (toEnd || atEnd) body.scrollTop = body.scrollHeight;
+  // The message box: for a session that takes messages here; otherwise one line on how to make it.
+  const talk = x.live && (x.via === 'background' || x.via === 'remote');
+  $('p-foot').hidden = false;
+  $('p-reply').hidden = !talk;
+  $('p-reply').disabled = pane.sending;
+  const effort = talk && x.engine === 'claude' && x.web
+    ? h('select', { class: 'effort', title: 'its effort, from its next reply', 'aria-label': 'Effort', onchange: (e) => sendText(`/effort ${e.target.value}`) },
+        ['low', 'medium', 'high', 'xhigh', 'max'].map((v) => h('option', { value: v, text: v, selected: v === x.effort })))
+    : null;
+  const how = !x.live ? null : !talk ? (x.via === 'app' ? 'Type /rc in the Claude app once to talk to it here' : x.via === 'terminal' ? 'Type /rc in its terminal once to talk to it here' : null) : null;
+  $('p-tools').replaceChildren(...[pane.said ? h('span', { class: pane.said.cls, text: pane.said.text }) : null, how ? h('span', { class: 'note', text: how }) : null, h('span', { class: 'sp' }), effort].filter(Boolean));
+  growReply();
+}
+const growReply = () => { const t = $('p-reply'); t.style.height = 'auto'; t.style.height = `${Math.min(t.scrollHeight, 240)}px`; };
+$('p-reply').addEventListener('input', growReply);
+$('p-reply').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); const t = $('p-reply').value; $('p-reply').value = ''; growReply(); sendText(t); }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !pane.key) return;
+  if (document.activeElement === $('p-reply') && $('p-reply').value) { $('p-reply').blur(); return; }
+  deselect();
+});
+
+function row(x) {
+  const c = x.context, on = pane.key === keyOf(x);
+  const what = x.state === 'working' ? (x.doing ?? x.said ?? '') : x.state === 'needs-you' ? (x.doing ?? x.said ?? '') : '';
+  return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
+      onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); } },
+    h('span', { class: `dot ${x.state}` }),
+    h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine }),
+    h('span', { class: `stage ${x.stage ?? ''}`, text: x.stage ?? '' }),
+    h('span', { class: 'at', text: x.machine }),
+    h('span', { class: 'who', text: x.sub ?? '' }),
+    h('span', { class: 'eff', text: x.effort ?? '', title: 'effort' }),
+    h('span', { class: `ctx ${c ? level(c.pct) : ''}`, text: c ? `${c.guessed ? '≈' : ''}${Math.round(c.pct)}%` : '', title: 'context used' }),
+    h('span', { class: `use ${x.shareWeek != null ? level(x.shareWeek * 3) : ''}`, text: x.shareWeek != null && x.shareWeek >= 0.5 ? `${Math.round(x.shareWeek)}%` : '',
+      title: x.shareWeek != null ? `about ${Math.round(x.shareWeek)}% of ${x.sub}'s weekly limit` : '' }),
+    h('span', { class: 'what', text: what }));
+}
+let armedEpic = null;
+function renderMachines() {
+  const all = subs.flatMap((s) => s.sessions);
+  // Everything else running: fleet workers and headless runs no roster lists.
+  const extra = snap.machines.flatMap((m) => [
+    ...(m.workers ?? []).map((w) => ({ engine: 'fleet', state: 'working', live: true, title: `${w.engine} ${w.task ?? ''}`.trim(), sub: 'fleet', since: w.since, cwd: w.cwd, machine: m.name, pid: w.pid })),
+    ...(m.fleet?.dispatches ?? []).filter((d) => d.alive && !(m.workers ?? []).some((w) => w.pid === d.pid)).map((d) => ({ engine: 'fleet', state: 'working', live: true, title: d.key, sub: 'fleet', since: d.logAt, machine: m.name, pid: d.pid, doing: d.last })),
+    ...(m.others ?? []).map((o) => ({ engine: o.engine, state: 'working', live: true, title: `${o.engine} ${o.kind}`, sub: o.profile ?? '', since: o.since, cwd: o.cwd, machine: m.name, pid: o.pid, doing: o.args })),
+  ]);
+  everything = [...all, ...extra];
+  // One line per machine: how it is doing, and what runs on it.
+  $('mlines').replaceChildren(...snap.machines.map((m) => {
+    const bridges = (m.accounts ?? []).flatMap((a) => a.bridges ?? []);
+    return h('div', { class: 'mline', title: bridges.length ? `Remote Control\n${bridges.map((b) => `${b.name}  ${b.sessions}`).join('\n')}` : '' },
+      h('span', { class: 'nm', text: m.name }), m.ok === false ? h('span', { class: 'vitals hi', text: m.error ?? 'no answer' }) : vitals(m),
+      tally(everything.filter((x) => x.machine === m.name)));
+  }));
+  // Sessions by epic, in the order fleet.json lists them; open ones first, then closed, newest first within each.
+  const names = [...(snap.epics ?? []).map((e) => e.name), 'Other'];
+  const epicOf = (x) => (names.includes(x.epic) ? x.epic : 'Other');
+  const blocks = names.map((name) => {
+    const shown = everything.filter((x) => epicOf(x) === name).sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || ((b.lastAt ?? b.startedAt ?? b.since ?? 0) - (a.lastAt ?? a.startedAt ?? a.since ?? 0)));
+    if (!shown.length) return null;
+    const test = (snap.epics ?? []).find((e) => e.name === name)?.test;
+    const closed = shown.filter((x) => !x.live && (x.sessionId || x.id));
+    const arm = armedEpic === name;
+    const sweep = closed.length ? h('button', { class: `sweep${arm ? ' armed' : ''}`, text: arm ? `archive ${closed.length}?` : `archive ${closed.length} closed`,
+      onclick: async () => {
+        if (!arm) { armedEpic = name; renderMachines(); setTimeout(() => { if (armedEpic === name) { armedEpic = null; renderMachines(); } }, 4000); return; }
+        armedEpic = null;
+        await api('/api/fleet/archive-all', { sessions: closed.map((x) => ({ machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id })) }).catch(() => {});
+        load();
+      } }) : null;
+    return h('section', { class: 'epic' },
+      h('header', {}, h('h2', { text: name }), test ? h('a', { class: 'test', href: test, text: 'TEST ↗', title: test, onclick: (e) => { e.preventDefault(); openTest(test); } }) : null, sweep, tally(shown)),
+      shown.map(row));
+  }).filter(Boolean);
+  $('machines').replaceChildren(...blocks);
+}
+
+// ---------------------------------------------------------------- load
+let loading = false;
+async function load() {
+  if (loading) return;
+  loading = true; $('refresh').style.opacity = .35;
+  try {
+    snap = await api('/api/fleet');
+    subs = accounts(snap);
+    const bad = snap.machines.filter((m) => m.ok === false);
+    $('err').hidden = !bad.length;
+    $('err').textContent = bad.map((m) => `${m.name}: ${m.error ?? 'no answer'}`).join('\n');
+    renderHow(); renderMachines(); renderPane();
+    $('refresh').title = `Read ${new Date(snap.at).toLocaleTimeString()}`;
+  } catch (e) { if (e.message !== 'reloading') { $('err').hidden = false; $('err').textContent = String(e.message); } }
+  loading = false; $('refresh').style.opacity = '';
+}
+$('refresh').addEventListener('click', load);
+load();
+setInterval(() => { if (!document.hidden) load(); }, 20_000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>

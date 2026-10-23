@@ -27,6 +27,7 @@ import { createHubOrders } from './hub-orders.mjs';
 import { admit, takeBuild } from './web-orders.mjs';
 import { workerOf, markStarted, rolledBack, checkForUpdate, recordCheck, lastCheck } from './update.mjs';
 import { checkClone, updateClone, appFor } from './clone-update.mjs';
+import { createFleet } from './fleet/fleet.mjs';
 
 // `node server.mjs <command>` runs the CLI (cli.mjs) and never starts the server.
 if (process.argv.length > 2) { const { main } = await import('./cli.mjs'); process.exit(await main(process.argv.slice(2))); }
@@ -71,6 +72,7 @@ const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ORIGINS = new Set([...HOSTS].map((h) => `http://${h}`));
 // Read per load, so a UI edit shows on refresh without a restart.
 const page = () => fs.readFileSync(new URL('./public/index.html', import.meta.url), 'utf8');
+const fleetPage = () => fs.readFileSync(new URL('./public/fleet.html', import.meta.url), 'utf8');
 
 /** sessionId → session record (roster fields + what the hooks told us). */
 const sessions = new Map();
@@ -98,6 +100,8 @@ const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !
 const HOME = os.homedir();
 // ACP_PREFS gives a second panel (another ACP_PORT) a profile choice of its own.
 const PREFS = prefsPath();
+// Every machine's agents and accounts in one view (fleet/); its machines are listed in fleet.json beside prefs.json.
+const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
 const HOOK_URL = `127.0.0.1:${PORT}/hook/`;
 function listProfiles() {
   let names = [];
@@ -1697,10 +1701,15 @@ async function handle(req, res) {
     return send(res, 404, '');
   }
 
-  // The same page twice: / is the board, /world opens straight on the universe (the page reads ACP_VIEW).
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/world')) {
-    const view = url.pathname === '/' ? 'board' : 'world';
+  // The same page twice: /board is the board, /world opens straight on the universe (the page reads ACP_VIEW).
+  if (req.method === 'GET' && (url.pathname === '/board' || url.pathname === '/world')) {
+    const view = url.pathname === '/board' ? 'board' : 'world';
     return send(res, 200, page().replace('__ACP_TOKEN__', TOKEN).replace('__ACP_VIEW__', view), 'text/html; charset=utf-8');
+  }
+
+  // Fleet, every machine's sessions on one screen, is the home page; the board is /board.
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/fleet')) {
+    return send(res, 200, fleetPage().replace('__ACP_TOKEN__', TOKEN), 'text/html; charset=utf-8');
   }
 
   if (req.method === 'GET' && url.pathname === '/world.js') {
@@ -1756,7 +1765,10 @@ async function handle(req, res) {
                       '/api/trust-terminal': openTrustTerminal,
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
-                      '/api/update': updateApp };
+                      '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),
+                      '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/send': (b) => fleet.send(b),
+                      '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
+                      '/api/fleet/archive-all': (b) => fleet.archiveAll(b) };
     if (Object.hasOwn(ACTIONS, url.pathname)) {
       let r;
       try { r = await ACTIONS[url.pathname](body); } catch (err) { r = { ok: false, error: String(err?.message ?? err).slice(0, 300) }; }
