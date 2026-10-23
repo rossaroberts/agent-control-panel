@@ -8,157 +8,185 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
 /* After iA Writer: paper, ink, one typeface, one blue. Structure is whitespace and tone, never boxes; words only where a
-   glyph can't say it. */
+   glyph can't say it. Every text colour clears 4.5:1 on paper and on the selection tint; --quiet is for drawn marks only. */
 :root {
-  --paper: #f6f7f7; --ink: #1e2124; --grey: #7b8287; --faint: #b9bec2; --rule: #e3e6e8;
-  --blue: #1aa3e0; --orange: #e5832e; --red: #d4574b; --green: #3f9d6b;
+  --cols: 10px minmax(220px, 380px) 84px 70px 70px 60px 64px 56px minmax(0, 1fr);
+  --cols-mid: 10px minmax(0, 1fr) 84px 70px 70px 64px 56px;
+  --cols-narrow: 10px minmax(0, 1fr) 84px 64px;
+  --paper: #f6f7f7; --tint: #eceeef; --ink: #1e2124; --grey: #5f666b; --quiet: #858c91; --rule: #e2e5e7;
+  --blue: #0a72a3; --orange: #a5560f; --red: #bf3f33; --green: #2b7d52;
   --font: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --pane: min(46vw, 820px);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --paper: #191b1d; --ink: #d9dcde; --grey: #868d92; --faint: #50565a; --rule: #2c3033;
-          --blue: #2fb2ec; --orange: #ee9442; --red: #e06a5e; --green: #57b483; color-scheme: dark; }
+  :root { --paper: #191b1d; --tint: #232729; --ink: #dcdfe1; --grey: #9ba2a7; --quiet: #6c7277; --rule: #2c3033;
+          --blue: #3fb6ee; --orange: #ef9a4c; --red: #ec7468; --green: #5fbd8b; color-scheme: dark; }
 }
 * { box-sizing: border-box; }
 html { background: var(--paper); }
-body { margin: 0; color: var(--ink); font: 15px/1.7 var(--font); -webkit-font-smoothing: antialiased; }
-main { width: min(1500px, 100% - 64px); margin: 0 auto; padding: 48px 0 120px; }
+body { margin: 0; color: var(--ink); font: 15px/1.7 var(--font); font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+::selection { background: color-mix(in srgb, var(--blue) 24%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+main { width: min(1500px, 100% - 64px); margin: 0 auto; padding: 44px 0 120px; container-type: inline-size; }
+body.has-pane main { width: calc(100% - var(--pane) - 64px); margin-left: 32px; }
 button, input, select, textarea { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; }
 button, select { cursor: pointer; }
 a { color: var(--blue); text-decoration: none; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 2px; }
-.faint { color: var(--faint); }
+svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; }
 
-.top { display: flex; align-items: baseline; gap: 22px; margin-bottom: 40px; }
-.top h1 { font-size: 15px; font-weight: 500; margin: 0; flex: 1; }
-.top a, .top button { color: var(--faint); }
+/* top line */
+.top { display: flex; align-items: center; gap: 22px; margin-bottom: 36px; }
+.top h1 { font-size: 15px; font-weight: 500; margin: 0; flex: 1; letter-spacing: .01em; }
+.top a, .top button { color: var(--grey); display: inline-flex; align-items: center; }
 .top a:hover, .top button:hover { color: var(--ink); }
-.err { color: var(--red); font-size: 13px; margin: -20px 0 24px; white-space: pre-line; }
+.top button.busy svg { animation: turn 900ms linear infinite; }
+@keyframes turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .top button.busy svg { animation: none; opacity: .5; } }
+.err { color: var(--red); font-size: 13px; margin: -16px 0 22px; white-space: pre-line; }
 
-/* accounts: one line each, the chosen one marked in blue */
-.acct { display: grid; grid-template-columns: 8ch 1fr auto; gap: 0 18px; align-items: baseline; padding: 2px 0 2px 14px; margin-left: -16px; border-left: 2px solid transparent; cursor: pointer; }
+/* accounts: one line each; the one new agents go to sits on the tint */
+.acct { display: grid; grid-template-columns: 8ch 1fr auto; gap: 0 18px; align-items: baseline; padding: 1px 10px; margin: 0 -10px; border-radius: 4px; cursor: pointer; }
 .acct .name { color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acct:hover .name, .acct.on .name { color: var(--ink); }
-.acct.on { border-left-color: var(--blue); }
-.room { display: flex; gap: 24px; align-items: baseline; font-size: 13px; color: var(--grey); white-space: nowrap; }
-.room i { font-style: normal; color: var(--faint); margin-right: 8px; }
+.acct.on { background: var(--tint); }
+.room { display: flex; gap: 24px; align-items: baseline; font-size: 13px; color: var(--grey); white-space: nowrap; min-width: 0; }
+.room i { font-style: normal; margin-right: 8px; }
 .line { position: relative; display: inline-block; width: 64px; height: 2px; background: var(--rule); top: -3px; margin-right: 8px; }
 .line b { position: absolute; inset: 0 auto 0 0; background: var(--grey); }
 .line b.mid { background: var(--orange); } .line b.hi { background: var(--red); }
 .cap { color: var(--red); }
-.tally { display: flex; gap: 12px; font-size: 13px; color: var(--faint); }
+.tally { display: flex; gap: 12px; font-size: 13px; color: var(--grey); white-space: nowrap; }
 .tally span { display: inline-flex; align-items: baseline; gap: 5px; }
 
+/* machines: one line each */
+.machines { margin-top: 22px; }
+.mline { display: grid; grid-template-columns: 8ch 1fr auto; gap: 0 18px; align-items: baseline; }
+.mline .nm { color: var(--grey); }
+.vitals { display: flex; flex-wrap: wrap; gap: 0 18px; font-size: 13px; color: var(--ink); min-width: 0; }
+.vitals span { white-space: nowrap; }
+.vitals i { font-style: normal; color: var(--grey); margin-right: 6px; }
+.vitals .hi { color: var(--red); } .vitals .mid { color: var(--orange); }
+
 /* the prompt: the one large thing */
-.write { margin: 48px 0 56px; }
+.write { margin: 44px 0 32px; }
 .write textarea { display: block; width: 100%; font-size: 22px; line-height: 1.5; resize: none; overflow: hidden; caret-color: var(--blue); }
-.write textarea::placeholder { color: var(--faint); }
+.write textarea::placeholder { color: var(--grey); }
 .how { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 22px; margin-top: 12px; font-size: 13px; }
-.how select, .how input { color: var(--grey); border-bottom: 1px dotted transparent; }
+.how select, .how input { color: var(--grey); border-bottom: 1px dotted var(--quiet); padding-bottom: 1px; }
 .how select { appearance: none; -webkit-appearance: none; }
-.how select:hover, .how input:hover, .how input:focus { color: var(--ink); border-bottom-color: var(--faint); outline: none; }
+.how select:hover, .how input:hover, .how input:focus { color: var(--ink); border-bottom-color: var(--ink); outline: none; }
 .how .sp { flex: 1; }
-.fire { color: var(--blue); }
-.fire:disabled { color: var(--faint); cursor: default; }
+.fire { color: var(--blue); font-weight: 500; }
+.fire:disabled { color: var(--grey); cursor: default; }
 .said { font-size: 13px; margin-top: 8px; min-height: 1.7em; color: var(--grey); }
 .said.ok { color: var(--green); } .said.no { color: var(--red); }
 
-/* machines: one line each */
-.machines { margin-top: 26px; }
-.mline { display: grid; grid-template-columns: 8ch 1fr auto; gap: 0 18px; align-items: baseline; }
-.mline .nm { color: var(--grey); }
-.mline .tally { justify-content: flex-end; }
-
-/* epics */
-.epic { margin-top: 40px; }
-.epic header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 20px; margin-bottom: 6px; }
-.epic h2 { font: inherit; font-weight: 500; margin: 0; }
-.epic header .test { font-size: 13px; }
-.epic header .tally { margin-left: auto; }
-.epic header .sweep { font-size: 13px; color: var(--faint); }
-.epic header .sweep:hover { color: var(--ink); } .epic header .sweep.armed { color: var(--red); }
-.vitals { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px; color: var(--grey); }
-.vitals i { font-style: normal; color: var(--faint); margin-right: 6px; }
-.vitals .hi { color: var(--red); } .vitals .mid { color: var(--orange); }
-
-/* sessions */
-.s { display: grid; grid-template-columns: 10px minmax(0, 36ch) 9ch 7ch 6ch 6ch 4ch 4ch minmax(0, 1fr); gap: 0 18px; align-items: baseline; padding: 1px 0; cursor: pointer; }
-.s .use { color: var(--faint); font-size: 13px; text-align: right; }
-.s .use.mid { color: var(--orange); } .s .use.hi { color: var(--red); }
-.s .at { font-size: 13px; color: var(--faint); white-space: nowrap; overflow: hidden; }
-.s .eff { font-size: 13px; color: var(--faint); white-space: nowrap; }
-.s .stage { font-size: 13px; color: var(--grey); white-space: nowrap; }
-.s .stage.testing { color: var(--orange); } .s .stage.promoting { color: var(--green); } .s .stage.deploying { color: var(--red); }
-.s:hover .ttl, .s.open .ttl { color: var(--ink); }
+/* sessions: one grid for the column names and every row, dropping columns as the list narrows */
+.s, .c { display: grid; grid-template-columns: var(--cols); gap: 0 18px; align-items: baseline; }
+.s { padding: 2px 10px; margin: 0 -10px; border-radius: 4px; cursor: pointer; }
+.s:hover { background: color-mix(in srgb, var(--tint) 60%, transparent); }
+.s.open { background: var(--tint); }
+.s .ttl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s .stage, .s .at, .s .who, .s .eff, .s .ctx, .s .use, .s .what { font-size: 13px; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s .ctx, .s .use { text-align: right; }
+.s .ctx .line { width: 44px; margin-right: 0; }
+.s .stage.testing, .s .ctx.mid, .s .use.mid { color: var(--orange); }
+.s .stage.promoting { color: var(--green); }
+.s .stage.deploying, .s .ctx.hi, .s .use.hi { color: var(--red); }
 .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; position: relative; top: -1px; }
 .dot.working { background: var(--blue); }
 .dot.needs-you { background: var(--orange); }
 .dot.capped { background: var(--red); }
-.dot.ready { box-shadow: inset 0 0 0 1.5px var(--grey); }
-.dot.closed { background: var(--faint); }
-.s .ttl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.s .who { color: var(--faint); font-size: 13px; white-space: nowrap; overflow: hidden; }
-.s .ctx { color: var(--faint); font-size: 13px; text-align: right; }
-.s .ctx.mid { color: var(--orange); } .s .ctx.hi { color: var(--red); }
-.s .what { color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.dot.ready { box-shadow: inset 0 0 0 1.5px var(--quiet); }
+.dot.closed { background: var(--quiet); opacity: .7; }
 
-/* a closed session: still listed, quietly */
-.s.gone .ttl, .s.gone .stage, .s.gone .ctx { color: var(--faint); }
+/* epics */
+.epic { margin-top: 34px; }
+main > #machines > .epic:first-child { margin-top: 0; }
+.epic header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 20px; margin-bottom: 4px; }
+.epic h2 { font: inherit; font-weight: 500; margin: 0; }
+.epic header .test { font-size: 13px; display: inline-flex; align-items: baseline; gap: 4px; }
+.epic header .tally { margin-left: auto; }
+
+/* closed sessions: under their epic's open ones, smaller and closer */
+.shut { margin-top: 10px; }
+.shut .bar { display: flex; align-items: baseline; gap: 16px; font-size: 13px; color: var(--grey); padding: 6px 0 2px; border-top: 1px solid var(--rule); }
+.shut .bar button { color: var(--grey); } .shut .bar button:hover { color: var(--ink); } .shut .bar button.armed { color: var(--red); }
+.c { padding: 0 10px; margin: 0 -10px; border-radius: 4px; font-size: 13px; line-height: 1.6; color: var(--grey); cursor: pointer; }
+.c:hover { background: color-mix(in srgb, var(--tint) 60%, transparent); color: var(--ink); }
+.c.open { background: var(--tint); color: var(--ink); }
+.c span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c .ctx { text-align: right; }
+.reading { color: var(--grey); font-size: 13px; margin-top: 34px; }
+
+@container (max-width: 1080px) {
+  .s, .c { grid-template-columns: var(--cols-mid); }
+  .eff, .what { display: none; }
+}
+@container (max-width: 760px) {
+  .s, .c { grid-template-columns: var(--cols-narrow); }
+  .at, .who, .use { display: none; }
+  .s .ttl { white-space: normal; }
+  .mline { grid-template-columns: 8ch 1fr; } .mline .tally, .acct .tally { display: none; }
+  .acct { grid-template-columns: 8ch 1fr; }
+}
 
 /* the session open on the right: full height, its conversation scrolling, the message box at the bottom */
-:root { --pane: min(46vw, 820px); }
-body.has-pane main { width: calc(100% - var(--pane) - 64px); margin-left: 32px; }
-.s.open .ttl { color: var(--ink); }
-.s.open { box-shadow: inset 2px 0 0 var(--blue); }
 #pane { position: fixed; top: 0; right: 0; bottom: 0; width: var(--pane); display: flex; flex-direction: column; background: var(--paper); border-left: 1px solid var(--rule); z-index: 5; }
 #pane[hidden] { display: none; }
-#p-head { padding: 22px 28px 12px; border-bottom: 1px solid var(--rule); }
+#p-head { padding: 22px 28px 14px; border-bottom: 1px solid var(--rule); }
 .p-top { display: flex; align-items: baseline; gap: 12px; }
-.p-title { font-size: 18px; font-weight: 500; flex: 1; }
-.p-x { color: var(--faint); font-size: 20px; line-height: 1; } .p-x:hover { color: var(--ink); }
-.p-meta { font-size: 13px; color: var(--grey); margin-top: 4px; white-space: pre-wrap; }
-.p-acts { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 10px; font-size: 13px; }
-.p-acts .act { color: var(--faint); } .p-acts .act:hover { color: var(--ink); }
+.p-title { font-size: 18px; font-weight: 500; flex: 1; line-height: 1.4; }
+.p-x { color: var(--grey); align-self: center; } .p-x:hover { color: var(--ink); }
+.p-meta { font-size: 13px; color: var(--grey); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 0 18px; }
+.p-meta span { white-space: nowrap; }
+.p-acts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px; margin-top: 10px; font-size: 13px; }
+.p-acts .act { color: var(--grey); display: inline-flex; align-items: baseline; gap: 4px; } .p-acts .act:hover { color: var(--ink); }
 .p-acts .act.armed { color: var(--red); } .p-acts .act.test, .p-acts a.act { color: var(--blue); }
-#p-body { flex: 1; overflow-y: auto; padding: 16px 28px 24px; font-size: 14px; }
-#p-body .it { margin: 6px 0; overflow-wrap: anywhere; }
-#p-body .it.ask { color: var(--ink); margin-top: 18px; }
+#p-body { flex: 1; overflow-y: auto; padding: 16px 28px 28px; font-size: 15px; line-height: 1.65; }
+#p-body .it { margin: 6px 0; overflow-wrap: anywhere; max-width: 78ch; }
+#p-body .it.ask { color: var(--ink); margin-top: 22px; font-weight: 500; }
 #p-body .it.ask::before { content: '› '; color: var(--blue); }
-#p-body .it.ask.pending { opacity: .55; }
-#p-body .it.said { color: var(--grey); }
+#p-body .it.ask.pending { color: var(--grey); }
+#p-body .it.said { color: var(--ink); opacity: .86; }
 #p-body .it.said.long { max-height: 15em; overflow: hidden; cursor: pointer; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
-#p-body .it p { margin: 0 0 .55em; } #p-body .it p:last-child { margin-bottom: 0; }
-#p-body .it ul, #p-body .it ol { margin: 0 0 .55em; padding-left: 2.2ch; }
-#p-body .it b { color: var(--ink); font-weight: 500; }
-#p-body .it code { background: var(--rule); border-radius: 3px; padding: 0 3px; font-size: 13px; }
-#p-body .it pre { margin: 0 0 .55em; white-space: pre; overflow-x: auto; font-size: 12px; color: var(--grey); }
-#p-body .it .hd { color: var(--ink); font-weight: 500; }
-#p-body .it.step { color: var(--faint); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 2px 0; }
+#p-body .all { color: var(--blue); font-size: 13px; margin: 2px 0 8px; }
+#p-body .it p { margin: 0 0 .6em; } #p-body .it p:last-child { margin-bottom: 0; }
+#p-body .it ul, #p-body .it ol { margin: 0 0 .6em; padding-left: 2.4ch; }
+#p-body .it li { margin: .15em 0; }
+#p-body .it b { font-weight: 500; }
+#p-body .it code { background: var(--tint); border-radius: 3px; padding: 0 4px; font-size: 13px; }
+#p-body .it pre { margin: 0 0 .6em; padding: 8px 10px; background: var(--tint); border-radius: 4px; white-space: pre; overflow-x: auto; font-size: 13px; }
+#p-body .it .hd { font-weight: 500; }
+#p-body .it.step { color: var(--grey); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 2px 0; }
 #p-body .it.step::before { content: '· '; }
-#p-foot { border-top: 1px solid var(--rule); padding: 12px 28px 18px; }
+#p-body .it.step .more { color: var(--grey); }
+#p-body .empty { color: var(--grey); font-size: 13px; }
+#p-foot { border-top: 1px solid var(--rule); padding: 14px 28px 18px; }
 #p-reply { display: block; width: 100%; font-size: 15px; line-height: 1.5; resize: none; overflow-y: auto; caret-color: var(--blue); min-height: 1.5em; }
-#p-reply:focus { outline: none; } #p-reply::placeholder { color: var(--faint); }
+#p-reply:focus { outline: none; } #p-reply::placeholder { color: var(--grey); }
 #p-reply[hidden] { display: none; }
-#p-tools { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; font-size: 13px; min-height: 1.4em; }
-#p-tools .sp { flex: 1; } #p-tools .note { color: var(--faint); }
+#p-tools { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; font-size: 13px; min-height: 1.4em; color: var(--grey); }
+#p-tools .sp { flex: 1; }
 #p-tools .no { color: var(--red); } #p-tools .ok { color: var(--green); }
-#p-tools select.effort { color: var(--grey); appearance: none; -webkit-appearance: none; }
+#p-tools select.effort { color: var(--grey); appearance: none; -webkit-appearance: none; border-bottom: 1px dotted var(--quiet); }
 #p-tools select.effort:hover { color: var(--ink); }
+
 @media (max-width: 720px) {
-  main { padding-top: 32px; }
-  .acct { grid-template-columns: 7ch 1fr; } .acct .tally { display: none; }
-  .line { width: 36px; }
-  .s { grid-template-columns: 10px minmax(0, 1fr) 9ch 4ch 4ch; } .s .who, .s .what, .s .eff, .s .at { display: none; }
-  .mline { grid-template-columns: 7ch 1fr; } .mline .tally { display: none; }
+  main { width: calc(100% - 32px); padding-top: 28px; }
   :root { --pane: 100vw; }
   body.has-pane main { display: none; }
-  .write textarea { font-size: 19px; }
+  .line { width: 36px; }
+  .write textarea { font-size: 18px; }
+  #p-head, #p-body, #p-foot { padding-left: 18px; padding-right: 18px; }
 }
 </style>
 </head>
 <body>
 <main>
-  <div class="top"><h1>Fleet</h1><a href="/board" title="Your colleague's board: answer permission prompts for terminal sessions">Board</a><button id="refresh" title="Read again">↻</button></div>
+  <div class="top"><h1>Fleet</h1><a href="/board" title="The board: answer permission prompts for terminal sessions">Board</a><button id="refresh" title="Read again" aria-label="Read again"><svg class="i" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg></button></div>
   <div class="err" id="err" hidden></div>
   <div id="accts"></div>
   <div class="machines" id="mlines"></div>
@@ -178,7 +206,7 @@ body.has-pane main { width: calc(100% - var(--pane) - 64px); margin-left: 32px; 
     </div>
     <div class="said" id="said"></div>
   </div>
-  <div id="machines"></div>
+  <div id="machines"><div class="reading" aria-label="Reading the machines">…</div></div>
 </main>
 <aside id="pane" hidden aria-label="Session">
   <div id="p-head"></div>
@@ -200,11 +228,20 @@ function h(tag, attrs = {}, ...kids) {
   for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return e;
 }
+const ICONS = { ext: ['M6.5 3.5h-3v9h9v-3', 'M9 3h4v4', 'M13 3 7.5 8.5'], x: ['M4 4l8 8', 'M12 4l-8 8'] };
+/** A drawn icon (stroke 1.5, currentColor). */
+function icon(name) {
+  const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16'); svg.setAttribute('class', 'i'); svg.setAttribute('aria-hidden', 'true');
+  for (const d of ICONS[name]) { const path = document.createElementNS(ns, 'path'); path.setAttribute('d', d); svg.append(path); }
+  return svg;
+}
 async function api(p, body = {}) {
   const r = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN }, body: JSON.stringify(body) });
   if (r.status === 403) { location.reload(); throw new Error('reloading'); }
   return r.json();
 }
+const when = (t) => { const a = ago(t); return !a ? '' : a === 'now' ? 'now' : `${a} ago`; };
 const ago = (t) => { if (!t) return ''; const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
 const until = (t) => { const s = (t - Date.now()) / 1000; return s <= 0 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.floor(s / 86400)}d ${Math.round((s % 86400) / 3600)}h`; };
 const level = (p) => (p >= 90 ? 'hi' : p >= 70 ? 'mid' : '');
@@ -349,7 +386,7 @@ async function fire() {
   store.set('machine', pickMachine); if (!isFleet()) store.set('cwd.' + pickMachine, body.cwd);
   try {
     const r = await api('/api/fleet/launch', body);
-    if (r.ok) { said.className = 'said ok'; said.textContent = `Started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500); }
+    if (r.ok) { said.className = 'said ok'; said.textContent = `started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500); }
     else { said.className = 'said no'; said.textContent = r.error ?? 'Did not start'; }
   } catch (e) { said.className = 'said no'; said.textContent = String(e.message); }
   $('fire').disabled = false;
@@ -403,10 +440,9 @@ function vitals(m) {
   if (!st) return h('span', { class: 'vitals' });
   const v = (k, val, cls, title) => (val == null ? null : h('span', { class: cls ?? '', title: title ?? '' }, h('i', { text: k }), val));
   return h('span', { class: 'vitals' },
-    v('dev', st.dev.length, null, st.dev.map((d) => `:${d.port}  ${d.cwd ?? ''}`).join('\n')),
-    v('stacks', st.stacks.length, null, st.stacks.join('\n')),
-    v('containers', st.containers),
-    v('load', `${Math.round((100 * st.load) / st.cpus)}%`, level((100 * st.load) / st.cpus), `${st.load} on ${st.cpus} cores`),
+    v('dev', st.dev.length, null, st.dev.length ? st.dev.map((d) => `:${d.port}  ${d.cwd ?? ''}`).join('\n') : 'dev servers'),
+    v('db', st.stacks.length, null, st.stacks.length ? st.stacks.join('\n') : 'database stacks'),
+    v('cpu', `${Math.round((100 * st.load) / st.cpus)}%`, level((100 * st.load) / st.cpus), `load ${st.load} on ${st.cpus} cores, ${st.containers ?? 0} containers`),
     v('mem', st.memPct != null ? `${st.memPct}%` : null, level(st.memPct ?? 0)),
     v('disk', st.diskPct != null ? `${st.diskPct}%` : null, level(st.diskPct ?? 0)));
 }
@@ -471,8 +507,9 @@ function conversation(items) {
       continue;
     }
     const id = `${it.at}:${it.text.length}`, long = it.kind === 'said' && it.text.length > 900 && !pane.wide.has(id);
-    out.push(h('div', { class: `it ${it.kind}${long ? ' long' : ''}${it.pending ? ' pending' : ''}`, title: it.at ? new Date(it.at).toLocaleString() : '',
-      onclick: long ? () => { pane.wide.add(id); renderPane(); } : null }, md(it.text)));
+    const open = () => { pane.wide.add(id); renderPane(); };
+    out.push(h('div', { class: `it ${it.kind}${long ? ' long' : ''}${it.pending ? ' pending' : ''}`, title: it.at ? new Date(it.at).toLocaleString() : '', onclick: long ? open : null }, md(it.text)));
+    if (long) out.push(h('button', { class: 'all', text: 'show all', onclick: open }));
   }
   return out;
 }
@@ -505,19 +542,21 @@ function renderPane(toEnd = false) {
       renderPane(); await load();
       if (r.ok && verb === 'archive') deselect();
     } });
-  const test = testOf(x) ? h('button', { class: 'act test', text: 'TEST ↗', title: testOf(x), onclick: () => openTest(testOf(x)) }) : null;
+  const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
   $('p-head').replaceChildren(
     h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}` }), h('div', { class: 'p-title', text: x.title ?? x.name ?? x.engine, title: x.name ?? '' }),
-      h('button', { class: 'p-x', text: '×', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect })),
-    h('div', { class: 'p-meta' }, [WORD[x.state], x.stage, x.epic, ago(x.lastAt ?? x.since ?? x.startedAt) && `${ago(x.lastAt ?? x.since ?? x.startedAt)} ago`].filter(Boolean).join('   ')),
-    h('div', { class: 'p-meta', title: [x.name, x.cwd, x.model].filter(Boolean).join('\n') },
-      [x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% context`, x.shareWeek != null && `${Math.round(x.shareWeek)}% of the week`].filter(Boolean).join('   ')),
+      h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),
+    h('div', { class: 'p-meta', title: [WORD[x.state], x.name, x.cwd, x.model].filter(Boolean).join('\n') },
+      [x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
+        .filter(Boolean).map((t) => h('span', { text: t }))),
     h('div', { class: 'p-acts' }, act, test,
-      x.web ? h('a', { class: 'act', href: x.web, target: '_blank', rel: 'noopener', text: 'claude.ai ↗' }) : null,
-      cmd ? h('button', { class: 'act', text: 'copy attach', title: cmd, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null));
+      x.web ? h('a', { class: 'act', href: x.web, target: '_blank', rel: 'noopener' }, 'claude.ai', icon('ext')) : null,
+      cmd ? h('button', { class: 'act', text: 'attach', title: `Copy: ${cmd}`, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null));
   // The conversation: stay at the bottom if you were there; leave your place if you had scrolled up to read.
   const body = $('p-body'), atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
-  body.replaceChildren(...(pane.error ? [h('div', { class: 'it said', text: pane.error })] : pane.items ? conversation(pane.items.slice(-60)) : x.sessionId ? [h('div', { class: 'it step', text: 'reading…' })] : []));
+  body.replaceChildren(...(pane.error ? [h('div', { class: 'it said', text: pane.error })]
+    : pane.items ? (pane.items.length ? conversation(pane.items.slice(-60)) : [h('div', { class: 'empty', text: '—' })])
+    : x.sessionId ? [h('div', { class: 'empty', text: '…' })] : [h('div', { class: 'empty', text: x.doing ?? x.args ?? '' })]));
   if (toEnd || atEnd) body.scrollTop = body.scrollHeight;
   // The message box: for a session that takes messages here; otherwise one line on how to make it.
   const talk = x.live && (x.via === 'background' || x.via === 'remote');
@@ -528,7 +567,7 @@ function renderPane(toEnd = false) {
     ? h('select', { class: 'effort', title: 'its effort, from its next reply', 'aria-label': 'Effort', onchange: (e) => sendText(`/effort ${e.target.value}`) },
         ['low', 'medium', 'high', 'xhigh', 'max'].map((v) => h('option', { value: v, text: v, selected: v === x.effort })))
     : null;
-  const how = !x.live ? null : !talk ? (x.via === 'app' ? 'Type /rc in the Claude app once to talk to it here' : x.via === 'terminal' ? 'Type /rc in its terminal once to talk to it here' : null) : null;
+  const how = !x.live ? null : !talk ? (x.via === 'app' || x.via === 'terminal' ? 'type /rc in it to message here' : null) : null;
   $('p-tools').replaceChildren(...[pane.said ? h('span', { class: pane.said.cls, text: pane.said.text }) : null, how ? h('span', { class: 'note', text: how }) : null, h('span', { class: 'sp' }), effort].filter(Boolean));
   growReply();
 }
@@ -546,18 +585,26 @@ document.addEventListener('keydown', (e) => {
 function row(x) {
   const c = x.context, on = pane.key === keyOf(x);
   const what = x.state === 'working' ? (x.doing ?? x.said ?? '') : x.state === 'needs-you' ? (x.doing ?? x.said ?? '') : '';
-  return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
+  return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
       onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); } },
-    h('span', { class: `dot ${x.state}` }),
+    h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }),
     h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine }),
     h('span', { class: `stage ${x.stage ?? ''}`, text: x.stage ?? '' }),
     h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }),
     h('span', { class: 'eff', text: x.effort ?? '', title: 'effort' }),
-    h('span', { class: `ctx ${c ? level(c.pct) : ''}`, text: c ? `${c.guessed ? '≈' : ''}${Math.round(c.pct)}%` : '', title: 'context used' }),
+    h('span', { class: 'ctx', title: c ? `${c.guessed ? 'about ' : ''}${Math.round(c.pct)}% of its context` : '' },
+      c ? h('span', { class: 'line' }, h('b', { class: level(c.pct), style: `width:${Math.min(100, c.pct)}%` })) : null),
     h('span', { class: `use ${x.shareWeek != null ? level(x.shareWeek * 3) : ''}`, text: x.shareWeek != null && x.shareWeek >= 0.5 ? `${Math.round(x.shareWeek)}%` : '',
       title: x.shareWeek != null ? `about ${Math.round(x.shareWeek)}% of ${x.sub}'s weekly limit` : '' }),
     h('span', { class: 'what', text: what }));
+}
+/** A closed session, as one quiet line: what it was, where, whose, and when it last moved. */
+function gone(x) {
+  return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); } },
+    h('span', { class: 'dot closed' }), h('span', { text: x.title ?? x.name ?? x.id ?? x.engine }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
+    h('span', { class: 'who', text: x.sub ?? '' }), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
+    h('span', { class: 'use' }), h('span', { class: 'what' }));
 }
 let armedEpic = null;
 function renderMachines() {
@@ -583,18 +630,19 @@ function renderMachines() {
     const shown = everything.filter((x) => epicOf(x) === name).sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || ((b.lastAt ?? b.startedAt ?? b.since ?? 0) - (a.lastAt ?? a.startedAt ?? a.since ?? 0)));
     if (!shown.length) return null;
     const test = (snap.epics ?? []).find((e) => e.name === name)?.test;
-    const closed = shown.filter((x) => !x.live && (x.sessionId || x.id));
+    const closed = shown.filter((x) => !x.live);
     const arm = armedEpic === name;
-    const sweep = closed.length ? h('button', { class: `sweep${arm ? ' armed' : ''}`, text: arm ? `archive ${closed.length}?` : `archive ${closed.length} closed`,
+    const sweep = closed.length ? h('button', { class: arm ? 'armed' : '', text: arm ? `archive ${closed.length}?` : 'archive',
       onclick: async () => {
         if (!arm) { armedEpic = name; renderMachines(); setTimeout(() => { if (armedEpic === name) { armedEpic = null; renderMachines(); } }, 4000); return; }
         armedEpic = null;
-        await api('/api/fleet/archive-all', { sessions: closed.map((x) => ({ machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id })) }).catch(() => {});
+        await api('/api/fleet/archive-all', { sessions: closed.filter((x) => x.sessionId || x.id).map((x) => ({ machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id })) }).catch(() => {});
         load();
       } }) : null;
     return h('section', { class: 'epic' },
-      h('header', {}, h('h2', { text: name }), test ? h('a', { class: 'test', href: test, text: 'TEST ↗', title: test, onclick: (e) => { e.preventDefault(); openTest(test); } }) : null, sweep, tally(shown)),
-      shown.map(row));
+      h('header', {}, h('h2', { text: name }), test ? h('a', { class: 'test', href: test, title: `Open ${test}`, onclick: (e) => { e.preventDefault(); openTest(test); } }, 'TEST', icon('ext')) : null, tally(shown)),
+      shown.filter((x) => x.live).map(row),
+      closed.length ? h('div', { class: 'shut' }, h('div', { class: 'bar' }, h('span', { text: `${closed.length} closed` }), sweep), closed.map(gone)) : null);
   }).filter(Boolean);
   $('machines').replaceChildren(...blocks);
 }
@@ -603,7 +651,7 @@ function renderMachines() {
 let loading = false;
 async function load() {
   if (loading) return;
-  loading = true; $('refresh').style.opacity = .35;
+  loading = true; $('refresh').classList.add('busy');
   try {
     snap = await api('/api/fleet');
     subs = accounts(snap);
@@ -613,7 +661,7 @@ async function load() {
     renderHow(); renderMachines(); renderPane();
     $('refresh').title = `Read ${new Date(snap.at).toLocaleTimeString()}`;
   } catch (e) { if (e.message !== 'reloading') { $('err').hidden = false; $('err').textContent = String(e.message); } }
-  loading = false; $('refresh').style.opacity = '';
+  loading = false; $('refresh').classList.remove('busy');
 }
 $('refresh').addEventListener('click', load);
 load();

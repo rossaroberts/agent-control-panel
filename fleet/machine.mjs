@@ -402,8 +402,9 @@ function sortProcesses(list, rosterPids, codexOpen) {
       workers.push({ pid: x.pid, engine: oneLine(x.args[i + 1], 30), task: oneLine(x.args[i + 2], 200), since: x.since, cwd: tilde(x.cwd) });
       continue;
     }
-    // this read's own calls, and Claude Code's background-job supervisor (`claude daemon run`), which is no agent
-    if (x.ppid === process.pid || ['agents', 'auth', 'attach', 'stop', 'rm', 'daemon', '--version'].includes(x.args[1])) continue;
+    // this read's own calls, and Claude Code's own background machinery (the job supervisor, a job's terminal host, a
+    // warmed-up spare), which are no agents
+    if (x.ppid === process.pid || ['agents', 'auth', 'attach', 'stop', 'rm', 'daemon', 'bg-pty-host', 'bg-spare', '--version'].includes(x.args[1])) continue;
     if (x.args.includes('--json-schema') && x.args.includes('--no-session-persistence')) continue; // the panel's own titles and World's builds
     if (rosterPids.has(x.pid) || under(x, (p) => rosterPids.has(p.pid) || p.engine === 'fleet')) continue; // listed, or a part of one
     if (x.args.includes('--sdk-url') || x.args[1] === 'app-server' || x.args.includes('mcp-server')) continue; // a bridge's session (in the roster), Codex's desktop backend
