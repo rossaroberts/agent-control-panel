@@ -555,7 +555,7 @@ function readRollout(f, m, open) {
   return {
     session: { engine: 'codex', id: meta.id ?? path.basename(f, '.jsonl'), sessionId: meta.id ?? null,
                name: oneLine(meta.originator, 60), kind: meta.source ?? null, live,
-               state: !live ? 'closed' : asking ? 'needs-you' : done === false ? 'working' : 'ready',
+               state: !live ? 'closed' : asking ? 'needs-you' : done === false ? 'working' : 'ready', turnOver: done !== false,
                cwd: tilde(meta.cwd ?? null), startedAt: Date.parse(meta.timestamp) || null, lastAt: lastAt ?? m, model,
                context: size && used != null ? { pct: Math.round((1000 * used) / size) / 10, tokens: used, size } : null,
                doing, said, firstAsk, lastAsk: lastAsk ?? firstAsk, effort,
