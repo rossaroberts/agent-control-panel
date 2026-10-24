@@ -121,7 +121,7 @@ main > #machines > .epic:first-child { margin-top: 0; }
 /* closed sessions: under their epic's open ones, smaller and closer */
 .shut { margin-top: 10px; }
 .shut .bar { display: flex; align-items: baseline; gap: 16px; font-size: 13px; color: var(--grey); padding: 6px 0 2px; border-top: 1px solid var(--rule); }
-.shut .bar button { color: var(--grey); } .shut .bar button:hover { color: var(--ink); } .shut .bar button.armed { color: var(--red); }
+.shut .bar button { color: var(--grey); } .shut .bar .fold-closed { font-size: 13px; } .shut .bar button:hover { color: var(--ink); } .shut .bar button.armed { color: var(--red); }
 .c { padding: 0 10px; margin: 0 -10px; border-radius: 4px; font-size: 13px; line-height: 1.6; color: var(--grey); cursor: pointer; }
 .c:hover { background: color-mix(in srgb, var(--tint) 60%, transparent); color: var(--ink); }
 .c.open { background: var(--tint); color: var(--ink); }
@@ -226,7 +226,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
     <div class="how">
       <select id="acct" aria-label="Account" title="Account"></select>
       <select id="mach" aria-label="Machine" title="Machine"></select>
-      <input id="cwd" spellcheck="false" aria-label="Folder" title="Folder">
+      <input id="cwd" list="cwds" spellcheck="false" aria-label="Folder" title="Folder"><datalist id="cwds"></datalist>
       <select id="model" aria-label="Model" title="Model">
         <option value="">default</option><option value="opus">opus</option><option value="opus[1m]">opus 1m</option>
         <option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="fable">fable</option></select>
@@ -413,7 +413,12 @@ function renderHow() {
   $('mach').replaceChildren(...where.map((n) => h('option', { value: n, text: n, selected: n === pickMachine })));
   $('cwd').hidden = isFleet();
   $('model').hidden = $('effort').hidden = sub?.engine !== 'claude';
-  if (cwdFor !== pickMachine && document.activeElement !== $('cwd')) { cwdFor = pickMachine; $('cwd').value = store.get('cwd.' + pickMachine) ?? (machines.find((m) => m.name === pickMachine)?.local ? '~/projects' : '~/dev'); }
+  // The folders this account works in on this machine, the latest first: they are trusted, so a start there takes.
+  const used = (sub?.sessions ?? []).filter((x) => x.machine === pickMachine && x.cwd).sort((a, b) => (b.lastAt ?? b.startedAt ?? 0) - (a.lastAt ?? a.startedAt ?? 0)).map((x) => x.cwd);
+  const folders = [...new Set([store.get('folder.' + pickMachine), ...used].filter(Boolean))].slice(0, 12);
+  $('cwds').replaceChildren(...folders.map((f) => h('option', { value: f })));
+  const key = `${pickKey}|${pickMachine}`;
+  if (cwdFor !== key && document.activeElement !== $('cwd')) { cwdFor = key; $('cwd').value = folders[0] ?? (machines.find((m) => m.name === pickMachine)?.local ? '~/projects' : '~/dev'); }
   $('cwd').style.width = `${Math.max(8, $('cwd').value.length + 1)}ch`;
   $('prompt').placeholder = isFleet() ? 'Issue number, or what it should do' : 'What should it do?';
   renderAccounts();
@@ -433,11 +438,18 @@ async function fire() {
   const body = { machine: pickMachine, engine: isFleet() ? 'fleet' : sub.engine, profile: place?.profile ?? '', cwd: $('cwd').value, prompt,
                  model: sub?.engine === 'claude' ? $('model').value : '', effort: sub?.engine === 'claude' ? $('effort').value : '' };
   said.className = 'fired'; said.textContent = '…'; $('fire').disabled = true;
-  store.set('machine', pickMachine); if (!isFleet()) store.set('cwd.' + pickMachine, body.cwd);
+  store.set('machine', pickMachine);
   try {
     const r = await api('/api/fleet/launch', body);
-    if (r.ok) { said.className = 'fired ok'; said.textContent = `started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500); }
-    else { said.className = 'fired no'; said.textContent = r.error ?? 'Did not start'; }
+    if (r.ok) {
+      said.className = 'fired ok'; said.textContent = `started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500);
+      if (!isFleet()) store.set('folder.' + body.machine, r.cwd ?? body.cwd);
+    } else if (r.untrusted) {
+      // Only you can trust a folder, at Claude Code's own prompt: open it in the pane, then Fire again.
+      said.className = 'fired no';
+      said.replaceChildren(`${r.cwd} isn't trusted by ${sub.label} on ${body.machine}  `,
+        h('button', { class: 'act test', text: 'trust it', onclick: () => openTrust({ machine: body.machine, profile: body.profile, cwd: r.cwd, sub: sub.label }) }));
+    } else { said.className = 'fired no'; said.textContent = r.error ?? 'Did not start'; }
   } catch (e) { said.className = 'fired no'; said.textContent = String(e.message); }
   $('fire').disabled = false;
 }
@@ -511,12 +523,19 @@ const keyOf = (x) => `${x.machine}:${x.sessionId ?? x.id ?? x.pid}`;
 const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null };
 const drafts = new Map(); // what you had typed to each session, kept when you switch away
 let everything = [];
-const current = () => everything.find((x) => keyOf(x) === pane.key) ?? null;
+const current = () => everything.find((x) => keyOf(x) === pane.key) ?? (pane.trust && keyOf(pane.trust) === pane.key ? pane.trust : null);
+/** A folder's trust prompt, as a session of its own in the pane: approve it there, close the pane, Fire again. */
+function openTrust({ machine, profile, cwd, sub }) {
+  pane.trust = { engine: 'claude', via: 'trust', live: true, state: 'needs-you', machine, profile, cwd, sub, sessionId: `trust:${cwd}`, title: `trust ${cwd}`,
+    doing: 'Approve the folder at Claude Code\'s prompt, then close this and Fire again' };
+  if (pane.key === keyOf(pane.trust)) deselect();
+  select(pane.trust);
+}
 /** A background session opens as its own terminal. */
 const attachable = (x) => x?.engine === 'claude' && x.live && x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '');
 /** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
 const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
-const termView = (x) => attachable(x) && pane.view !== 'log';
+const termView = (x) => (attachable(x) || x?.via === 'trust') && pane.view !== 'log';
 // What each session last said, kept for when you come back to it or hover it first: the pane shows it at once and reads
 // again behind it.
 const seen = new Map();
@@ -639,7 +658,7 @@ async function openTerm(x) {
   if (x.state !== 'needs-you') term.focus();
   try {
     const r = await fetch('/api/term/open', { method: 'POST', signal: ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
-      body: JSON.stringify({ machine: x.machine, profile: x.profile, id: x.id, cols: term.cols, rows: term.rows }) });
+      body: JSON.stringify({ machine: x.machine, profile: x.profile, ...(x.via === 'trust' ? { trust: x.cwd } : { id: x.id }), cols: term.cols, rows: term.rows }) });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${r.status}`); }
     tv.id = r.headers.get('x-term-id');
     flushTerm();
@@ -677,7 +696,7 @@ async function saveLabel(x, change) {
 }
 function titleField(x) {
   const text = x.title ?? x.name ?? x.id ?? x.engine;
-  if (!x.sessionId) return h('div', { class: 'p-title', text, title: x.name ?? '' });
+  if (!x.sessionId || x.via === 'trust') return h('div', { class: 'p-title', text, title: x.name ?? '' });
   return h('div', { class: 'p-title', contenteditable: 'plaintext-only', spellcheck: 'false', role: 'textbox', 'aria-label': 'Name', title: 'Rename · empty puts the written one back', text,
     onfocus: (e) => { e.target.dataset.was = e.target.textContent; },
     onkeydown: (e) => {
@@ -687,7 +706,7 @@ function titleField(x) {
     onblur: (e) => { const t = e.target.textContent.trim(); if (t !== e.target.dataset.was) saveLabel(x, { title: t }); } });
 }
 function groupField(x) {
-  if (!x.sessionId) return null;
+  if (!x.sessionId || x.via === 'trust') return null;
   return h('input', { class: 'p-group', list: 'fleet-groups', value: x.epic ?? '', placeholder: 'group', 'aria-label': 'Group', title: 'Group · type a new one to make it',
     spellcheck: 'false', onchange: (e) => saveLabel(x, { group: e.target.value.trim() }), onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); } });
 }
@@ -755,7 +774,7 @@ function renderPane(toEnd = false) {
 function renderHead(x, term) {
   const c = x.context, cmd = attachCommand(x);
   // One control: close an open session, archive a closed one. A second click does it.
-  const verb = x.live ? (x.engine !== 'claude' || x.via === 'app' || !x.sessionId ? null : 'close') : (x.sessionId || x.id ? 'archive' : null);
+  const verb = x.live ? (x.engine !== 'claude' || x.via === 'app' || x.via === 'trust' || !x.sessionId ? null : 'close') : (x.sessionId || x.id ? 'archive' : null);
   const act = verb && h('button', { class: `act${pane.arm ? ' armed' : ''}`, text: pane.arm ? `${verb}?` : verb,
     onclick: async () => {
       if (!pane.arm) { pane.arm = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.arm) { pane.arm = false; renderPane(); } }, 4000); return; }
@@ -828,6 +847,8 @@ function gone(x) {
     h('span', { class: 'use' }), h('span', { class: 'what' }));
 }
 let armedEpic = null, epicT = null;
+// The groups whose closed sessions you opened; the rest stay folded under their one line.
+const openShut = new Set((() => { try { return JSON.parse(store.get('open-closed') ?? '[]'); } catch { return []; } })());
 function renderMachines() {
   const all = subs.flatMap((s) => s.sessions);
   // Everything else running: fleet workers and headless runs no roster lists.
@@ -873,7 +894,10 @@ function renderMachines() {
     return h('section', { class: 'epic' },
       h('header', {}, h('h2', { text: name }), test ? h('a', { class: 'test', href: test, title: `Open ${test}`, onclick: (e) => { e.preventDefault(); openTest(test); } }, 'TEST', icon('ext')) : null, tally(shown)),
       shown.filter((x) => x.live).map(row),
-      closed.length ? h('div', { class: 'shut' }, h('div', { class: 'bar' }, h('span', { text: `${closed.length} closed` }), sweep), closed.map(gone)) : null);
+      closed.length ? h('div', { class: 'shut' },
+        h('div', { class: 'bar' }, h('button', { class: 'fold-closed', 'aria-expanded': String(openShut.has(name)), text: `${openShut.has(name) ? '▾' : '▸'} ${closed.length} closed`,
+          onclick: () => { if (openShut.has(name)) openShut.delete(name); else openShut.add(name); store.set('open-closed', JSON.stringify([...openShut])); renderMachines(); } }), sweep),
+        openShut.has(name) ? closed.map(gone) : null) : null);
   }).filter(Boolean);
   $('machines').replaceChildren(...[top, ...blocks].filter(Boolean));
 }

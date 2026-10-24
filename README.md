@@ -149,7 +149,9 @@ what each one is working on, talk to it, and decide where the next one goes. The
   Codex home (`~/.codex`), and Muse where its CLI is signed in. Each shows its 5-hour and weekly limits, a cap and when it
   lifts, and its sessions by state; the one with the most room is first. Click one to launch with it.
 - **Machines**, one line each: dev servers, database stacks, containers, load, memory and disk.
-- **Launch**: write what it should do, pick the account, machine, folder, model and effort, and ⌘↵. `claude --bg` for a
+- **Launch**: write what it should do, pick the account, machine, folder (it offers the folders that account works in
+  there, the latest first), model and effort, and ⌘↵. A folder the account hasn't trusted is refused with **trust it**:
+  Claude Code opens in that folder in the pane with its own trust prompt; approve it there, close the pane, Fire again. `claude --bg` for a
   Claude account, `codex exec --sandbox workspace-write` for Codex, `muse exec` for Muse, or a fleet dispatch
   (`fleet-workers --dispatch`) on a machine with the fleet kit.
 - **Needs you**, above everything: every session waiting on a question or permission, then every one stopped at a limit,
@@ -157,7 +159,7 @@ what each one is working on, talk to it, and decide where the next one goes. The
 - **Sessions**, grouped by epic (`epics` in `fleet.json`), then by the groups you make: each with a title of a few words
   and a stage (planning, building, testing, promoting, deploying) that haiku writes from what you asked it, its machine,
   account, effort, how full its context is, and about how much of its account's weekly limit it used. Every session is
-  listed: open ones first, closed ones greyed under them. An epic's closed sessions archive in one go.
+  listed: open ones first, then one "N closed" line that opens them. An epic's closed sessions archive in one go.
 - **Click a session** and it opens on the right, full height, as a terminal window: one line on top (its name, which is
   yours to change; **terminal**/**log**; ⋯ for the rest), then its screen. Drag the pane's edge to widen it; ⌘\\ or »
   folds it to a strip. Behind ⋯: what it is, its group (pick one, or type a new one; empty puts haiku's back), one

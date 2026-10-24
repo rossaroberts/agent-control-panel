@@ -749,7 +749,10 @@ export async function launch(a) {
     args.push('--', prompt);
     const r = await run(bin('claude'), args, { cwd, env: profileEnv(p), timeout: 30_000 });
     const id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
-    return id ? { ok: true, id, cwd: tilde(cwd) } : { ok: false, error: oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg failed' };
+    if (id) return { ok: true, id, cwd: tilde(cwd) };
+    const why = oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg failed';
+    // A folder this account hasn't trusted yet: only you can, at Claude Code's own prompt (the page opens it for you).
+    return /^Workspace not trusted/.test(why) ? { ok: false, untrusted: true, cwd: tilde(cwd), error: why } : { ok: false, error: why };
   }
 
   if (a.engine === 'codex') {
