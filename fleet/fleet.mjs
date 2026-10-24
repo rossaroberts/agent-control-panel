@@ -15,7 +15,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere,
-  interject as interjectHere, watchHooks, sessionState } from './machine.mjs';
+  interject as interjectHere, tokens as tokensHere, watchHooks, sessionState } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 
@@ -47,7 +47,7 @@ const clean = (v, n) => String(v ?? '').replace(/[<>\x00-\x08\x0b-\x1f\x7f]/g, '
 // then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. A read asked
 // for while one runs shares it (a slow machine never piles reads up). Between answers it says when a session's hook file
 // changes ({ event }). On end of input it finishes what it started, then exits.
-export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject']);"
+export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject','tokens']);"
   + " const running = new Set(); let m = null, reading = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
   + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n');"
   + " try { m.watchHooks?.((ev) => process.stdout.write(JSON.stringify({ event: ev }) + '\\n')); } catch {} continue; }"
@@ -143,7 +143,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   }
   /** Run machine.mjs's `todo` on a machine: through its worker, else (an action it never got) the one-shot way. */
   async function overSsh(m, todo, args = {}) {
-    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' ? 150_000 : todo === 'send' ? 90_000 : todo === 'collect' ? COLLECT_MS : SSH_MS;
+    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' || todo === 'tokens' ? 150_000 : todo === 'send' ? 90_000 : todo === 'collect' ? COLLECT_MS : SSH_MS;
     const w = worker(m);
     const up = await Promise.race([w.ready, new Promise((ok) => setTimeout(() => ok(false), ms).unref?.())]);
     if (up && !w.dead) {
@@ -549,6 +549,14 @@ export function createFleet({ dir, quiet = () => {} }) {
     return r;
   }
 
+  /** Every machine's token count for World since it started (machine.mjs tokens): this Mac's Codex logs (World reads its
+   *  Claude Code transcripts itself), and each other machine's Claude Code and Codex. [{ name, r }], one at a time. */
+  async function tokenCounts(since) {
+    const out = [{ name: `${config().self} Codex`, r: await tokensHere({ since, claude: false, codex: true }).catch((e) => ({ ok: false, error: String(e?.message ?? e) })) }];
+    for (const m of config().machines) out.push({ name: m.name, r: await overSsh(m, 'tokens', { since }) });
+    return out;
+  }
+
   /** Archive several closed sessions at once (an epic's): each as archive() does; a job record that refuses stays. */
   async function archiveAll(body) {
     const list = Array.isArray(body?.sessions) ? body.sessions.slice(0, 300) : [];
@@ -558,5 +566,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, interject, config, codexBusy, onChange };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts };
 }

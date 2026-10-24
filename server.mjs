@@ -1397,6 +1397,24 @@ async function scanWorld(git) {
   finally { worldScanning = false; }
   if (worldSummary().earned !== before) broadcast();
   hubSync.schedule(); // after every scan, not only a changed one: the half-hour heartbeat is judged when this is called
+  if (git) countElsewhere(); // every fifth minute: what the other machines' sessions, and Codex, used
+}
+// World counts this Mac's Claude Code transcripts itself; the rest (the other machines in fleet.json, and Codex anywhere)
+// comes through Fleet's machines, each count whole, one at a time.
+let countingElsewhere = false;
+async function countElsewhere() {
+  const since = world.startedAt?.();
+  if (!since || countingElsewhere) return;
+  countingElsewhere = true;
+  try {
+    let changed = false;
+    for (const { name, r } of await fleet.tokenCounts(since)) {
+      if (r?.ok) changed = world.setMachine(name, r) || changed;
+      else console.error(`world: ${name}'s tokens: ${r?.error ?? 'no answer'}`);
+    }
+    if (changed) broadcast();
+  } catch (err) { console.error('world: counting elsewhere failed:', err?.message ?? err); }
+  finally { countingElsewhere = false; }
 }
 /** World's numbers for the page. Nothing in them may take the panel down. */
 function worldSummary() {

@@ -1239,6 +1239,90 @@ export async function fork(a) {
 /** A session's roster row: where a stopped job's record and a running process both name it, the running one. */
 const rowOf = (rows, sessionId) => rows.filter((r) => r?.sessionId === sessionId).sort((x, y) => Number(Boolean(y.pid)) - Number(Boolean(x.pid)))[0] ?? null;
 
+// ---------------------------------------------------------------- tokens, for World
+// World (world.mjs) counts the tokens your sessions used. It reads this Mac's Claude Code transcripts itself; this counts
+// the rest: another machine's Claude Code sessions, and Codex's logs anywhere. Counted as World counts them (what was sent
+// and written, not what came from the prompt cache; a Claude reply once, however many entries repeat it), in five-minute
+// buckets of real time (World puts each on its own local day and slot, whatever this machine's time zone), from `since`
+// (World's start) on. Read on from where the last call got to (kept in ~/.fleet-panel/world-tokens-<what>.json) and handed
+// back whole: World keeps the latest, so nothing is ever added twice.
+const SLOT_MS = 5 * 60_000;
+const yieldNow = () => new Promise((ok) => setImmediate(ok));
+/** Whole new lines of a file from `offset`, and where they end: never a line cut short, never a character split. */
+function newLines(f, offset, size) {
+  const lines = [];
+  let fd;
+  try {
+    fd = fs.openSync(f, 'r');
+    let rest = Buffer.alloc(0);
+    while (offset + rest.length < size) {
+      const buf = Buffer.alloc(Math.min(4 << 20, size - offset - rest.length));
+      const n = fs.readSync(fd, buf, 0, buf.length, offset + rest.length);
+      if (!n) break;
+      const bytes = Buffer.concat([rest, buf.subarray(0, n)]), end = bytes.lastIndexOf(0x0a);
+      if (end < 0) { rest = bytes; continue; }
+      lines.push(...bytes.toString('utf8', 0, end).split('\n'));
+      offset += end + 1;
+      rest = bytes.subarray(end + 1);
+    }
+  } catch {} finally { if (fd != null) try { fs.closeSync(fd); } catch {} }
+  return { lines, offset };
+}
+export async function tokens(a = {}) {
+  const since = Number(a.since), claude = a.claude !== false, codex = a.codex !== false;
+  if (!Number.isFinite(since) || since <= 0) return { ok: false, error: 'since: when World started' };
+  const file = path.join(HOME, '.fleet-panel', `world-tokens-${claude ? 'c' : ''}${codex ? 'x' : ''}.json`);
+  let st = readJson(file, 64 << 20);
+  if (!st || st.since !== since) st = { since, files: {}, buckets: {} };
+  const add = (at, n) => { if (at >= since && n > 0) { const b = Math.floor(at / SLOT_MS); st.buckets[b] = (st.buckets[b] ?? 0) + n; } };
+  const list = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; } };
+  const files = [];
+  if (claude) for (const p of claudeProfiles()) {
+    const root = path.join(p.dir, 'projects');
+    for (const d of list(root)) if (d.isDirectory()) for (const e of list(path.join(root, d.name))) {
+      const f = path.join(root, d.name, e.name);
+      if (e.isFile() && e.name.endsWith('.jsonl')) files.push(['claude', f]);
+      else if (e.isDirectory()) for (const x of list(path.join(f, 'subagents'))) if (x.isFile() && x.name.endsWith('.jsonl')) files.push(['claude', path.join(f, 'subagents', x.name)]);
+    }
+  }
+  if (codex) for (const home of codexHomes()) {
+    const walk = (dir, depth) => { for (const e of list(dir)) { const f = path.join(dir, e.name); if (e.isDirectory() && depth < 3) walk(f, depth + 1); else if (e.isFile() && e.name.endsWith('.jsonl')) files.push(['codex', f]); } };
+    walk(path.join(home, 'sessions'), 0);
+  }
+  let read = 0;
+  for (const [kind, f] of files) {
+    let size, m;
+    try { ({ size, mtimeMs: m } = fs.statSync(f)); } catch { continue; }
+    const seen = st.files[f];
+    if (seen ? seen.offset === size : m < since) continue;
+    if (seen && seen.offset > size) { st.files[f] = { ...seen, offset: size }; continue; } // shrank: never counted again
+    const { lines, offset } = newLines(f, seen?.offset ?? 0, size);
+    const next = { offset, ids: [...(seen?.ids ?? [])], total: seen?.total ?? 0 };
+    for (const line of lines) {
+      if (kind === 'claude') {
+        if (!line.includes('"usage"')) continue;
+        let d; try { d = JSON.parse(line); } catch { continue; }
+        const u = d.type === 'assistant' ? d.message?.usage : null, id = d.message?.id;
+        if (!u || typeof u !== 'object' || (id && next.ids.includes(id))) continue;
+        if (id) next.ids.push(id);
+        add(Date.parse(d.timestamp), (u.output_tokens ?? 0) + (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0));
+      } else {
+        if (!line.includes('"token_count"')) continue;
+        let d; try { d = JSON.parse(line); } catch { continue; }
+        const u = d.payload?.type === 'token_count' ? d.payload.info?.total_token_usage : null;
+        if (!u) continue;
+        const total = (u.input_tokens ?? 0) - (u.cached_input_tokens ?? 0) + (u.output_tokens ?? 0);
+        if (total > next.total) { add(Date.parse(d.timestamp), total - next.total); next.total = total; }
+      }
+    }
+    next.ids = next.ids.slice(-50);
+    st.files[f] = next;
+    if (++read % 8 === 0) await yieldNow();
+  }
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(`${file}.tmp`, JSON.stringify(st)); fs.renameSync(`${file}.tmp`, file); } catch {}
+  return { ok: true, since, slotMs: SLOT_MS, buckets: st.buckets, files: Object.keys(st.files).length };
+}
+
 // ---------------------------------------------------------------- interject
 /** Your message now, not after the step it is in. A message you send while a session works waits for its current step to
  *  end; this ends that step: the command it runs is stopped (that command's own process group, and nothing else: not the
@@ -1277,7 +1361,8 @@ export async function interject(a) {
 if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
   const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
-                 close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args), interject: () => interject(args) }[process.env.FLEET_DO];
+                 close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args), interject: () => interject(args),
+                 tokens: () => tokens(args) }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };
   process.stdout.write(JSON.stringify(r));
 }

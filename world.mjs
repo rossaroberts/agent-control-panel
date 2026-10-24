@@ -639,7 +639,8 @@ const VERSION = 2;
 const isDay = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
 const valid = (st) => st && st.v === VERSION && Number.isFinite(st.startedAt) && [st.files, st.tokens, st.lines].every((o) => o && typeof o === 'object')
   && [st.repos, st.purchases].every(Array.isArray) && (st.active === undefined || (st.active && typeof st.active === 'object'))
-  && (st.newFrom === undefined || isDay(st.newFrom)) && (st.trees === undefined || (st.trees && typeof st.trees === 'object'));
+  && (st.newFrom === undefined || isDay(st.newFrom)) && (st.trees === undefined || (st.trees && typeof st.trees === 'object'))
+  && (st.machines === undefined || (st.machines && typeof st.machines === 'object'));
 /** The most two counts of one repository's day have seen. */
 const most = (a, b) => ({ added: Math.max(a.added, b.added), removed: Math.max(a.removed, b.removed), commits: Math.max(a.commits, b.commits) });
 /** A folder's true path. The Mac's disk ignores case, and git names a repository the way it was asked, so one repository
@@ -810,7 +811,16 @@ export function createWorld({ file, configDirs, gitPlace, run, now = Date.now })
       const x = (days[d] ??= blank());
       x.added += c.added; x.removed += c.removed; x.commits += c.commits;
     }
-    for (const [d, list] of Object.entries(st.active)) if (list.length) (days[d] ??= blank()).slots = list.length;
+    // What the other machines' sessions (and Codex anywhere) used: their five-minute buckets, each on its local day and slot.
+    const slots = Object.fromEntries(Object.entries(st.active).map(([d, list]) => [d, new Set(list)]));
+    for (const mc of Object.values(st.machines ?? {})) for (const [b, n] of Object.entries(mc.buckets ?? {})) {
+      const at = Number(b) * (mc.slotMs ?? 300_000);
+      if (!(at >= st.startedAt) || !(n > 0)) continue;
+      const d = dayKey(at);
+      (days[d] ??= blank()).tokens += n;
+      (slots[d] ??= new Set()).add(slotOf(at));
+    }
+    for (const [d, set] of Object.entries(slots)) if (set.size) (days[d] ??= blank()).slots = set.size;
     for (const [d, x] of Object.entries(days)) {
       const isNew = d >= st.newFrom;
       x.credit = isNew ? dayCredit(x) : oldDayCredit(x);
@@ -854,6 +864,17 @@ export function createWorld({ file, configDirs, gitPlace, run, now = Date.now })
 
   return {
     started: () => Boolean(st),
+    startedAt: () => st?.startedAt ?? null,
+    /** Another machine's count (or Codex's), whole as fleet/machine.mjs tokens() gives it: it replaces the last, so the
+     *  same tokens never count twice. */
+    setMachine(name, r) {
+      if (!st || !r?.ok || r.since !== st.startedAt || !r.buckets || typeof r.buckets !== 'object') return false;
+      const was = JSON.stringify(st.machines?.[name]?.buckets ?? {}), now2 = JSON.stringify(r.buckets);
+      (st.machines ??= {})[name] = { slotMs: r.slotMs ?? 300_000, buckets: r.buckets, at: now() };
+      memo = null;
+      if (was !== now2) save();
+      return was !== now2;
+    },
     open() {
       if (st) return;
       // A World opened now has nothing old to keep: the new rules count from its first day.
