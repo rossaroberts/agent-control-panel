@@ -174,6 +174,8 @@ what each one is working on, talk to it, and decide where the next one goes. The
   hovering one attaches ahead of the click. Where a key takes long to come back (redbat is a quarter of a second away),
   what you type shows at once over the cursor, an overlay only, until the real screen catches up. **/exit** ends the
   session and closes the pane. xterm draws on the GPU (WebGL) where it can.
+- **An Astra (Codex) session** shows its conversation; **terminal** opens it in Codex's own screen here (`codex resume
+  <id>` in its folder, every permission allowed). A live one may still be open in the Codex app, so that asks first.
 - **A session running inside tmux** (anywhere, any account) opens as its tmux pane: `tmux -L <server> attach -t <pane>`,
   its real screen, nothing moved or restarted; /exit there ends Claude Code as it would in that window.
 - Everything Fleet starts (a launch, **move here**, **continue here**) runs with every permission allowed:

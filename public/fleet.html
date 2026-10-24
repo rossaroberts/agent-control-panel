@@ -532,7 +532,7 @@ const keyOf = (x) => `${x.machine}:${x.sessionId ?? x.id ?? x.pid}`;
 // ---------------------------------------------------------------- the session open on the right
 // One session at a time, full height on the right: its conversation scrolls, the message box stays at the bottom. The
 // panel's parts are built once and updated in place, so a refresh never takes the caret or a half-typed message.
-const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null };
+const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null, codexOn: null };
 const drafts = new Map(); // what you had typed to each session, kept when you switch away
 let everything = [];
 const current = () => everything.find((x) => keyOf(x) === pane.key) ?? (pane.trust && keyOf(pane.trust) === pane.key ? pane.trust : null);
@@ -547,7 +547,9 @@ function openTrust({ machine, profile, cwd, sub }) {
 const attachable = (x) => x?.engine === 'claude' && x.live && ((x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '')) || Boolean(x.tmux));
 /** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
 const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && !x.tmux && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
-const termView = (x) => attachable(x) || x?.via === 'trust';
+// A Codex session opens as `codex resume` once you ask for it (that starts a Codex on its conversation), and stays so.
+const codexTerm = (x) => x?.engine === 'codex' && /^[0-9a-f-]{36}$/.test(x.sessionId ?? '') && Boolean(x.cwd);
+const termView = (x) => attachable(x) || x?.via === 'trust' || (codexTerm(x) && (pane.codexOn === keyOf(x) || terms.has(keyOf(x))));
 // What each session last said, kept for when you come back to it or hover it first: the pane shows it at once and reads
 // again behind it.
 const seen = new Map();
@@ -678,7 +680,8 @@ async function stream(T) {
   const { term, x } = T;
   try {
     const r = await fetch('/api/term/open', { method: 'POST', signal: T.ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
-      body: JSON.stringify({ machine: x.machine, profile: x.profile, ...(x.via === 'trust' ? { trust: x.cwd } : x.tmux && x.via !== 'background' ? { tmux: x.tmux } : { id: x.id }), cols: term.cols, rows: term.rows }) });
+      body: JSON.stringify({ machine: x.machine, profile: x.profile, cols: term.cols, rows: term.rows,
+        ...(x.via === 'trust' ? { trust: x.cwd } : x.engine === 'codex' ? { codex: { sessionId: x.sessionId, cwd: x.cwd } } : x.tmux && x.via !== 'background' ? { tmux: x.tmux } : { id: x.id }) }) });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${r.status}`); }
     T.id = r.headers.get('x-term-id');
     flushTerm(T);
@@ -904,11 +907,19 @@ function renderHead(x, term) {
   const copy = x.engine === 'claude' && x.via === 'app' && x.live && x.sessionId && (x.state === 'ready' || x.state === 'capped') && !pane.moving
     ? h('button', { class: `act${pane.armMove ? ' armed' : ''}`, text: pane.armMove ? 'continue here?' : 'continue here', onclick: continueHere,
         title: 'Continue this conversation as a copy in the background here, with its terminal; the app\'s own session stays as it is' }) : null;
+  // Astra: its conversation as text until you open it in Codex's own screen. A live one may be open in the Codex app too,
+  // so that asks first.
+  const codexOpen = codexTerm(x) && !term ? h('button', { class: `act${pane.armMove ? ' armed' : ' test'}`, text: pane.armMove ? 'continue here?' : 'terminal',
+    title: 'Open it in Codex here (codex resume), every permission allowed' + (x.live ? '; it may still be open in the Codex app' : ''),
+    onclick: () => {
+      if (x.live && !pane.armMove) { pane.armMove = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.armMove) { pane.armMove = false; renderPane(); } }, 4000); return; }
+      pane.armMove = false; pane.codexOn = keyOf(x); renderPane(true);
+    } }) : null;
   const state = pane.moving ? h('span', { class: 'p-err', style: 'color:var(--grey)', text: '…' })
     : pane.said?.cls === 'no' ? h('span', { class: 'p-err', text: pane.said.text, title: pane.said.text }) : null;
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
   $('p-head').replaceChildren(...[
-    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, copy,
+    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, copy, codexOpen,
       h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),

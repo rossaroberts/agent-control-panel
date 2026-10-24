@@ -61,6 +61,8 @@ const MAX = 12;
 const PROFILE = /^[\w.-]{1,40}$/, JOB = /^[0-9a-f]{8}$/;
 const DIR = /^(~|~\/[^\0\n\r]{0,400}|\/[^\0\n\r]{0,400})$/; // a folder for a trust prompt: absolute or under ~, one line
 const TMUX_SOCKET = /^[\w.-]{1,40}$/, TMUX_TARGET = /^[\w.-]{1,60}:\d+\.\d+$/; // a session in tmux: its server and pane
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const codexBin = () => [path.join(HOME, '.local', 'bin', 'codex'), '/opt/homebrew/bin/codex', '/usr/local/bin/codex'].find((f) => fs.existsSync(f)) ?? 'codex';
 const tmuxBin = () => ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux'].find((f) => fs.existsSync(f)) ?? 'tmux';
 const python = () => (fs.existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3');
 const claudeBin = () => [path.join(HOME, '.local', 'bin', 'claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude'].find((f) => fs.existsSync(f)) ?? 'claude';
@@ -72,13 +74,20 @@ export function createTerms({ config }) {
 
   /** The program the pty runs: `claude attach <job>` here, or the same over SSH as the machine's user; with `dir` instead of
    *  a job, Claude Code itself in that folder, so its trust prompt waits for you there. Null for a bad request. */
-  function command(machine, profile, job, dir = null, tmux = null) {
+  function command(machine, profile, job, dir = null, tmux = null, codex = null) {
     if (tmux && !(TMUX_SOCKET.test(tmux.socket ?? '') && TMUX_TARGET.test(tmux.target ?? ''))) return null;
-    if (!PROFILE.test(profile) || (tmux ? false : dir == null ? !JOB.test(job) : !DIR.test(dir))) return null;
+    if (codex && !(UUID.test(codex.sessionId ?? '') && DIR.test(codex.cwd ?? ''))) return null;
+    if (codex) dir = codex.cwd;
+    if (!PROFILE.test(profile) || (tmux || codex ? false : dir == null ? !JOB.test(job) : !DIR.test(dir))) return null;
     const c = config();
     const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE') && !k.startsWith('FLEET_'))),
                   TERM: 'xterm-256color', COLORTERM: 'truecolor', COLORFGBG: '15;0', LANG: process.env.LANG || 'en_US.UTF-8' };
     if (machine === c.self) {
+      if (codex) {
+        if (profile !== 'codex') env.CODEX_HOME = path.join(HOME, `.${profile}`);
+        const cwd = dir === '~' ? HOME : dir.startsWith('~/') ? path.join(HOME, dir.slice(2)) : dir;
+        return fs.existsSync(cwd) ? { argv: [codexBin(), 'resume', codex.sessionId, '--dangerously-bypass-approvals-and-sandbox'], env, cwd } : null;
+      }
       if (profile !== 'default') env.CLAUDE_CONFIG_DIR = path.join(HOME, `.claude-${profile}`);
       if (tmux) return { argv: [tmuxBin(), '-L', tmux.socket, 'attach', '-t', tmux.target], env, cwd: HOME };
       if (dir == null) return { argv: [claudeBin(), 'attach', job], env, cwd: HOME };
@@ -87,10 +96,12 @@ export function createTerms({ config }) {
     }
     const m = c.machines.find((x) => x.name === machine);
     if (!m) return null;
-    const cfg = profile === 'default' ? '' : ` CLAUDE_CONFIG_DIR=$HOME/.claude-${profile}`;
+    const cfg = codex ? (profile === 'codex' ? '' : ` CODEX_HOME=$HOME/.${profile}`) : profile === 'default' ? '' : ` CLAUDE_CONFIG_DIR=$HOME/.claude-${profile}`;
     const there = dir == null ? null : dir === '~' ? '"$HOME"' : dir.startsWith('~/') ? `"$HOME"/${shq(dir.slice(2))}` : shq(dir);
     const inner = `export XDG_RUNTIME_DIR=/run/user/$(id -u) TERM=xterm-256color COLORTERM=truecolor COLORFGBG='15;0' LANG=C.UTF-8${cfg}; `
-      + (tmux ? `exec tmux -L ${tmux.socket} attach -t ${tmux.target}` : there ? `cd -- ${there} && exec claude` : `exec claude attach ${job}`);
+      + (tmux ? `exec tmux -L ${tmux.socket} attach -t ${tmux.target}`
+        : codex ? `cd -- ${there} && exec codex resume ${codex.sessionId} --dangerously-bypass-approvals-and-sandbox`
+        : there ? `cd -- ${there} && exec claude` : `exec claude attach ${job}`);
     const remote = m.user ? `sudo -n -u ${m.user} -H bash -lc ${shq(inner)}` : `bash -lc ${shq(inner)}`;
     return { argv: ['ssh', '-tt', ...sshArgs(), m.ssh, remote], env, cwd: HOME };
   }
@@ -98,7 +109,8 @@ export function createTerms({ config }) {
   /** Open one: streams the terminal's bytes on `res` until either side lets go. The term id is in the X-Term-Id header. */
   function open(body, res) {
     const cmd = command(String(body?.machine ?? ''), String(body?.profile ?? ''), String(body?.id ?? ''), typeof body?.trust === 'string' ? body.trust : null,
-      body?.tmux && typeof body.tmux === 'object' ? { socket: String(body.tmux.socket ?? ''), target: String(body.tmux.target ?? '') } : null);
+      body?.tmux && typeof body.tmux === 'object' ? { socket: String(body.tmux.socket ?? ''), target: String(body.tmux.target ?? '') } : null,
+      body?.codex && typeof body.codex === 'object' ? { sessionId: String(body.codex.sessionId ?? ''), cwd: String(body.codex.cwd ?? '') } : null);
     if (!cmd) { res.writeHead(422, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ ok: false, error: 'Pick a background session, or a folder that exists.' })); }
     if (terms.size >= MAX) { res.writeHead(429, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ ok: false, error: 'Too many terminals open.' })); }
     const cols = clamp(body?.cols, 20, 400, 100), rows = clamp(body?.rows, 5, 200, 30);
