@@ -176,7 +176,7 @@ what each one is working on, talk to it, and decide where the next one goes. The
   session and closes the pane. xterm draws on the GPU (WebGL) where it can.
 - **An Astra (Codex) session** shows its conversation; one that is closed and finished its last turn has **terminal**,
   which opens it in Codex's own screen here (`codex resume <id>` in its folder, every permission allowed). Not a live one
-  (open in the Codex app) or one that ended mid-turn: resuming takes the thread over and carries its work on.
+  (open in the Codex app): resuming takes the thread over. One that stopped mid-turn asks first ("continue its turn?").
 - **A session running inside tmux** (anywhere, any account) opens as its tmux pane: `tmux -L <server> attach -t <pane>`,
   its real screen, nothing moved or restarted; /exit there ends Claude Code as it would in that window.
 - Everything Fleet starts (a launch, **move here**, **continue here**) runs with every permission allowed:

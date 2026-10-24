@@ -549,7 +549,7 @@ const attachable = (x) => x?.engine === 'claude' && x.live && ((x.via === 'backg
 const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && !x.tmux && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
 // A Codex session opens as `codex resume` once you ask for it, and stays so: only one that is closed and whose last turn
 // finished. Resuming a thread that is live (open in the Codex app) or ended mid-turn takes it over and carries the work on.
-const codexTerm = (x) => x?.engine === 'codex' && /^[0-9a-f-]{36}$/.test(x.sessionId ?? '') && Boolean(x.cwd) && !x.live && x.turnOver !== false;
+const codexTerm = (x) => x?.engine === 'codex' && /^[0-9a-f-]{36}$/.test(x.sessionId ?? '') && Boolean(x.cwd) && !x.live;
 const termView = (x) => attachable(x) || x?.via === 'trust' || (x?.engine === 'codex' && (terms.has(keyOf(x)) || (codexTerm(x) && pane.codexOn === keyOf(x))));
 // What each session last said, kept for when you come back to it or hover it first: the pane shows it at once and reads
 // again behind it.
@@ -910,8 +910,13 @@ function renderHead(x, term) {
         title: 'Continue this conversation as a copy in the background here, with its terminal; the app\'s own session stays as it is' }) : null;
   // Astra: its conversation as text until you open it in Codex's own screen. A live one may be open in the Codex app too,
   // so that asks first.
-  const codexOpen = codexTerm(x) && !term ? h('button', { class: 'act test', text: 'terminal', title: 'Open it in Codex here (codex resume), every permission allowed',
-    onclick: () => { pane.codexOn = keyOf(x); renderPane(true); } }) : null;
+  // One that stopped mid-turn carries that turn on when resumed: that asks first.
+  const codexOpen = codexTerm(x) && !term ? h('button', { class: `act${pane.armMove ? ' armed' : ' test'}`, text: pane.armMove ? 'continue its turn?' : 'terminal',
+    title: 'Open it in Codex here (codex resume), every permission allowed' + (x.turnOver === false ? '; it stopped mid-turn, and carries that turn on' : ''),
+    onclick: () => {
+      if (x.turnOver === false && !pane.armMove) { pane.armMove = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.armMove) { pane.armMove = false; renderPane(); } }, 4000); return; }
+      pane.armMove = false; pane.codexOn = keyOf(x); renderPane(true);
+    } }) : null;
   const state = pane.moving ? h('span', { class: 'p-err', style: 'color:var(--grey)', text: '…' })
     : pane.said?.cls === 'no' ? h('span', { class: 'p-err', text: pane.said.text, title: pane.said.text }) : null;
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
