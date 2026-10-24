@@ -286,8 +286,8 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
   <div class="kk"><b>j k  ↓ ↑</b><span>next, previous session</span><b>Enter</b><span>into it: its terminal, or message box</span>
   <b>Esc</b><span>close it (in a terminal, Esc is the session's)</span><b>⌘↓ ⌘↑</b><span>next, previous, from inside a terminal</span>
   <b>⌃`</b><span>between the list and the terminal</span><b>⌘K  /</b><span>find a session</span><b>c</b><span>start a session</span>
-  <b>r  l</b><span>rename, group</span><b>e</b><span>close, or archive (press twice)</span><b>m</b><span>move here, continue here (twice)</span>
-  <b>i</b><span>interject (twice)</span><b>⌘\</b><span>fold the pane</span><b>g f  g s  g w</b><span>Fleet, Satellite, World</span><b>?</b><span>this list</span></div>
+  <b>r  l</b><span>rename, group</span><b>e</b><span>close, or archive: then Enter to do it</span><b>m</b><span>move here, continue here: then Enter</span>
+  <b>i</b><span>interject: then Enter</span><b>⌘\</b><span>fold the pane</span><b>g f  g s  g w</b><span>Fleet, Satellite, World</span><b>?</b><span>this list</span></div>
 </div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
@@ -820,7 +820,7 @@ function typed(T, d) {
     if (/^\/(exit|quit)$/.test(ask)) setTimeout(() => exitSession(T), 600);
   } else if (d === '\x7f') { T.line = T.line.slice(0, -1); if (T.pend.length) T.pend.pop(); }
   else if (printable(d)) { T.line += d; if (T.rtt > 80) for (const ch of d) T.pend.push({ ch, at: Date.now() }); }
-  else T.pend = [];
+  else { T.pend = []; T.line = ''; } // an arrow, Esc, ^C, ^U or a paste: what is on its line is no longer what was typed
   drawGhost(T);
   if (T.pend.length) setTimeout(() => { T.pend = T.pend.filter((p) => p.at > Date.now() - (T.rtt * 2 + 400)); drawGhost(T); }, T.rtt * 2 + 450);
 }
@@ -880,9 +880,10 @@ function trimTerms() {
 addEventListener('beforeunload', (e) => { if ([...terms.values()].some((o) => o.x.engine === 'codex' && !o.ended)) e.preventDefault(); });
 /** /exit typed in its terminal: the session ends (conversation kept), the pane closes, it moves to closed. */
 async function exitSession(T) {
-  const x = T.x;
-  // In tmux, /exit ends Claude Code there by itself; a background job only goes back to its agent view, so it is stopped.
-  if (x.via === 'background' && x.sessionId) await api('/api/fleet/close', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => {});
+  const x = T.x, now = current();
+  // In tmux, /exit ends Claude Code there by itself; a background job only goes back to its agent view, so it is stopped,
+  // but never while it works: then /exit only lets go of it, and it carries on.
+  if (x.via === 'background' && x.sessionId && now?.state !== 'working') await api('/api/fleet/close', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => {});
   finish(T);
   load();
 }
@@ -920,7 +921,7 @@ async function moveHere() {
   pane.armMove = false; pane.moving = true; pane.said = null; renderPane();
   const r = await api('/api/fleet/adopt', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
   pane.moving = false;
-  pane.said = r.ok ? null : { cls: 'no', text: r.error };
+  pane.said = r.ok ? (r.note ? { cls: 'no', text: r.note } : null) : { cls: 'no', text: r.error };
   await load();
 }
 
@@ -1101,12 +1102,18 @@ function toList() {
   const row = pane.key && $('machines').querySelector(`[data-key="${CSS.escape(pane.key)}"]`);
   if (row) { row.focus({ preventScroll: true }); row.scrollIntoView({ block: 'nearest' }); } else document.activeElement?.blur?.();
 }
-const press = (sel) => { const b = [...$('p-head').querySelectorAll('button')].find((x) => sel(x.textContent.trim())); b?.click(); return Boolean(b); };
+/** A key that changes something (close, archive, move, interject) only arms its button and puts the focus on it: Enter
+ *  or a click does it. A second letter never does, so typing words into the list can't close anything. */
+function arm(sel) {
+  const find = (armed) => [...$('p-head').querySelectorAll('button')].find((x) => sel(x.textContent.trim().replace(/\?$/, '')) && x.textContent.trim().endsWith('?') === armed);
+  if (!find(true)) find(false)?.click();
+  find(true)?.focus();
+}
 document.addEventListener('keydown', (e) => {
   const cmd = e.metaKey || e.ctrlKey;
   if (cmd && e.key === '\\' && pane.key) { e.preventDefault(); fold(!paneUi.min); return; }
   if (cmd && e.key.toLowerCase() === 'k') { e.preventDefault(); finder(); return; }
-  if (e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && !document.activeElement?.matches?.('input, textarea, [contenteditable]')) {
+  if (e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && ($('p-term').contains(document.activeElement) || !document.activeElement?.matches?.('input, textarea, [contenteditable]'))) {
     e.preventDefault(); step(e.key === 'ArrowDown' ? 1 : -1, $('p-term').contains(document.activeElement)); return;
   }
   if (e.ctrlKey && e.key === '`') { e.preventDefault(); if ($('p-term').contains(document.activeElement)) toList(); else enter(); return; }
@@ -1118,8 +1125,9 @@ document.addEventListener('keydown', (e) => {
     if (document.activeElement?.matches?.('input, textarea, [contenteditable]')) { document.activeElement.blur(); return; }
     deselect(); return;
   }
-  if (typing() || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (typing() || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
   const k = e.key;
+  if (document.activeElement?.tagName === 'BUTTON' && (k === 'Enter' || k === ' ')) return; // the button's own: an armed one does it
   if (Date.now() - gPressed < 1200) { gPressed = 0; const to = { f: '/', s: '/satellite', w: '/world' }[k]; if (to) { e.preventDefault(); location.href = to; } return; }
   const act = {
     j: () => step(1), ArrowDown: () => step(1), k: () => step(-1), ArrowUp: () => step(-1),
@@ -1127,9 +1135,9 @@ document.addEventListener('keydown', (e) => {
     '/': () => finder(), c: () => { $('prompt').focus(); $('prompt').scrollIntoView({ block: 'center' }); },
     r: () => { const t = $('p-head').querySelector('.p-title[contenteditable]'); if (t) { t.focus(); document.getSelection()?.selectAllChildren(t); } },
     l: () => { if (!pane.more) { pane.more = true; renderPane(); } $('p-head').querySelector('.p-group')?.focus(); },
-    e: () => { if (!pane.more) { pane.more = true; renderPane(); } press((t) => /^(close|archive)\??$/.test(t)); },
-    m: () => press((t) => /^(move here|continue here)\??$/.test(t)),
-    i: () => press((t) => /^(interject|stop it and read\?)$/.test(t)),
+    e: () => { if (!pane.more) { pane.more = true; renderPane(); } arm((t) => t === 'close' || t === 'archive'); },
+    m: () => arm((t) => t === 'move here' || t === 'continue here'),
+    i: () => arm((t) => t === 'interject' || t === 'stop it and read'),
     g: () => { gPressed = Date.now(); }, '?': () => { $('keys').hidden = !$('keys').hidden; },
   }[k];
   if (act) { e.preventDefault(); act(); }

@@ -855,3 +855,21 @@ test('a snapshot that never answers does not hold the page up', async () => {
   assert.ok(Date.now() - t < 6_000);
   assert.equal(out.stages[0].t, 'none on a branch');
 });
+
+// The flow: each piece of work at one station, from an agent at work to production.
+import { stationOf, STATIONS } from '../fleet/satellite.mjs';
+test('stations: each piece of work at the one it is at, in order from an agent at work to prod', () => {
+  assert.deepEqual(STATIONS.map((s) => s.key), ['build', 'tests', 'pr', 'checks', 'land', 'staging', 'promotion', 'test', 'prod']);
+  assert.equal(stationOf({ kind: 'branch', cells: { agent: { stage: 'building' } } }), 'build');
+  assert.equal(stationOf({ kind: 'branch', cells: { agent: { stage: 'testing' } } }), 'tests');
+  assert.equal(stationOf({ sat: { stage: 'draft' }, cells: {} }), 'pr');
+  assert.equal(stationOf({ sat: { stage: 'open' }, cells: { checks: { s: 'run' } } }), 'checks');
+  assert.equal(stationOf({ sat: { stage: 'open' }, cells: { checks: { s: 'done' } } }), 'land', 'green, waiting to land');
+  assert.equal(stationOf({ sat: { stage: 'queued' }, cells: {} }), 'land');
+  assert.equal(stationOf({ sat: { stage: 'on staging' }, cells: {} }), 'staging');
+  assert.equal(stationOf({ sat: { stage: 'in promotion' }, cells: {} }), 'promotion');
+  assert.equal(stationOf({ sat: { stage: 'in main' }, cells: {} }), 'test');
+  assert.equal(stationOf({ sat: { stage: 'deploying' }, cells: { test: { s: 'run' } } }), 'test');
+  assert.equal(stationOf({ sat: { stage: 'deploying' }, cells: { prod: { s: 'run' } } }), 'prod');
+  assert.equal(stationOf({ sat: { stage: 'in prod' }, cells: {} }), 'prod');
+});

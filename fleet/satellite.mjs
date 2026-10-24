@@ -39,6 +39,27 @@ const QUEUE_QUERY = 'query($o:String!,$r:String!){repository(owner:$o,name:$r){s
 
 const short = (sha) => String(sha ?? '').slice(0, 7);
 const MIN = 60_000, HOUR = 3_600_000;
+/** The stations of the flow, in order, and the one a row is at: a branch an agent works on with no PR yet is building or
+ *  testing it (as its session's tools say); a draft is at PR; an open PR at Checks until they pass, then at Land; then
+ *  staging, the promotion, TEST, prod. */
+export const STATIONS = [
+  { key: 'build', name: 'Building' }, { key: 'tests', name: 'Local tests' }, { key: 'pr', name: 'PR' }, { key: 'checks', name: 'Checks' },
+  { key: 'land', name: 'Land' }, { key: 'staging', name: 'Staging' }, { key: 'promotion', name: 'Promotion' }, { key: 'test', name: 'TEST' }, { key: 'prod', name: 'Prod' },
+];
+export function stationOf(r) {
+  const st = r.sat?.stage;
+  if (r.kind === 'branch' || st === 'branch') return r.cells?.agent?.stage === 'testing' ? 'tests' : 'build';
+  if (st === 'draft') return 'pr';
+  if (st === 'open') return r.cells?.checks?.s === 'done' ? 'land' : 'checks';
+  if (st === 'queued' || st === 'landing') return 'land';
+  if (st === 'on staging') return 'staging';
+  if (st === 'in promotion') return 'promotion';
+  if (st === 'in main' || st === 'on TEST') return 'test';
+  if (st === 'in prod') return 'prod';
+  if (st === 'deploying' || st === 'deploy failed') return r.cells?.prod?.s === 'run' || r.cells?.prod?.s === 'fail' ? 'prod' : 'test';
+  return null;
+}
+
 /** How long something has sat: 12m, 3h, 2d. */
 export const span = (t) => { const s = Math.max(0, t) / 1000; return s < 60 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
 // How long a stage may sit before the work is stuck in it. Each is a judgment about this repo's rhythm (the gate lands a green PR
@@ -275,7 +296,7 @@ export function placeAgents(snap, { repo = REPO, home = os.homedir() } = {}) {
       if (!branch) { if (known) unknown++; continue; }
       if (NOT_WORK.has(branch)) continue;
       placed.push({ machine: m.name, account: x.sub ?? a.id ?? null, engine: a.engine, sessionId: x.sessionId ?? null, title: x.title ?? x.name ?? null,
-        state: x.state, lastAt: x.lastAt ?? x.startedAt ?? null, branch, repoKnown: known === true, shared,
+        state: x.state, stage: x.stage ?? null, lastAt: x.lastAt ?? x.startedAt ?? null, branch, repoKnown: known === true, shared,
         ...(shared ? { words: [x.said, x.doing, x.running?.step, x.running?.cmd].filter((v) => typeof v === 'string').join('\n').slice(0, 2000) } : {}) });
     }
   }
@@ -334,7 +355,7 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
   const agentCell = (list) => {
     if (!list?.length) return null;
     const a = list[0];
-    return { s: AGENT_CELL[a.state] ?? 'wait', t: a.title || 'agent', sub: a.shared ? `${a.machine} · shared` : a.machine, more: list.length - 1,
+    return { s: AGENT_CELL[a.state] ?? 'wait', t: a.title || 'agent', sub: a.shared ? `${a.machine} · shared` : a.machine, more: list.length - 1, stage: a.stage ?? null,
       tip: list.map((x) => `${x.machine}${x.account ? ' · ' + x.account : ''}: ${x.title ?? 'agent'} (${x.state})${x.shared ? ', in the shared checkout' : ''}${x.inferred ? ', its own words name this branch' : ''}`).join('\n') };
   };
   const checksCell = (sum) => {
@@ -506,7 +527,11 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
     { key: 'test', name: 'TEST', ...deployHead('test') },
     { key: 'prod', name: 'Prod', ...deployHead('prod') },
   ];
-  return { ok: true, repo: raw.repo, at: raw.at, took: raw.took, calls: raw.calls, days: raw.days, warnings: raw.warnings ?? [], workflows: raw.workflows ?? [],
+  // The station each piece of work is at, from an agent at work to production (the flow drawn above the table).
+  for (const r of rows) r.station = stationOf(r);
+  // Yours: a PR you opened, or one of your Fleet sessions works on it (an agent cell). The rest is everyone else's.
+  for (const r of rows) r.mine = Boolean((raw.me && r.author === raw.me) || r.cells?.agent || r.kind === 'branch');
+  return { ok: true, repo: raw.repo, at: raw.at, took: raw.took, calls: raw.calls, days: raw.days, warnings: raw.warnings ?? [], workflows: raw.workflows ?? [], me: raw.me ?? null, stations: STATIONS,
     stages, rows: orderRows(rows), counts: { open: open.length, merged: merged.length, shipped: rows.filter((r) => r.shipped).length, attention: rows.filter((r) => r.attention && !r.stuck).length, stuck: rows.filter((r) => r.stuck).length } };
 }
 
@@ -521,7 +546,7 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
   let wfMeta = null;           // the workflow files and their ids: read at most hourly
   const wfExtra = new Map();   // workflow id → its last run, for the ones too quiet to be in the newest runs (ten minutes)
   const branchCache = new Map(); // branch → { at, info }: does GitHub have it, and where is its tip (a minute)
-  let raw = null, rawAt = 0, inflight = null, failure = null, lastTry = 0;
+  let raw = null, rawAt = 0, inflight = null, failure = null, lastTry = 0, me = null;
 
   /** One full read of GitHub. The calls it made are counted, and the guard sees every one. */
   async function gather() {
@@ -644,8 +669,10 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
       if (status) pairCache.set(k, ['ahead', 'identical'].includes(String(status).trim()));
     })));
 
+    // Whose GitHub this is (gh's own login): asked once.
+    me ??= await soft(call(['api', 'user', '--jq', '.login']).then((v) => String(v).trim() || null), null, 'who you are');
     return {
-      ok: true, repo, at: started, took: now() - started, calls, days, warnings,
+      ok: true, repo, at: started, took: now() - started, calls, days, warnings, me,
       open,
       merged: work,
       promos, line, deploys, queue, workflows,

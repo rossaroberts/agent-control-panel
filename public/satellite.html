@@ -110,6 +110,26 @@ th a:hover { text-decoration: underline; text-underline-offset: 3px; }
 th .dot { margin: 0 10px 0 4px; }
 
 /* the three groups: blocked, on its way, shipped */
+/* the flow: the stations from an agent at work to production, each with the work at it (yours in ink, stuck in orange) */
+.flow { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 0; margin: 6px 0 40px; position: relative; }
+.flow::before { content: ""; position: absolute; left: 8px; right: 8px; top: 6px; border-top: 1px solid var(--rule); }
+.st { min-width: 0; padding: 0 8px; cursor: pointer; border-radius: 4px; }
+.st:hover { background: var(--tint); }
+.st.on { background: var(--tint); }
+.st h3 { font-size: 13px; font-weight: 500; margin: 0; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st .n { font-size: 13px; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }
+.st .n b { font-weight: 500; color: var(--ink); }
+.st .n .x { color: var(--orange); }
+.st .pip { display: block; width: 9px; height: 9px; border-radius: 50%; background: var(--paper); border: 1.5px solid var(--quiet); margin: 2px 0 10px; position: relative; z-index: 1; box-sizing: border-box; }
+.st.busy .pip { border-color: var(--blue); background: var(--blue); }
+.st .w { font-size: 12px; line-height: 1.45; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st .w.mine { color: var(--ink); }
+.st .w.stuck { color: var(--orange); }
+.st .more { font-size: 12px; color: var(--quiet); }
+@media (max-width: 900px) { .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 18px; } .flow::before { display: none; } }
+tr.whose td { padding: 44px 10px 2px; font-size: 17px; font-weight: 500; color: var(--ink); overflow: visible; border-bottom: 1px solid var(--rule); }
+tr.whose:first-child td { padding-top: 6px; }
+tr.whose td .c { font-weight: 400; font-size: 13px; color: var(--grey); margin-left: 12px; }
 tr.group td { padding: 30px 10px 6px; font-size: 15px; font-weight: 500; color: var(--ink); overflow: visible; }
 tr.group:first-child td { padding-top: 14px; }
 tr.group.blocked td { color: var(--red); }
@@ -132,6 +152,7 @@ tr.group td button:hover { color: var(--ink); }
   <div class="err" id="err" hidden></div>
   <div class="note" id="note" hidden></div>
   <div class="wf" id="wf" hidden aria-label="Workflows: the last run of each"></div>
+  <div class="flow" id="flow" hidden aria-label="The flow: each piece of work at its station"></div>
   <div class="wrap"><table id="table" hidden>
     <colgroup><col class="c-agent"><col class="c-pr"><col class="c-checks"><col class="c-land"><col class="c-promotion"><col class="c-test"><col class="c-prod"></colgroup>
     <thead><tr id="head"></tr></thead>
@@ -249,34 +270,67 @@ function renderWorkflows(list) {
     glyph(w.s), w.label, w.s === 'wait' && w.t ? h('span', { class: 'at', text: w.t }) : null, h('span', { class: 'at', text: ago(w.at) }))));
 }
 
+// The flow: one station after another; at each, the work there now, yours first and stuck first; shipped is a count. Click
+// a station to see only its work in the table below; again to see all.
+let atStation = null;
+function renderFlow(d) {
+  const el = $('flow');
+  if (!d.stations?.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.replaceChildren(...d.stations.map((st) => {
+    const here = d.rows.filter((r) => r.station === st.key)
+      .sort((a, b) => Number(Boolean(b.stuck)) - Number(Boolean(a.stuck)) || Number(b.mine) - Number(a.mine) || (b.at ?? 0) - (a.at ?? 0));
+    const mine = here.filter((r) => r.mine).length, stuck = here.filter((r) => r.stuck).length;
+    const list = st.key === 'prod' ? [] : here.slice(0, 7);
+    return h('div', { class: `st${here.length ? ' busy' : ''}${atStation === st.key ? ' on' : ''}`, title: here.map((r) => `${r.number ? '#' + r.number + ' ' : ''}${r.title}`).join('\n'),
+        onclick: () => { atStation = atStation === st.key ? null : st.key; render(); } },
+      h('span', { class: 'pip' }),
+      h('h3', { text: st.name }),
+      h('div', { class: 'n', title: `${here.length} here${mine ? `, ${mine} yours` : ''}${stuck ? `, ${stuck} stuck` : ''}` },
+        here.length ? h('b', { text: String(here.length) }) : '·', mine && mine !== here.length ? ` · ${mine} yours` : '', stuck ? h('span', { class: 'x', text: ` · ${stuck} stuck` }) : ''),
+      ...list.map((r) => h('div', { class: `w${r.mine ? ' mine' : ''}${r.stuck ? ' stuck' : ''}`, text: r.number ? `#${r.number} ${r.title}` : r.title })),
+      here.length > list.length && st.key !== 'prod' ? h('div', { class: 'more', text: `+${here.length - list.length} more` }) : null);
+  }));
+}
+
 function render() {
   const d = data;
   if (!d) return;
   renderWorkflows(d.workflows);
+  renderFlow(d);
   $('reading').hidden = true;
   $('table').hidden = false;
   const head = $('head');
   head.replaceChildren(...d.stages.map(headCell));
   const body = $('body');
-  const stuck = d.rows.filter((r) => r.stuck), blocked = d.rows.filter((r) => !r.stuck && r.attention);
-  const flying = d.rows.filter((r) => !r.stuck && !r.attention && !r.shipped), shipped = d.rows.filter((r) => !r.stuck && !r.attention && r.shipped);
   const hide = store.get('hideShipped') === '1';
   const line = (r) => {
     const tr = h('tr', { class: 'row', onclick: (e) => { if (!e.target.closest('a') && r.url) window.open(r.url, '_blank', 'noopener'); } });
     for (const k of STAGES) tr.append(cell(k, r.cells[k], r));
     return tr;
   };
+  // Yours first (your PRs, and what your sessions work on), then everyone else's: in each, stuck, blocked, on its way, shipped.
   const kids = [];
-  if (stuck.length) kids.push(groupRow('stuck', 'stuck', stuck.length), ...stuck.map(line));
-  if (blocked.length) kids.push(groupRow('blocked', 'blocked', blocked.length), ...blocked.map(line));
-  if (flying.length) kids.push(groupRow('', 'on its way', flying.length), ...flying.map(line));
-  if (shipped.length) {
-    kids.push(groupRow('', 'shipped', shipped.length, h('button', { text: hide ? 'show' : 'hide', onclick: () => { store.set('hideShipped', hide ? '0' : '1'); render(); } })));
-    if (!hide) kids.push(...shipped.map(line));
-  }
-  $('nstuck').hidden = !stuck.length;
-  $('nstuck').textContent = `${stuck.length} stuck`;
-  document.title = stuck.length ? `Satellite · ${stuck.length} stuck` : 'Satellite';
+  const part = (rows, title) => {
+    if (!rows.length) return;
+    const stuck = rows.filter((r) => r.stuck), blocked = rows.filter((r) => !r.stuck && r.attention);
+    const flying = rows.filter((r) => !r.stuck && !r.attention && !r.shipped), shipped = rows.filter((r) => !r.stuck && !r.attention && r.shipped);
+    kids.push(h('tr', { class: 'whose' }, h('td', { colspan: 7 }, title, h('span', { class: 'c', text: `${rows.length}${stuck.length ? ` · ${stuck.length} stuck` : ''}` }))));
+    if (stuck.length) kids.push(groupRow('stuck', 'stuck', stuck.length), ...stuck.map(line));
+    if (blocked.length) kids.push(groupRow('blocked', 'blocked', blocked.length), ...blocked.map(line));
+    if (flying.length) kids.push(groupRow('', 'on its way', flying.length), ...flying.map(line));
+    if (shipped.length) {
+      kids.push(groupRow('', 'shipped', shipped.length, h('button', { text: hide ? 'show' : 'hide', onclick: () => { store.set('hideShipped', hide ? '0' : '1'); render(); } })));
+      if (!hide) kids.push(...shipped.map(line));
+    }
+  };
+  const shownRows = atStation ? d.rows.filter((r) => r.station === atStation) : d.rows;
+  part(shownRows.filter((r) => r.mine), d.me ? `Yours (${d.me})` : 'Yours');
+  part(shownRows.filter((r) => !r.mine), 'Everyone else');
+  const stuckAll = d.rows.filter((r) => r.stuck).length, stuckMine = d.rows.filter((r) => r.stuck && r.mine).length;
+  $('nstuck').hidden = !stuckAll;
+  $('nstuck').textContent = `${stuckAll} stuck${stuckMine ? ` · ${stuckMine} yours` : ''}`;
+  document.title = stuckAll ? `Satellite · ${stuckAll} stuck` : 'Satellite';
   body.replaceChildren(...kids);
   const warn = [...(d.warnings ?? [])];
   $('note').hidden = !warn.length;

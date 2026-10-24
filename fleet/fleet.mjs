@@ -37,7 +37,7 @@ const titleSchema = (epics) => ({ type: 'object', additionalProperties: false, r
   items: { type: 'object', additionalProperties: false, required: ['id', 'title', 'stage', 'epic'], properties: { id: { type: 'string' },
     title: { type: 'string', maxLength: 40 }, stage: { type: 'string', enum: STAGES }, epic: { type: 'string', enum: [...epics, 'Other'] } } } } } });
 const TITLE_BATCH = 40;
-// A working session's stage moves on without a new ask (building, then testing, then promoting): ask again this often.
+// One whose title didn't come back (the call failed) is asked again after this long, never sooner.
 const RESTAGE_MS = 10 * 60_000;
 const PLACEHOLDER = /^[\w.-]+-[0-9a-f]{2}$/; // the name Claude Code makes up for an unnamed session
 // Control characters out too: a NUL in a session's text must never reach a command line.
@@ -192,7 +192,9 @@ export function createFleet({ dir, quiet = () => {} }) {
       if (!(x.firstAsk || x.lastAsk) || !x.sessionId) continue;
       const key = `${m.name}:${x.sessionId}`, h = askHash(x), t = titles[key];
       if (Date.now() - (asked[key] ?? 0) < RESTAGE_MS) continue;
-      if (t?.h !== h || !t.epic || (x.state === 'working' && Date.now() - (t.at ?? 0) > RESTAGE_MS)) want.push({ key, h, x });
+      // Once per session, ever: a title and a group for one that has none yet. Its stage comes from its tools now, and a
+      // title once written stays, so asking again would only spend your tokens.
+      if (!t?.title || !t.epic) want.push({ key, h, x });
     }
     want.sort((a, b) => Number(b.x.live) - Number(a.x.live)); // the open ones first
     if (!want.length) return;
@@ -313,7 +315,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   const groupsMade = (epics) => [...new Set(Object.values(labels).map((l) => l.group).filter((g) => g && !epics.some((e) => e.name === g)))].sort();
   /** Why a Codex thread must not be resumed in a terminal here: it runs somewhere (the Codex app), by the last read. */
   function codexBusy(machine, sessionId) {
-    if (!last || Date.now() - last.at > 60_000) return null;
+    if (!last || Date.now() - last.at > 60_000) { soon(); return 'Checking it is not open in Codex: try again in a few seconds.'; }
     const x = last.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'codex' ? a.sessions ?? [] : [])).find((s) => s.sessionId === sessionId);
     return x?.live ? 'It is open in Codex (the app or a terminal): finish there, or close it there first.' : null;
   }
@@ -373,7 +375,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   let seen = {};
   try { seen = JSON.parse(fs.readFileSync(seenFile, 'utf8')); } catch {}
   let seenDirty = false, seenWritten = 0;
-  const KEPT = ['engine', 'id', 'sessionId', 'name', 'title', 'cwd', 'startedAt', 'lastAt', 'model', 'via', 'web', 'effort', 'kind', 'stage'];
+  const KEPT = ['engine', 'id', 'sessionId', 'name', 'title', 'cwd', 'startedAt', 'lastAt', 'model', 'via', 'web', 'effort', 'kind', 'stage', 'turnOver', 'branch'];
   function ledger(reads) {
     for (const m of reads) {
       const reported = new Set();

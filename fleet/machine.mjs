@@ -1081,7 +1081,7 @@ export async function send(a) {
   if (!p) return { ok: false, error: 'There is no such account here.' };
   const roster = await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) });
   let row = null;
-  try { row = JSON.parse(roster.stdout).find((r) => r.sessionId === a.sessionId); } catch {}
+  try { row = rowOf(JSON.parse(roster.stdout), a.sessionId); } catch {}
   if (!row) return { ok: false, error: 'That session is not listed any more.' };
   if (!row.pid) return { ok: false, error: 'It is not running.' };
   // A Remote Control session (`--sdk-url …/sessions/cse_<id>`) takes a message from any client of its claude.ai session:
@@ -1140,7 +1140,7 @@ export async function close(a) {
   if (!p) return { ok: false, error: 'There is no such account here.' };
   const roster = await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) });
   let row = null;
-  try { row = JSON.parse(roster.stdout).find((r) => r.sessionId === a.sessionId); } catch {}
+  try { row = rowOf(JSON.parse(roster.stdout), a.sessionId); } catch {}
   if (!row) return { ok: false, error: 'It is not listed any more.' };
   if (row.kind === 'background' && /^[0-9a-f]{8}$/.test(row.id ?? '')) {
     const r = await run(bin('claude'), ['stop', row.id], { env: profileEnv(p) });
@@ -1169,7 +1169,7 @@ export async function archive(a) {
   let row = null, running = [];
   try { row = JSON.parse(all.stdout).find((r) => r.id === a.id); running = JSON.parse(active.stdout); } catch { return { ok: false, error: 'Could not read its jobs just now: try again in a moment.' }; }
   if (row && running.some((r) => r.id === a.id || (row.sessionId && r.sessionId === row.sessionId)) && !(await gone(p, profileEnv(p), a.id))) row.active = true;
-  if (row && sessionState(row, null).live) return { ok: false, error: 'It is running again: close it first.' };
+  if (row && (row.pid || sessionState(row, null).live)) return { ok: false, error: 'It is running again: close it first.' };
   const r = await run(bin('claude'), ['rm', a.id], { env: profileEnv(p) });
   return r.err && !/not found|no such/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true };
 }
@@ -1185,7 +1185,7 @@ export async function adopt(a) {
   if (!p) return { ok: false, error: 'There is no such account here.' };
   const roster = await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) });
   let row = null;
-  try { row = JSON.parse(roster.stdout).find((r) => r.sessionId === a.sessionId); } catch {}
+  try { row = rowOf(JSON.parse(roster.stdout), a.sessionId); } catch {}
   if (!row) return { ok: false, error: 'It is not listed any more.' };
   if (row.kind === 'background' && row.pid) return { ok: true, id: row.id };
   if (!Number.isInteger(row.pid) || row.pid <= 1) return { ok: false, error: 'It is not running.' };
@@ -1200,15 +1200,18 @@ export async function adopt(a) {
   for (let i = 0; i < 40; i++) { try { process.kill(row.pid, 0); } catch { break; } await new Promise((r) => setTimeout(r, 250)); }
   const args = ['--bg', '--resume', row.sessionId, ...ALLOW_ALL];
   if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
-  const r = await run(bin('claude'), args, { cwd: row.cwd, env: profileEnv(p), timeout: 30_000 });
-  const id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
-  // Claude Code makes a copy when it still sees the old process: take the copy away rather than leave two.
+  const resume = () => run(bin('claude'), args, { cwd: row.cwd, env: profileEnv(p), timeout: 30_000 });
+  let r = await resume(), id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
+  // Claude Code makes a copy when it still sees the old process: that copy goes, and once more after a moment. If it is a
+  // copy again, it stays: the original is closed by now, and the copy carries the whole conversation on.
   if (id && /started a copy/.test(r.stdout + r.stderr)) {
     await run(bin('claude'), ['stop', id], { env: profileEnv(p) });
     await run(bin('claude'), ['rm', id], { env: profileEnv(p) });
-    return { ok: false, error: 'It had not finished closing. Try again in a moment.' };
+    await new Promise((ok) => setTimeout(ok, 2500));
+    r = await resume(); id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
+    if (id && /started a copy/.test(r.stdout + r.stderr)) return { ok: true, id, copy: true, note: `It goes on as a copy (${id}), the whole conversation in it.` };
   }
-  return id ? { ok: true, id } : { ok: false, error: `It was closed but did not start again: ${oneLine(r.stderr || r.stdout || r.err?.message, 240) || 'claude --bg --resume failed'}. Resume it with claude --resume ${row.sessionId}` };
+  return id ? { ok: true, id } : { ok: false, error: `It was closed but did not start again: ${oneLine(r.stderr || r.stdout || r.err?.message, 240) || 'claude --bg --resume failed'}. Its conversation is kept: resume it with claude --resume ${row.sessionId}` };
 }
 
 /** Continue a session as a copy in the background, so it opens as a terminal here while the original (a desktop-app
@@ -1218,7 +1221,7 @@ export async function fork(a) {
   const p = claudeProfiles().find((x) => x.id === a?.profile);
   if (!p) return { ok: false, error: 'There is no such account here.' };
   let row = null;
-  try { row = JSON.parse((await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) })).stdout).find((r) => r.sessionId === a.sessionId); } catch {}
+  try { row = rowOf(JSON.parse((await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) })).stdout), a.sessionId); } catch {}
   if (!row) return { ok: false, error: 'It is not listed any more.' };
   if (row.status === 'busy' || row.status === 'waiting' || row.waitingFor) return { ok: false, error: 'It is busy: continue it here once it is idle.' };
   const file = row.cwd && transcriptOf(p, row.sessionId, row.cwd);
@@ -1232,6 +1235,9 @@ export async function fork(a) {
   const why = oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg --resume --fork-session failed';
   return /^Workspace not trusted/.test(why) ? { ok: false, untrusted: true, cwd: tilde(row.cwd), error: why } : { ok: false, error: why };
 }
+
+/** A session's roster row: where a stopped job's record and a running process both name it, the running one. */
+const rowOf = (rows, sessionId) => rows.filter((r) => r?.sessionId === sessionId).sort((x, y) => Number(Boolean(y.pid)) - Number(Boolean(x.pid)))[0] ?? null;
 
 // ---------------------------------------------------------------- interject
 /** Your message now, not after the step it is in. A message you send while a session works waits for its current step to
