@@ -620,15 +620,24 @@ function select(x) {
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
   Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null });
   $('p-reply').value = drafts.get(key) ?? '';
-  document.body.classList.add('has-pane');
-  renderMachines(); renderPane(true); peek();
+  inPlace(key, () => { document.body.classList.add('has-pane'); renderMachines(); renderPane(true); });
+  peek();
 }
 function deselect() {
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
   hideTerms(); // the terminal stays attached out of sight, so opening it again is instant
+  const was = pane.key;
   pane.key = null;
-  document.body.classList.remove('has-pane');
-  renderMachines(); renderPane();
+  inPlace(was, () => { document.body.classList.remove('has-pane'); renderMachines(); renderPane(); });
+}
+/** The pane opening or closing narrows or widens the list (rows wrap differently): the row you pressed stays where it
+ *  was on the screen, under your pointer. */
+function inPlace(key, change) {
+  const row = () => key && document.querySelector(`#machines [data-key="${CSS.escape(key)}"]`);
+  const before = row()?.getBoundingClientRect().top;
+  change();
+  const after = row()?.getBoundingClientRect().top;
+  if (before != null && after != null && Math.abs(after - before) > 1) scrollBy(0, after - before);
 }
 let peeking = false;
 async function peek() {
@@ -811,7 +820,14 @@ function fitShown(focus = false) {
   try { T.fit.fit(); } catch {}
   lastSize = { cols: T.term.cols, rows: T.term.rows };
   T.term.refresh(0, T.term.rows - 1);
-  if (focus) T.term.focus();
+  if (focus) focusTerm(T);
+}
+/** The focus in a terminal, the list left where you had it: Safari scrolls the page to the top as the terminal's input
+ *  takes the focus (preventScroll or not), so the page goes back to where it was at once. */
+function focusTerm(T) {
+  const x = scrollX, y = scrollY;
+  T.el.querySelector('.xterm-helper-textarea')?.focus({ preventScroll: true });
+  if (scrollX !== x || scrollY !== y) scrollTo(x, y);
 }
 function hideTerms() { shown = null; for (const o of terms.values()) o.el.hidden = true; $('p-term').hidden = true; }
 function dropTerm(key) {
@@ -1099,9 +1115,12 @@ function renderMachines() {
   }).filter(Boolean);
   const box = h('div', {}, ...[top, ...blocks].filter(Boolean));
   if (box.innerHTML === $('machines').innerHTML) return;
-  const had = document.activeElement?.closest?.('#machines [data-key]')?.dataset.key;
+  const had = document.activeElement?.closest?.('#machines [data-key]')?.dataset.key, x = scrollX, y = scrollY;
   $('machines').replaceChildren(...box.childNodes);
   if (had) $('machines').querySelector(`[data-key="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
+  // Where you were in the list stays: Safari sends the page to the top when the list is swapped in the moment the pane
+  // opens beside it (the list narrowing as it changes).
+  if (scrollX !== x || scrollY !== y) scrollTo(x, y);
 }
 
 // ---------------------------------------------------------------- load
