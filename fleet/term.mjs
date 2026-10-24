@@ -86,7 +86,9 @@ export function createTerms({ config }) {
       if (codex) {
         if (profile !== 'codex') env.CODEX_HOME = path.join(HOME, `.${profile}`);
         const cwd = dir === '~' ? HOME : dir.startsWith('~/') ? path.join(HOME, dir.slice(2)) : dir;
-        return fs.existsSync(cwd) ? { argv: [codexBin(), 'resume', codex.sessionId, '--dangerously-bypass-approvals-and-sandbox'], env, cwd } : null;
+        // --no-daemon: without it Codex starts a shared background service that keeps the thread (and blocks the Codex app,
+        // "open in another app") after this terminal closes.
+        return fs.existsSync(cwd) ? { argv: [codexBin(), 'resume', '--no-daemon', codex.sessionId, '--dangerously-bypass-approvals-and-sandbox'], env, cwd } : null;
       }
       if (profile !== 'default') env.CLAUDE_CONFIG_DIR = path.join(HOME, `.claude-${profile}`);
       if (tmux) return { argv: [tmuxBin(), '-L', tmux.socket, 'attach', '-t', tmux.target], env, cwd: HOME };
@@ -100,7 +102,7 @@ export function createTerms({ config }) {
     const there = dir == null ? null : dir === '~' ? '"$HOME"' : dir.startsWith('~/') ? `"$HOME"/${shq(dir.slice(2))}` : shq(dir);
     const inner = `export XDG_RUNTIME_DIR=/run/user/$(id -u) TERM=xterm-256color COLORTERM=truecolor COLORFGBG='15;0' LANG=C.UTF-8${cfg}; `
       + (tmux ? `exec tmux -L ${tmux.socket} attach -t ${tmux.target}`
-        : codex ? `cd -- ${there} && exec codex resume ${codex.sessionId} --dangerously-bypass-approvals-and-sandbox`
+        : codex ? `cd -- ${there} && exec codex resume --no-daemon ${codex.sessionId} --dangerously-bypass-approvals-and-sandbox`
         : there ? `cd -- ${there} && exec claude` : `exec claude attach ${job}`);
     const remote = m.user ? `sudo -n -u ${m.user} -H bash -lc ${shq(inner)}` : `bash -lc ${shq(inner)}`;
     return { argv: ['ssh', '-tt', ...sshArgs(), m.ssh, remote], env, cwd: HOME };
