@@ -535,6 +535,7 @@ function readRollout(f, m, open) {
     if (d.type === 'turn_context' && !model) { model = p.model ?? null; effort = p.effort ?? null; }
     if (p.type === 'token_count' && !tokens) { tokens = p.info ?? null; limits = p.rate_limits ?? null; }
     if (p.type === 'task_complete' && done === null) { done = true; said ??= oneLine(p.last_agent_message, 400); }
+    if (p.type === 'turn_aborted' && done === null) { done = true; asking ??= false; } // interrupted: idle, and no question stands
     if ((p.type === 'task_started' || p.type === 'user_message') && done === null) done = false;
     if (asking === null && (p.type === 'function_call' || p.type === 'function_call_output')) asking = p.type === 'function_call' && /request_user_input|ask_user/i.test(p.name ?? '');
     if (p.type === 'function_call' && !doing) {
