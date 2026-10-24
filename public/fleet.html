@@ -539,9 +539,9 @@ function openTrust({ machine, profile, cwd, sub }) {
   select(pane.trust);
 }
 /** A background session opens as its own terminal. */
-const attachable = (x) => x?.engine === 'claude' && x.live && x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '');
+const attachable = (x) => x?.engine === 'claude' && x.live && ((x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '')) || Boolean(x.tmux));
 /** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
-const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
+const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && !x.tmux && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
 const termView = (x) => attachable(x) || x?.via === 'trust';
 // What each session last said, kept for when you come back to it or hover it first: the pane shows it at once and reads
 // again behind it.
@@ -673,7 +673,7 @@ async function stream(T) {
   const { term, x } = T;
   try {
     const r = await fetch('/api/term/open', { method: 'POST', signal: T.ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
-      body: JSON.stringify({ machine: x.machine, profile: x.profile, ...(x.via === 'trust' ? { trust: x.cwd } : { id: x.id }), cols: term.cols, rows: term.rows }) });
+      body: JSON.stringify({ machine: x.machine, profile: x.profile, ...(x.via === 'trust' ? { trust: x.cwd } : x.tmux && x.via !== 'background' ? { tmux: x.tmux } : { id: x.id }), cols: term.cols, rows: term.rows }) });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${r.status}`); }
     T.id = r.headers.get('x-term-id');
     flushTerm(T);
@@ -769,7 +769,8 @@ function trimTerms() {
 /** /exit typed in its terminal: the session ends (conversation kept), the pane closes, it moves to closed. */
 async function exitSession(T) {
   const x = T.x;
-  if (x.via !== 'trust' && x.sessionId) await api('/api/fleet/close', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => {});
+  // In tmux, /exit ends Claude Code there by itself; a background job only goes back to its agent view, so it is stopped.
+  if (x.via === 'background' && x.sessionId) await api('/api/fleet/close', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => {});
   finish(T);
   load();
 }

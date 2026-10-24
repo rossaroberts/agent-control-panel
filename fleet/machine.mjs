@@ -317,6 +317,12 @@ async function claudeProfile(p, learned, usage) {
   ]);
   let running = new Set();
   try { running = new Set(JSON.parse(active.stdout).map((r) => r.sessionId ?? r.id)); } catch {}
+  // Listed as running but with no process: waiting at a startup question, or a record left behind long ago (one from July
+  // was still listed). Only one whose screen Claude Code can still show is live.
+  let rows = [];
+  try { rows = JSON.parse(roster.stdout); } catch {}
+  await Promise.all(rows.filter((r) => r?.sessionId && !r.pid && running.has(r.sessionId) && /^[0-9a-f]{8}$/.test(r.id ?? ''))
+    .map(async (r) => { if ((await run(claude, ['logs', r.id], { env, timeout: 5000 })).err) running.delete(r.sessionId); }));
   const cfg = readJson(p.config)?.oauthAccount ?? null;
   let a = null;
   try { a = JSON.parse(auth.stdout); } catch {}
@@ -661,16 +667,36 @@ async function machineStatus() {
 
 // ---------------------------------------------------------------- collect
 
+/** Every tmux pane of this user's tmux servers: pane pid → { socket, target }. A session running in one can be attached to
+ *  there (`tmux -L <socket> attach -t <target>`), its real screen, with nothing moved or restarted. */
+async function tmuxPanes() {
+  const dir = path.join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid?.() ?? 0}`);
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => /^[\w.-]{1,40}$/.test(n)); } catch {}
+  const panes = new Map();
+  await Promise.all(names.map(async (n) => {
+    const r = await run(bin('tmux'), ['-L', n, 'list-panes', '-a', '-F', '#{pane_pid} #{session_name}:#{window_index}.#{pane_index}'], { timeout: 3000 });
+    for (const l of r.stdout.split('\n')) { const m = /^(\d+) ([\w.-]{1,60}:\d+\.\d+)$/.exec(l.trim()); if (m) panes.set(Number(m[1]), { socket: n, target: m[2] }); }
+  }));
+  if (!panes.size) return () => null;
+  // A pane's process may be a shell with Claude Code under it: walk up from the session's process.
+  const parent = new Map();
+  for (const l of (await run('ps', ['-eo', 'pid=,ppid='])).stdout.split('\n')) { const [a, b] = l.trim().split(/\s+/).map(Number); if (a) parent.set(a, b); }
+  return (pid) => { for (let p = pid, i = 0; p > 1 && i < 6; p = parent.get(p), i++) if (panes.has(p)) return panes.get(p); return null; };
+}
+
 export async function collect() {
   const profiles = claudeProfiles(), learned = new Map();
   for (const p of profiles) statusSnapshots(p, learned);
   let usage = {};
   try { usage = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8')); } catch {}
-  const [procs, claude, status] = await Promise.all([
+  const [procs, claude, status, paneOf] = await Promise.all([
     processes().catch(() => null),
     Promise.all(profiles.map((p) => claudeProfile(p, learned, usage).catch((e) => ({ engine: 'claude', id: p.id, dir: tilde(p.dir), error: String(e?.message ?? e).slice(0, 200), sessions: [] })))),
     machineStatus().catch(() => null),
+    tmuxPanes().catch(() => () => null),
   ]);
+  for (const a of claude) for (const x of a.sessions ?? []) if (x.live && x.pid && x.via !== 'background') { const t = paneOf(x.pid); if (t) x.tmux = t; }
   // Keep where each transcript was read to; forget ones not seen for a day.
   for (const [k, v] of Object.entries(usage)) if (Date.now() - (v.seen ?? 0) > DAY) delete usage[k];
   try { fs.mkdirSync(path.dirname(USAGE_FILE), { recursive: true }); fs.writeFileSync(USAGE_FILE + '.tmp', JSON.stringify(usage)); fs.renameSync(USAGE_FILE + '.tmp', USAGE_FILE); } catch {}
@@ -747,7 +773,7 @@ export async function launch(a) {
     if (effort && !EFFORTS.has(effort)) return { ok: false, error: 'Pick an effort from the list.' };
     const cwd = folder(a.cwd);
     if (!cwd) return { ok: false, error: `There is no folder at ${a.cwd}.` };
-    const args = ['--bg'];
+    const args = ['--bg', ...ALLOW_ALL];
     if (name) args.push('--name', name);
     if (model) args.push('--model', model);
     if (effort) args.push('--effort', effort);
@@ -766,7 +792,7 @@ export async function launch(a) {
     const cwd = folder(a.cwd);
     if (!cwd) return { ok: false, error: `There is no folder at ${a.cwd}.` };
     const env = { ...baseEnv(), CODEX_HOME: home };
-    return detached(bin('codex'), ['exec', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-C', cwd, prompt],
+    return detached(bin('codex'), ['exec', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '-C', cwd, prompt],
       { cwd, env, log: path.join(logs, `codex-${stamp}.log`) });
   }
 
@@ -949,7 +975,9 @@ export async function archive(a) {
   return r.err && !/not found|no such/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true };
 }
 
-const MODES = new Set(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']);
+// Everything Fleet starts runs with every permission allowed (Ross's call, 2026-10-24): no permission prompts, and a
+// project's own MCP servers enabled without the startup question (for that session only; settings files are untouched).
+const ALLOW_ALL = ['--dangerously-skip-permissions', '--settings', JSON.stringify({ enableAllProjectMcpServers: true })];
 /** Move an idle session into the background, conversation kept, so it opens as a terminal here: its process is closed the
  *  way close() does it, then `claude --bg --resume <id>` continues it under the same id, in its folder, on its model and
  *  permission mode. Never while it works or waits on you, and never a desktop-app session. */
@@ -968,16 +996,11 @@ export async function adopt(a) {
   if (!file) return { ok: false, error: 'It has no saved conversation to continue.' };
   const t = readTranscript(file);
   if (t.turnOver === false) return { ok: false, error: 'It is mid-turn: move it once it is idle.' };
-  const argv = process.platform === 'linux'
-    ? (() => { try { return fs.readFileSync(`/proc/${row.pid}/cmdline`, 'utf8').split('\0'); } catch { return []; } })()
-    : (await run('ps', ['-ww', '-o', 'args=', '-p', String(row.pid)])).stdout.trim().split(/\s+/);
-  const mode = argv.includes('--dangerously-skip-permissions') ? 'bypassPermissions' : argv[argv.indexOf('--permission-mode') + 1];
   const closed = await close(a);
   if (!closed.ok) return closed;
   for (let i = 0; i < 40; i++) { try { process.kill(row.pid, 0); } catch { break; } await new Promise((r) => setTimeout(r, 250)); }
-  const args = ['--bg', '--resume', row.sessionId];
+  const args = ['--bg', '--resume', row.sessionId, ...ALLOW_ALL];
   if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
-  if (MODES.has(mode)) args.push('--permission-mode', mode);
   const r = await run(bin('claude'), args, { cwd: row.cwd, env: profileEnv(p), timeout: 30_000 });
   const id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
   // Claude Code makes a copy when it still sees the old process: take the copy away rather than leave two.
@@ -1002,7 +1025,7 @@ export async function fork(a) {
   const file = row.cwd && transcriptOf(p, row.sessionId, row.cwd);
   if (!file) return { ok: false, error: 'It has no saved conversation to continue.' };
   const t = readTranscript(file);
-  const args = ['--bg', '--resume', row.sessionId, '--fork-session'];
+  const args = ['--bg', '--resume', row.sessionId, '--fork-session', ...ALLOW_ALL];
   if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
   const r = await run(bin('claude'), args, { cwd: row.cwd, env: profileEnv(p), timeout: 30_000 });
   const id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];

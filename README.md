@@ -171,6 +171,11 @@ what each one is working on, talk to it, and decide where the next one goes. The
   hovering one attaches ahead of the click. Where a key takes long to come back (redbat is a quarter of a second away),
   what you type shows at once over the cursor, an overlay only, until the real screen catches up. **/exit** ends the
   session and closes the pane. xterm draws on the GPU (WebGL) where it can.
+- **A session running inside tmux** (anywhere, any account) opens as its tmux pane: `tmux -L <server> attach -t <pane>`,
+  its real screen, nothing moved or restarted; /exit there ends Claude Code as it would in that window.
+- Everything Fleet starts (a launch, **move here**, **continue here**) runs with every permission allowed:
+  `--dangerously-skip-permissions`, and a project's MCP servers enabled without asking (for that session only); Codex
+  with `--dangerously-bypass-approvals-and-sandbox`, Muse with `--yolo`.
 - **A session that isn't a terminal** shows its conversation the way its terminal prints it: every step, nothing folded.
   A desktop-app session can't be typed into from here: **continue here** (a second click confirms) continues it as a copy
   in the background (`claude --bg --resume <id> --fork-session`), with its terminal, the app's own session untouched.
