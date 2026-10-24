@@ -49,7 +49,10 @@ svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-widt
 
 /* top line */
 .top { display: flex; align-items: center; gap: 22px; margin-bottom: 36px; }
-.top h1 { font-size: 15px; font-weight: 500; margin: 0; flex: 1; letter-spacing: .01em; }
+/* the panel's three screens; the one you are on is in ink */
+.top .tabs { display: flex; gap: 26px; flex: 1; }
+.top .tabs a { letter-spacing: .01em; }
+.top .tabs a[aria-current] { color: var(--ink); font-weight: 500; }
 .top a, .top button { color: var(--grey); display: inline-flex; align-items: center; }
 .top a:hover, .top button:hover { color: var(--ink); }
 .top button.busy svg { animation: turn 900ms linear infinite; }
@@ -179,6 +182,21 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 .p-title:focus { white-space: normal; }
 .p-top .act { font-size: 13px; color: var(--grey); } .p-top .act:hover { color: var(--ink); } .p-top .act.test { color: var(--blue); } .p-top .act.armed { color: var(--red); }
 .p-err { color: var(--red); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+#keys { position: fixed; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--paper) 70%, transparent); z-index: 20; }
+#keys[hidden], #finder[hidden] { display: none; }
+#keys .kk { display: grid; grid-template-columns: auto auto; gap: 6px 22px; padding: 22px 26px; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; font-size: 13px; }
+#keys b { font-weight: 500; white-space: pre; }
+#keys span { color: var(--grey); }
+#finder { position: fixed; inset: 0; z-index: 20; background: color-mix(in srgb, var(--paper) 60%, transparent); }
+#finder input { display: block; width: min(640px, 100% - 32px); margin: 14vh auto 0; padding: 12px 16px; font-size: 16px; background: var(--paper); border: 1px solid var(--rule); border-bottom: 0; border-radius: 6px 6px 0 0; outline: none; caret-color: var(--blue); }
+#find-list { width: min(640px, 100% - 32px); margin: 0 auto; background: var(--paper); border: 1px solid var(--rule); border-radius: 0 0 6px 6px; max-height: 60vh; overflow-y: auto; }
+#find-list .f { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 7px 16px; font-size: 13px; cursor: pointer; }
+#find-list .f.on { background: var(--tint); }
+#find-list .ft { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#find-list .fm { color: var(--grey); white-space: nowrap; }
+.p-run { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--grey); padding: 2px 0 0 18px; min-width: 0; }
+.p-run .p-step { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.p-run .p-wait { color: var(--orange); white-space: nowrap; }
 .p-more { color: var(--grey); } .p-more:hover, .p-more.on { color: var(--ink); }
 .p-x, .p-fold { color: var(--grey); align-self: center; } .p-x:hover, .p-fold:hover { color: var(--ink); }
 .p-title[contenteditable]:hover, .p-title[contenteditable]:focus { outline: none; box-shadow: 0 1px 0 var(--quiet); }
@@ -232,7 +250,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 </head>
 <body>
 <main>
-  <div class="top"><h1>Fleet</h1><a href="/board" title="The board: answer permission prompts for terminal sessions">Board</a><button id="refresh" title="Read again" aria-label="Read again"><svg class="i" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg></button></div>
+  <nav class="top" aria-label="Panel"><div class="tabs"><a href="/" aria-current="page">Fleet</a><a href="/satellite">Satellite</a><a href="/world">World</a></div><a href="/board" title="The board: answer permission prompts for terminal sessions">Board</a><button id="refresh" title="Read again" aria-label="Read again"><svg class="i" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg></button></nav>
   <div class="err" id="err" hidden></div>
   <div id="accts"></div>
   <div class="machines" id="mlines"></div>
@@ -264,6 +282,13 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
   <div id="p-foot"><textarea id="p-reply" rows="1" placeholder="Message it" aria-label="Message"></textarea><div id="p-tools"></div></div>
 </aside>
 <datalist id="fleet-groups"></datalist>
+<div id="keys" role="dialog" aria-label="Keyboard" hidden>
+  <div class="kk"><b>j k  ↓ ↑</b><span>next, previous session</span><b>Enter</b><span>into it: its terminal, or message box</span>
+  <b>Esc</b><span>close it (in a terminal, Esc is the session's)</span><b>⌘↓ ⌘↑</b><span>next, previous, from inside a terminal</span>
+  <b>⌃`</b><span>between the list and the terminal</span><b>⌘K  /</b><span>find a session</span><b>c</b><span>start a session</span>
+  <b>r  l</b><span>rename, group</span><b>e</b><span>close, or archive (press twice)</span><b>m</b><span>move here, continue here (twice)</span>
+  <b>i</b><span>interject (twice)</span><b>⌘\</b><span>fold the pane</span><b>g f  g s  g w</b><span>Fleet, Satellite, World</span><b>?</b><span>this list</span></div>
+</div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script src="/vendor/addon-webgl.js"></script>
@@ -618,7 +643,7 @@ function select(x) {
   if (paneUi.min) fold(false);
   if (pane.key === key) return;
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
-  Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null });
+  Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, armStop: false, moving: false, more: false, view: null });
   $('p-reply').value = drafts.get(key) ?? '';
   inPlace(key, () => { document.body.classList.add('has-pane'); renderMachines(); renderPane(true); });
   peek();
@@ -709,13 +734,19 @@ function wired() {
       let m;
       try { m = JSON.parse(e.data); } catch { return; }
       if (m.op === 'end') ended(wire.refs.get(m.ref), m.error ?? null);
+      if (m.op === 'fleet') load(); // something changed between reads (a session's hook): read again now
       return;
     }
     const T = wire.refs.get(new DataView(e.data).getUint32(0));
     if (T) printed(T, new Uint8Array(e.data, 4));
   };
-  // The panel restarted or the line dropped: every terminal on it has ended (Enter in one attaches it again).
-  ws.onclose = () => { if (wire.ws === ws) wire.ws = null; for (const T of [...wire.refs.values()]) ended(T, null); };
+  // The panel restarted or the line dropped: every terminal on it has ended (Enter in one attaches it again), and the
+  // page connects again a moment later (a panel that restarted has a new token: the read that follows reloads the page).
+  ws.onclose = () => {
+    if (wire.ws === ws) wire.ws = null;
+    for (const T of [...wire.refs.values()]) ended(T, null);
+    setTimeout(() => { if (!wire.ws) { wired().catch(() => {}); load(); } }, 2000);
+  };
   return wire.open;
 }
 /** One message to the panel about a terminal; they go in the order sent. */
@@ -749,6 +780,7 @@ function attachTerm(x, now = false) {
   terms.set(key, T);
   wire.refs.set(T.ref, T);
   term.onData((d) => typed(T, d));
+  term.attachCustomKeyEventHandler((e) => !((e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key.toLowerCase() === 'k' || e.key === '\\')) || (e.ctrlKey && e.key === '`')));
   // Its size goes once you stop dragging: every change makes the program draw its whole screen again.
   term.onResize(({ cols, rows }) => { clearTimeout(T.sizeT); T.sizeT = setTimeout(() => { if (!T.ended) tell(T, { op: 'size', cols, rows }); }, 80); });
   tell(T, { op: 'open', machine: x.machine, profile: x.profile, cols: term.cols, rows: term.rows,
@@ -810,7 +842,7 @@ function showTerm(x) {
     for (const o of terms.values()) o.el.hidden = o !== T;
     shown = T.key;
     if (!T.gl && window.WebglAddon) { try { T.gl = new WebglAddon.WebglAddon(); T.gl.onContextLoss(() => { T.gl?.dispose(); T.gl = null; }); T.term.loadAddon(T.gl); } catch { T.gl = null; } }
-    fitShown(x.state !== 'needs-you'); // a session waiting on you doesn't take the next Enter by accident
+    fitShown(!keyNav && x.state !== 'needs-you'); // a session waiting on you doesn't take the next Enter by accident; j/k stay in the list
   }
   T.used = Date.now();
 }
@@ -991,11 +1023,19 @@ function renderHead(x, term) {
   const state = pane.moving ? h('span', { class: 'p-err', style: 'color:var(--grey)', text: '…' })
     : pane.said?.cls === 'no' ? h('span', { class: 'p-err', text: pane.said.text, title: pane.said.text }) : null;
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
+  // In the middle of a step: what it runs and since when, what of yours waits for it, and interject (its command stopped,
+  // so it takes what you sent now). Only a command can be stopped.
+  const run = x.live && x.running ? h('div', { class: 'p-run' },
+    h('span', { class: 'p-step', text: `${x.running.step} · ${ago(x.running.since)}`, title: `Running since ${new Date(x.running.since).toLocaleTimeString()}` }),
+    x.queued?.length ? h('span', { class: 'p-wait', text: `${x.queued.length} of yours waiting`, title: x.queued.join('\n') }) : null,
+    x.running.tool === 'Bash' ? h('button', { class: `act${pane.armStop ? ' armed' : ''}`, text: pane.armStop ? 'stop it and read?' : 'interject',
+      title: 'Stop the command this step runs (only that: the session goes on), so it reads what you sent now (i)', onclick: interjectNow }) : null) : null;
   const parts = [
     h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, copy, codexOpen,
       h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),
+    run,
     pane.more ? h('div', { class: 'p-meta', title: [x.name, x.cwd, x.model].filter(Boolean).join('\n') },
       [WORD[x.state], x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx (${ctxWords(c)})`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
         .filter(Boolean).map((t) => h('span', { text: t }))) : null,
@@ -1009,18 +1049,120 @@ function renderHead(x, term) {
   $('p-head').replaceChildren(...box.childNodes);
 }
 let headSig = '';
+/** Interject: on the second click, its current command stopped so what you queued reaches it now. */
+async function interjectNow() {
+  const x = current();
+  if (!x?.running) return;
+  if (!pane.armStop) { pane.armStop = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.armStop) { pane.armStop = false; renderPane(); } }, 4000); return; }
+  pane.armStop = false; pane.moving = true; renderPane();
+  const r = await api('/api/fleet/interject', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
+  pane.moving = false;
+  pane.said = r.ok ? null : { cls: 'no', text: r.error };
+  renderPane(); load(); peek();
+}
 const growReply = () => { const t = $('p-reply'); t.style.height = 'auto'; t.style.height = `${Math.min(t.scrollHeight, 240)}px`; };
 $('p-reply').addEventListener('input', growReply);
 $('p-reply').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); const t = $('p-reply').value; $('p-reply').value = ''; growReply(); sendText(t); }
 });
+// ---------------------------------------------------------------- keyboard
+// The conventions of Superhuman, Gmail and Linear. In the list: j/k (or ↓/↑) move through the sessions, opening each beside
+// it; Enter goes into the one open (its terminal, or the message box); Esc closes it; ⌘K or / finds any by name; c starts
+// one; r renames, l groups, e closes or archives, m moves it here, i interjects (each that changes something asks for a
+// second press); g then f, s or w goes to Fleet, Satellite or World; ? lists them all. In a terminal every key is the
+// session's except ⌘↑/⌘↓ (the session above or below) and ⌃` (back to the list).
+let keyNav = false, gPressed = 0;
+const typing = () => { const a = document.activeElement; return a && (a.matches?.('input, textarea, select, [contenteditable], [contenteditable] *') || $('p-term').contains(a)); };
+const rows = () => [...document.querySelectorAll('#machines [data-key]')];
+const byKey = (k) => everything.find((y) => keyOf(y) === k) ?? (pane.trust && keyOf(pane.trust) === k ? pane.trust : null);
+/** The session above or below the one open (or the row you are on), opened beside the list; the focus stays where it was. */
+function step(by, intoTerm = false) {
+  const list = rows();
+  if (!list.length) return;
+  const at = list.findIndex((r) => r.dataset.key === (pane.key ?? document.activeElement?.closest?.('[data-key]')?.dataset.key));
+  const next = list[at < 0 ? (by > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, at + by))];
+  const y = next && byKey(next.dataset.key);
+  if (!y || keyOf(y) === pane.key) return;
+  keyNav = !intoTerm;
+  if (paneUi.min) fold(false);
+  select(y);
+  keyNav = false;
+  next.scrollIntoView({ block: 'nearest' });
+  if (!intoTerm) $('machines').querySelector(`[data-key="${CSS.escape(keyOf(y))}"]`)?.focus({ preventScroll: true });
+}
+/** Into the session open: its terminal, else its message box. */
+function enter() {
+  const T = terms.get(shown);
+  if (T && !$('p-term').hidden) { focusTerm(T); return; }
+  if (!$('p-reply').hidden) $('p-reply').focus();
+}
+/** Back to the list, on the row of the session open. */
+function toList() {
+  const row = pane.key && $('machines').querySelector(`[data-key="${CSS.escape(pane.key)}"]`);
+  if (row) { row.focus({ preventScroll: true }); row.scrollIntoView({ block: 'nearest' }); } else document.activeElement?.blur?.();
+}
+const press = (sel) => { const b = [...$('p-head').querySelectorAll('button')].find((x) => sel(x.textContent.trim())); b?.click(); return Boolean(b); };
 document.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === '\\' && pane.key) { e.preventDefault(); fold(!paneUi.min); return; }
-  if (e.key !== 'Escape' || !pane.key) return;
-  if ($('p-term').contains(document.activeElement)) return; // Esc is Claude Code's there
-  if (document.activeElement === $('p-reply') && $('p-reply').value) { $('p-reply').blur(); return; }
-  deselect();
+  const cmd = e.metaKey || e.ctrlKey;
+  if (cmd && e.key === '\\' && pane.key) { e.preventDefault(); fold(!paneUi.min); return; }
+  if (cmd && e.key.toLowerCase() === 'k') { e.preventDefault(); finder(); return; }
+  if (e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && !document.activeElement?.matches?.('input, textarea, [contenteditable]')) {
+    e.preventDefault(); step(e.key === 'ArrowDown' ? 1 : -1, $('p-term').contains(document.activeElement)); return;
+  }
+  if (e.ctrlKey && e.key === '`') { e.preventDefault(); if ($('p-term').contains(document.activeElement)) toList(); else enter(); return; }
+  if (e.key === 'Escape') {
+    if ($('finder') && !$('finder').hidden) { closeFinder(); return; }
+    if ($('keys') && !$('keys').hidden) { $('keys').hidden = true; return; }
+    if (!pane.key || $('p-term').contains(document.activeElement)) return; // Esc is Claude Code's there
+    if (document.activeElement === $('p-reply') && $('p-reply').value) { $('p-reply').blur(); return; }
+    if (document.activeElement?.matches?.('input, textarea, [contenteditable]')) { document.activeElement.blur(); return; }
+    deselect(); return;
+  }
+  if (typing() || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (Date.now() - gPressed < 1200) { gPressed = 0; const to = { f: '/', s: '/satellite', w: '/world' }[k]; if (to) { e.preventDefault(); location.href = to; } return; }
+  const act = {
+    j: () => step(1), ArrowDown: () => step(1), k: () => step(-1), ArrowUp: () => step(-1),
+    Enter: () => { if (!pane.key) { const y = byKey(document.activeElement?.closest?.('[data-key]')?.dataset.key); if (y) select(y); } else enter(); },
+    '/': () => finder(), c: () => { $('prompt').focus(); $('prompt').scrollIntoView({ block: 'center' }); },
+    r: () => { const t = $('p-head').querySelector('.p-title[contenteditable]'); if (t) { t.focus(); document.getSelection()?.selectAllChildren(t); } },
+    l: () => { if (!pane.more) { pane.more = true; renderPane(); } $('p-head').querySelector('.p-group')?.focus(); },
+    e: () => { if (!pane.more) { pane.more = true; renderPane(); } press((t) => /^(close|archive)\??$/.test(t)); },
+    m: () => press((t) => /^(move here|continue here)\??$/.test(t)),
+    i: () => press((t) => /^(interject|stop it and read\?)$/.test(t)),
+    g: () => { gPressed = Date.now(); }, '?': () => { $('keys').hidden = !$('keys').hidden; },
+  }[k];
+  if (act) { e.preventDefault(); act(); }
 });
+
+// ⌘K: any session by name, machine, account, group or branch; ↑/↓ and Enter open it, into its terminal.
+let found = [], foundAt = 0;
+function finder() {
+  if (!$('finder')) {
+    const box = h('div', { id: 'finder', role: 'dialog', 'aria-label': 'Find a session', hidden: true },
+      h('input', { id: 'find-q', placeholder: 'Find a session', 'aria-label': 'Find a session', spellcheck: 'false', autocomplete: 'off' }), h('div', { id: 'find-list' }));
+    document.body.append(box);
+    $('find-q').addEventListener('input', () => { foundAt = 0; drawFound(); });
+    $('find-q').addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); foundAt = Math.min(found.length - 1, foundAt + 1); drawFound(); }
+      else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); foundAt = Math.max(0, foundAt - 1); drawFound(); }
+      else if (e.key === 'Enter') { e.preventDefault(); openFound(found[foundAt]); }
+    });
+    box.addEventListener('pointerdown', (e) => { if (e.target === box) closeFinder(); });
+  }
+  $('finder').hidden = false; $('find-q').value = ''; foundAt = 0; drawFound(); $('find-q').focus();
+}
+function closeFinder() { $('finder').hidden = true; toList(); }
+function openFound(y) { if (!y) return; $('finder').hidden = true; if (pane.key !== keyOf(y)) select(y); requestAnimationFrame(enter); }
+function drawFound() {
+  const words = $('find-q').value.toLowerCase().split(/\s+/).filter(Boolean);
+  const hay = (y) => [y.title, y.name, y.machine, y.sub, y.epic, y.branch, y.cwd, WORD[y.state]].filter(Boolean).join(' ').toLowerCase();
+  found = everything.filter((y) => words.every((w) => hay(y).includes(w)))
+    .sort((a, b) => Number(b.live) - Number(a.live) || (ORDER[a.state] - ORDER[b.state]) || ((b.lastAt ?? 0) - (a.lastAt ?? 0))).slice(0, 12);
+  $('find-list').replaceChildren(...found.map((y, i) => h('div', { class: `f${i === foundAt ? ' on' : ''}`, onpointerdown: (e) => { e.preventDefault(); openFound(y); } },
+    h('span', { class: `dot ${y.live ? y.state : 'closed'}` }), h('span', { class: 'ft', text: y.title ?? y.name ?? y.id ?? y.engine }),
+    h('span', { class: 'fm', text: [y.machine, y.sub, y.branch].filter(Boolean).join('  ') }))));
+}
 
 /** A row opens its session as you press it, so a redraw of the list between press and release can't lose the click; and
  *  always the session as the last read has it (a row kept from an earlier draw still opens what is there now). */
@@ -1037,7 +1179,8 @@ function row(x) {
   // What it waits on, on a line of its own under a session that needs you: never cut by a narrow list.
   const why = x.state === 'needs-you' ? [typeof x.waitingFor === 'string' ? x.waitingFor : null, x.doing ?? x.said].filter(Boolean).join(': ')
     : x.state === 'capped' ? (lifted ? 'its limit has lifted: tell it to go on' : x.limitHit?.text ?? '') : '';
-  const what = x.state === 'working' ? (x.doing ?? x.said ?? '') : '';
+  const what = [x.state === 'working' ? (x.running ? `${x.running.step} · ${ago(x.running.since)}` : x.doing ?? x.said ?? '') : '',
+    x.queued?.length ? `${x.queued.length} of yours waiting` : ''].filter(Boolean).join(' · ');
   return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
       ...rowActs(x) },
     h('span', { class: `dot ${x.state}${lifted ? ' lifted' : ''}`, title: lifted ? 'its limit has lifted' : WORD[x.state] ?? '' }),
@@ -1139,8 +1282,9 @@ async function reload() {
     snap = s;
     subs = accounts(snap);
     const bad = snap.machines.filter((m) => m.ok === false || m.stale);
-    $('err').hidden = !bad.length;
-    $('err').textContent = bad.map((m) => (m.stale ? `${m.name} didn't answer (${m.stale}): showing its last read` : `${m.name}: ${m.error ?? 'no answer'}`)).join('\n');
+    const doubted = snap.machines.flatMap((m) => (m.ok === false || m.stale ? [] : (m.accounts ?? []).filter((a) => a.stale).map((a) => `${m.name} ${a.id}: ${a.stale}`)));
+    $('err').hidden = !bad.length && !doubted.length;
+    $('err').textContent = [...bad.map((m) => (m.stale ? `${m.name} didn't answer (${m.stale}): showing its last read` : `${m.name}: ${m.error ?? 'no answer'}`)), ...doubted].join('\n');
     renderHow(); renderMachines(); renderPane();
     $('refresh').title = `Read ${new Date(snap.at).toLocaleTimeString()}`;
     // An old read (nobody had looked for a while) is on show at once; the fresh one behind it comes in a moment.
@@ -1157,6 +1301,7 @@ async function reload() {
 }
 $('refresh').addEventListener('click', load);
 load();
+wired().catch(() => {}); // the panel tells this page when something changes, over the same socket the terminals use
 // Every 10 seconds while you look (the panel reads behind it as often, so each answers at once); every minute in a
 // background tab, so the Needs you count in its title stays true.
 setInterval(() => { if (!document.hidden || Date.now() - loadedAt > 60_000) load(); }, 10_000);

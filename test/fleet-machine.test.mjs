@@ -96,15 +96,15 @@ const NOW = Date.UTC(2026, 9, 23, 12, 0, 0);
 const turn = (over, quietMs, extra = {}) => ({ turnOver: over, writtenAt: NOW - quietMs, limitHit: null, ...extra });
 
 test('an open session at its prompt is ready, not idle: its process is alive', () => {
-  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'idle' }, turn(true, 5 * 86400_000), NOW), { state: 'ready', live: true });
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'idle' }, turn(true, 5 * 86400_000), null, NOW), { state: 'ready', live: true });
 });
 
 test('working while the transcript is mid-turn', () => {
-  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(false, 3000), NOW), { state: 'working', live: true });
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(false, 3000), null, NOW), { state: 'working', live: true });
 });
 
 test('busy while its own background tasks run, its turn over: still working, as Claude Code says (it carries on by itself)', () => {
-  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(true, 6 * 60_000), NOW), { state: 'working', live: true });
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(true, 6 * 60_000), null, NOW), { state: 'working', live: true });
 });
 
 import { realAsk } from '../fleet/machine.mjs';
@@ -117,34 +117,34 @@ test('the real ask: a continued session\'s request from its summary; a peer mess
 
 test('its last word was a limit stop: capped, whatever the roster says', () => {
   const hit = { text: "You've reached your Fable limit.", at: NOW - 3_400_000 };
-  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(true, 3_400_000, { limitHit: hit, lastAt: hit.at }), NOW), { state: 'capped', live: true });
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(true, 3_400_000, { limitHit: hit, lastAt: hit.at }), null, NOW), { state: 'capped', live: true });
 });
 
 test('waiting on a permission, a question or a plan: needs you', () => {
-  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'waiting' }, turn(false, 1000), NOW), { state: 'needs-you', live: true });
-  assert.deepEqual(sessionState({ pid: 42, kind: 'background', state: 'blocked' }, turn(false, 1000), NOW), { state: 'needs-you', live: true });
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'waiting' }, turn(false, 1000), null, NOW), { state: 'needs-you', live: true });
+  assert.deepEqual(sessionState({ pid: 42, kind: 'background', state: 'blocked' }, turn(false, 1000), null, NOW), { state: 'needs-you', live: true });
 });
 
 test('a background job still listed as active but with no process yet waits at a startup question: it needs you', () => {
-  assert.deepEqual(sessionState({ kind: 'background', state: 'blocked', active: true }, turn(false, 1000), NOW), { state: 'needs-you', live: true });
+  assert.deepEqual(sessionState({ kind: 'background', state: 'blocked', active: true }, turn(false, 1000), null, NOW), { state: 'needs-you', live: true });
 });
 
 test('a background job idle with no prompt yet reads blocked: it is open, not waiting on you', () => {
-  assert.deepEqual(sessionState({ pid: 45, kind: 'background', state: 'blocked', status: 'idle' }, turn(true, 60_000), NOW), { state: 'ready', live: true });
+  assert.deepEqual(sessionState({ pid: 45, kind: 'background', state: 'blocked', status: 'idle' }, turn(true, 60_000), null, NOW), { state: 'ready', live: true });
 });
 
 test('a background job with no process is not running: blocked and stopped jobs keep their record, and are closed', () => {
-  assert.deepEqual(sessionState({ kind: 'background', state: 'blocked' }, turn(false, 101 * 86400_000), NOW), { state: 'closed', live: false });
+  assert.deepEqual(sessionState({ kind: 'background', state: 'blocked' }, turn(false, 101 * 86400_000), null, NOW), { state: 'closed', live: false });
 });
 
 test('a background job that has ended is closed', () => {
-  for (const state of ['done', 'stopped', 'failed']) assert.deepEqual(sessionState({ kind: 'background', state }, turn(true, 1000), NOW), { state: 'closed', live: false });
-  for (const state of ['stopped', 'failed']) assert.deepEqual(sessionState({ pid: 44, kind: 'background', state }, turn(true, 1000), NOW), { state: 'closed', live: false });
+  for (const state of ['done', 'stopped', 'failed']) assert.deepEqual(sessionState({ kind: 'background', state }, turn(true, 1000), null, NOW), { state: 'closed', live: false });
+  for (const state of ['stopped', 'failed']) assert.deepEqual(sessionState({ pid: 44, kind: 'background', state }, turn(true, 1000), null, NOW), { state: 'closed', live: false });
 });
 
 test('a background job whose turn is done but whose process runs is open: it takes your next message', () => {
-  assert.deepEqual(sessionState({ pid: 44, kind: 'background', state: 'done', status: 'idle' }, turn(true, 60_000), NOW), { state: 'ready', live: true });
-  assert.deepEqual(sessionState({ pid: 43, kind: 'background', state: 'working' }, turn(false, 1000), NOW), { state: 'working', live: true });
+  assert.deepEqual(sessionState({ pid: 44, kind: 'background', state: 'done', status: 'idle' }, turn(true, 60_000), null, NOW), { state: 'ready', live: true });
+  assert.deepEqual(sessionState({ pid: 43, kind: 'background', state: 'working' }, turn(false, 1000), null, NOW), { state: 'working', live: true });
 });
 
 // ---------------------------------------------------------------- how full a session's context is
@@ -176,4 +176,54 @@ test('a status line that reads 0 right after a restart does not hide the context
   const sl = { at: 9000, context_window: { context_window_size: 1_000_000, used_percentage: 0, current_usage: usage(0) } };
   const c = contextOf(sl, { model: 'claude-opus-5-5', lastAt: 1000, contextTokens: 924_070 }, 1_000_000, {});
   assert.deepEqual([c.tokens, c.pct, c.fresh], [924_070, 92.4, false]);
+});
+
+// Hooks: what a session does, as Claude Code says it the moment it changes (fleet/hook.sh leaves the last event).
+import { hookState, stageOf, stageOfTool } from '../fleet/machine.mjs';
+
+test('hook events: working, needs you, ready, capped', () => {
+  const at = NOW - 1000;
+  assert.equal(hookState({ e: 'UserPromptSubmit', at }), 'working');
+  assert.equal(hookState({ e: 'PreToolUse', t: 'Bash', at }), 'working');
+  assert.equal(hookState({ e: 'PreToolUse', t: 'AskUserQuestion', at }), 'needs-you');
+  assert.equal(hookState({ e: 'PreToolUse', t: 'ExitPlanMode', at }), 'needs-you');
+  assert.equal(hookState({ e: 'PermissionRequest', t: 'Bash', at }), 'needs-you');
+  assert.equal(hookState({ e: 'PostToolUse', t: 'AskUserQuestion', at }), 'working', 'answered, it goes on');
+  assert.equal(hookState({ e: 'Notification', n: 'permission_prompt', at }), 'needs-you');
+  assert.equal(hookState({ e: 'Notification', n: 'idle_prompt', at }), 'ready');
+  assert.equal(hookState({ e: 'Notification', n: 'auth_success', at }), null, 'says nothing about its state');
+  assert.equal(hookState({ e: 'Stop', at }), 'ready');
+  assert.equal(hookState({ e: 'StopFailure', r: 'rate_limit', at }), 'capped');
+  assert.equal(hookState({ e: 'StopFailure', r: 'overloaded', at }), 'ready');
+  assert.equal(hookState({ e: 'PostToolUseFailure', i: true, at }), 'ready', 'stopped with Esc');
+  assert.equal(hookState({ e: 'PostCompact', r: 'manual', at }), 'ready');
+  assert.equal(hookState(null), null);
+});
+
+test('a session with hooks: they decide, while current, with what Claude Code itself says where it is sure', () => {
+  const live = { pid: 41, kind: 'interactive', status: 'busy' };
+  const h = (e, ago, extra = {}) => ({ e, at: NOW - ago, ...extra });
+  // Busy with a background task (a dev server) but its turn is over: ready, not working.
+  assert.deepEqual(sessionState(live, turn(true, 2000), h('Stop', 1000), NOW), { state: 'ready', live: true });
+  // A question to you: needs you at once, before Claude Code's own list says so.
+  assert.deepEqual(sessionState({ ...live, status: 'busy' }, turn(false, 500), h('PreToolUse', 400, { t: 'AskUserQuestion' }), NOW), { state: 'needs-you', live: true });
+  // A permission given: the tool runs with no event until it ends; Claude Code says busy, so it works.
+  assert.deepEqual(sessionState(live, turn(false, 10_000), h('PermissionRequest', 9000, { t: 'Bash' }), NOW), { state: 'working', live: true });
+  // A turn stopped with Esc fires nothing: working a minute on, Claude Code idle, it is ready.
+  assert.deepEqual(sessionState({ ...live, status: 'idle' }, turn(false, 90_000), h('PreToolUse', 90_000, { t: 'Bash' }), NOW), { state: 'ready', live: true });
+  // Hooks that missed what was written since (installed late, or not firing): the old reading decides.
+  assert.deepEqual(sessionState(live, turn(false, 1000), h('Stop', 600_000), NOW), { state: 'working', live: true });
+  // No process: closed, whatever the hook said last.
+  assert.deepEqual(sessionState({ kind: 'background', state: 'stopped' }, turn(true, 1000), h('PreToolUse', 500, { t: 'Bash' }), NOW), { state: 'closed', live: false });
+});
+
+test('stage: from what its tools did last, never a guess', () => {
+  assert.equal(stageOf([['Bash', { command: 'gh workflow run ship.yml --ref main' }], ['Edit', {}]]), 'deploying');
+  assert.equal(stageOf([['Read', {}], ['Bash', { command: 'gh pr create --base staging' }], ['Edit', {}]]), 'promoting');
+  assert.equal(stageOf([['Grep', {}], ['Bash', { command: 'npm run test:f payments' }], ['Edit', {}]]), 'testing');
+  assert.equal(stageOf([['Read', {}], ['Edit', { file_path: 'a.ts' }], ['Bash', { command: 'npm test' }]]), 'building', 'the newest that does something says');
+  assert.equal(stageOf([['Read', {}], ['Grep', {}], ['Bash', { command: 'git status' }]]), 'planning');
+  assert.equal(stageOf([['Agent', {}], ['AskUserQuestion', {}]]), null);
+  assert.equal(stageOfTool('Bash', { command: 'npx vitest run features/ap' }), 'testing');
+  assert.equal(stageOfTool('Bash', { command: 'git commit -m x' }), 'building');
 });

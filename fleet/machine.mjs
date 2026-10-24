@@ -194,11 +194,95 @@ export function contextOf(sl, t, window, settings) {
 }
 
 /** From the end of a transcript: the context its last reply carried, its model, and what it last did or said. */
+// Where a session is on the way to production, from what its tools did last (newest first): the first one that ships,
+// promotes, tests or builds says so; reading and looking around alone is planning. No model's guess.
+const STAGE_OF_RUN = [
+  ['deploying', /\b(gh workflow run\b|deploy\.sh|deploy\/|release\.yml|ship\.yml|kubectl|docker compose .*\bup\b)/i],
+  ['promoting', /\b(gh pr (create|merge|ready|edit|update-branch|checks)|git push|gh run (watch|view)|merge.queue)/i],
+  ['testing', /\b(npm (run )?(test|t)\b|test:[\w:-]+|vitest|jest|playwright|pytest|smoke(:[\w-]+)?|typecheck|tsc\b|lint\b|knip|verify-gate|check:[\w-]+|docs:check|node --test)/i],
+  ['building', /\b(npm (i|install|ci)\b|db:(reset|rebuild)|new:migration|npm run build|git (commit|add|rebase|merge)\b)/i],
+];
+export function stageOfTool(name, input = {}) {
+  if (/^(Edit|MultiEdit|Write|NotebookEdit|apply_patch)$/.test(name)) return 'building';
+  if (/^(Read|Grep|Glob|WebFetch|WebSearch|ExitPlanMode|LSP)$/.test(name) || /^mcp__/.test(name)) return 'planning';
+  if (name === 'Skill') return /verify-gate|code-review|review/.test(String(input.skill ?? '')) ? 'testing' : null;
+  if (name === 'Bash' || name === 'shell' || name === 'exec_command') {
+    const cmd = `${Array.isArray(input.command) ? input.command.join(' ') : input.command ?? input.cmd ?? ''}`;
+    for (const [stage, re] of STAGE_OF_RUN) if (re.test(cmd)) return stage;
+    return 'planning';
+  }
+  return null; // agents, tasks, questions: nothing about where the work is
+}
+/** The stage from tool uses, newest first ([name, input] pairs). */
+export function stageOf(uses) {
+  let looked = null;
+  for (const [name, input] of uses) { const st = stageOfTool(name, input ?? {}); if (st && st !== 'planning') return st; looked ??= st; }
+  return looked;
+}
+
+/** The folder a tool call works in, when it says: a file it reads or edits, or the folder a command goes into. A session
+ *  started in a shared checkout often works in a worktree of its own; this, not where it started, is its branch. */
+function whereOf(name, x) {
+  const abs = (v) => (typeof v === 'string' && (v.startsWith('/') || v.startsWith('~/')) ? v.replace(/^~(?=\/)/, HOME) : null);
+  // Only a folder in a git checkout says where the work is: not Claude Code's own (memory, settings), not loose files.
+  const work = (d) => (d && !/\/\.claude(-[\w.-]+)?(\/|$)/.test(d) && branchOf(d) ? d : null);
+  const f = abs(x.file_path ?? x.notebook_path);
+  if (f) return work(path.dirname(f));
+  if (name === 'Bash' && typeof x.command === 'string') {
+    const m = /(?:^|&&|;|\n)\s*cd\s+(?:--\s+)?("[^"]+"|'[^']+'|[^\s;&|]+)/.exec(x.command) ?? /\bgit\s+-C\s+("[^"]+"|'[^']+'|\S+)/.exec(x.command);
+    return work(abs(m?.[1]?.replace(/^["']|["']$/g, '')));
+  }
+  return work(abs(x.path));
+}
+
+/** The branch a folder's checkout is on (a worktree's .git is a file pointing at its git dir), or null. Read from the
+ *  files, no git started; kept half a minute. */
+const branches = new Map();
+export function branchOf(cwd) {
+  if (typeof cwd !== 'string' || !cwd) return null;
+  const dir = cwd === '~' ? HOME : cwd.startsWith('~/') ? path.join(HOME, cwd.slice(2)) : cwd;
+  const k = branches.get(dir);
+  if (k && Date.now() - k.at < 30_000) return k.branch;
+  let branch = null;
+  for (let d = dir, i = 0; i < 6 && d && d !== path.dirname(d); d = path.dirname(d), i++) {
+    const g = path.join(d, '.git');
+    let head = null;
+    try {
+      if (fs.statSync(g).isDirectory()) head = fs.readFileSync(path.join(g, 'HEAD'), 'utf8');
+      else { const to = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(g, 'utf8'))?.[1]?.trim(); if (to) head = fs.readFileSync(path.join(path.resolve(d, to), 'HEAD'), 'utf8'); }
+    } catch { continue; }
+    branch = /^ref: refs\/heads\/(.+)$/m.exec(head ?? '')?.[1]?.trim() ?? null;
+    break;
+  }
+  branches.set(dir, { branch, at: Date.now() });
+  return branch;
+}
+
+/** What you typed that still waits for the session to take it, from Claude Code's queue records (oldest first): a message
+ *  typed while it works is queued, and taken at the next pause between steps (removed, "absorbed mid-turn") or when its
+ *  turn ends (dequeued); popAll puts them back in your input box. */
+export function queuedIn(lines) {
+  let q = [];
+  for (const l of lines) {
+    if (!l.includes('"queue-operation"')) continue;
+    const d = parse(l);
+    if (d?.type !== 'queue-operation') continue;
+    if (d.operation === 'enqueue' && typeof d.content === 'string') q.push({ text: d.content, at: Date.parse(d.timestamp) || null });
+    else if (d.operation === 'dequeue') q.shift();
+    else if (d.operation === 'remove') { const i = q.findIndex((x) => x.text === d.content); q.splice(i >= 0 ? i : 0, 1); }
+    else if (d.operation === 'popAll') q = [];
+  }
+  // What Claude Code queued itself (a view's context, a system note) is not yours.
+  return q.filter((x) => !x.text.trimStart().startsWith('<'));
+}
+
 function readTranscript(file) {
   const out = { model: null, contextTokens: null, lastAt: null, doing: null, said: null, limitHit: undefined, turnOver: null, writtenAt: mtime(file),
-                firstAsk: null, lastAsk: null, steps: [] };
+                firstAsk: null, lastAsk: null, steps: [], stage: null };
+  const uses = []; // its last tool uses, newest first, for the stage
   for (const l of headLines(file)) if ((out.firstAsk = oneLine(askOf(parse(l)), 500))) break;
   const lines = tail(file);
+  out.queued = queuedIn(lines);
   for (let i = lines.length - 1; i >= 0; i--) {
     const d = parse(lines[i]);
     if (!d || d.isSidechain) continue;
@@ -207,6 +291,10 @@ function readTranscript(file) {
     // The last word in the conversation: a reply that ended its turn, or anything else (a tool call, a tool's result).
     if (out.turnOver === null && (d.type === 'assistant' || d.type === 'user') && d.message) {
       out.turnOver = d.type === 'assistant' && (['end_turn', 'stop_sequence'].includes(d.message.stop_reason) || d.message.model === '<synthetic>');
+      // Its last word a tool call with no result yet: that step is running, since then.
+      const use = d.type === 'assistant' && Array.isArray(d.message.content) ? d.message.content.findLast((c) => c.type === 'tool_use') : null;
+      out.running = use ? { step: stepOf(use.name, use.input ?? {}), since: Date.parse(d.timestamp) || null, tool: use.name,
+        cmd: use.name === 'Bash' && typeof use.input?.command === 'string' ? use.input.command.slice(0, 2000) : null } : null;
     }
     if (d.type !== 'assistant' || !d.message) continue;
     // Claude Code writes a limit stop as a reply of its own ("You've hit your weekly limit · resets …"), with no usage.
@@ -223,13 +311,16 @@ function readTranscript(file) {
     }
     for (const c of Array.isArray(d.message.content) ? [...d.message.content].reverse() : []) {
       if (c.type === 'tool_use' && out.steps.length < 8) { const st = stepOf(c.name, c.input ?? {}); if (st) out.steps.push(st); }
+      if (c.type === 'tool_use' && uses.length < 12) uses.push([c.name, c.input]);
+      if (c.type === 'tool_use' && !out.workdir) out.workdir = whereOf(c.name, c.input ?? {});
       if (!out.doing && c.type === 'tool_use') out.doing = stepOf(c.name, c.input ?? {});
       if (!out.said && c.type === 'text' && c.text?.trim()) out.said = oneLine(c.text, 400);
     }
-    if (out.contextTokens !== null && (out.doing || out.said) && out.lastAsk && out.steps.length >= 8) break;
+    if (out.contextTokens !== null && (out.doing || out.said) && out.lastAsk && out.steps.length >= 8 && uses.length >= 12) break;
   }
   out.lastAsk ??= out.firstAsk;
   out.steps.reverse();
+  out.stage = stageOf(uses);
   return out;
 }
 
@@ -313,12 +404,50 @@ function statusSnapshots(p, learned) {
   return { bySession, limits };
 }
 
+// ---------------------------------------------------------------- hooks
+// A profile with Fleet's hook (hook.sh) has one small file per session, <profile>/fleet-state/<session>.json, replaced at
+// each event of its main conversation: { e: event, t: tool, n: notification type, r: reason, i: interrupted, at }.
+const HOOK_STATES = { SessionStart: 'ready', UserPromptSubmit: 'working', PostToolUse: 'working', PostToolUseFailure: 'working',
+  PermissionDenied: 'working', ElicitationResult: 'working', PreCompact: 'working', PermissionRequest: 'needs-you', Elicitation: 'needs-you', Stop: 'ready' };
+/** What the last hook event says a session is doing, or null when it says nothing. */
+export function hookState(h) {
+  if (!h?.e) return null;
+  if (h.e === 'PreToolUse') return /^(AskUserQuestion|ExitPlanMode)$/.test(h.t ?? '') ? 'needs-you' : 'working';
+  if (h.e === 'PostToolUseFailure' && h.i) return 'ready'; // stopped with Esc
+  if (h.e === 'Notification') return /^(permission_prompt|elicitation_dialog|elicitation_url_dialog)$/.test(h.n ?? '') ? 'needs-you' : h.n === 'idle_prompt' ? 'ready' : null;
+  if (h.e === 'StopFailure') return h.r === 'rate_limit' ? 'capped' : 'ready';
+  if (h.e === 'PostCompact') return h.r === 'manual' ? 'ready' : 'working';
+  return HOOK_STATES[h.e] ?? null;
+}
+const hookFile = (p, sessionId) => path.join(p.dir, 'fleet-state', `${sessionId}.json`);
+const readHook = (p, sessionId) => (/^[\w-]{8,80}$/.test(sessionId ?? '') ? readJson(hookFile(p, sessionId), 4096) : null);
+/** Every profile's hook files, watched: `on({ sessionId, hook })` as one changes (a burst gives its last). */
+export function watchHooks(on) {
+  const timers = new Map();
+  for (const p of claudeProfiles()) {
+    const dir = path.join(p.dir, 'fleet-state');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    try {
+      fs.watch(dir, (_, name) => {
+        if (!name || !/^[\w-]{8,80}\.json$/.test(name)) return;
+        clearTimeout(timers.get(name));
+        timers.set(name, setTimeout(() => {
+          timers.delete(name);
+          const hook = readJson(path.join(dir, name), 4096);
+          if (hook) on({ profile: p.id, sessionId: name.slice(0, -5), hook });
+        }, 120));
+      }).on('error', () => {}).unref(); // watching alone keeps no process alive (the panel's server does that)
+    } catch {}
+  }
+  return true;
+}
+
 /**
  * What a session is doing, from its roster row (`claude agents`) and its transcript's end (`t`). A session whose process
  * is alive is open: working, needing you, stopped on a limit, or ready at its prompt. One with no process is closed. The roster's "busy" also covers a background task the session started (a dev server, a watch), so a busy
  * session whose turn is over and whose transcript has been still for a minute reads ready.
  */
-export function sessionState(r, t, now = Date.now()) {
+export function sessionState(r, t, h = null, now = Date.now()) {
   // Open means a process, or a background job Claude Code still lists as active (one waiting at a startup question, trust
   // or a project's MCP servers, has no process of its own yet). Any other job without one only keeps its record. One whose
   // turn is done but whose process still runs waits for your next message.
@@ -327,6 +456,16 @@ export function sessionState(r, t, now = Date.now()) {
   // A background job reads `blocked` both on a question to you and when it sits idle with no prompt yet: only the first
   // needs you.
   if (r.status === 'waiting' || r.waitingFor || (r.state === 'blocked' && r.status !== 'idle')) return { state: 'needs-you', live };
+  // Its hooks, while they are current (nothing written since that they didn't see): what it does, as Claude Code says.
+  const hs = hookState(h);
+  if (hs && hs !== 'closed' && h.at >= (t?.writtenAt ?? 0) - 15_000) {
+    const quiet = now - Math.max(h.at, t?.writtenAt ?? 0);
+    // A permission given goes on with the tool and no event until it ends: Claude Code says busy, so it works.
+    if (hs === 'needs-you' && r.status === 'busy' && quiet > 3000) return { state: 'working', live };
+    // A turn stopped with Esc fires nothing: still "working" a minute on, with Claude Code saying idle, it is ready.
+    if (hs === 'working' && r.status === 'idle' && quiet > 60_000) return { state: 'ready', live };
+    return { state: hs, live };
+  }
   if (t?.limitHit && t.limitHit.at >= (t.lastAt ?? 0) - 120_000) return { state: 'capped', live };
   // Working is what Claude Code says: a turn that ended while its own background tasks run still carries on by itself.
   if (r.status === 'busy' || r.state === 'working' || r.state === 'running') return { state: 'working', live };
@@ -378,7 +517,8 @@ async function claudeProfile(p, learned, usage) {
     const sl = bySession.get(r.sessionId);
     const w = sl?.context_window?.context_window_size ? { size: sl.context_window.context_window_size, guessed: false } : windowOf(t.model, t.contextTokens ?? 0, learned);
     const ctx = contextOf(sl, t, w.size, settings);
-    const { state, live } = sessionState(r, t);
+    const h = readHook(p, r.sessionId);
+    const { state, live } = sessionState(r, t, h);
     const rec = sessionRecord(p, r.pid);
     const { via, remote } = reachOf(r, rec);
     const units = file && (t.writtenAt ?? 0) >= since ? usageSince(file, since, usage) : 0;
@@ -389,7 +529,11 @@ async function claudeProfile(p, learned, usage) {
              doing: t.doing ?? null, said: t.said ?? null, limitHit: t.limitHit ?? null, firstAsk: t.firstAsk ?? null, lastAsk: t.lastAsk ?? null, steps: t.steps ?? [],
              via, web: remote ? `https://claude.ai/code/${remote}` : null, effort: t.effort ?? null, unitsWeek: units,
              // No screen of its own: a Remote Control server spawned it for claude.ai. Nothing is lost moving it here.
-             headless: rec?.entrypoint === 'sdk-cli' };
+             headless: rec?.entrypoint === 'sdk-cli', stage: t.stage ?? null,
+             running: live ? t.running ?? null : null, queued: live && t.queued?.length ? t.queued.map((x) => oneLine(x.text, 300)) : null,
+             branch: branchOf(t.workdir ?? r.cwd) ?? branchOf(r.cwd), workdir: t.workdir ? tilde(t.workdir) : null,
+             // What decides its state again when a hook event comes in between reads (fleet.mjs).
+             rs: { state: r.state ?? null, status: r.status ?? null, active: Boolean(r.active) }, writtenAt: t.writtenAt ?? null, hookAt: h?.at ?? null };
   });
   // The newest limit stop any session met: the account-wide cap when its status line never reported.
   const limitHit = sessions.map((s) => s.limitHit).filter((h) => h?.at).sort((a, b) => b.at - a.at)[0] ?? null;
@@ -913,6 +1057,8 @@ export function peek(a) {
         else if (c.type === 'tool_use') push('step', stepOf(c.name, c.input ?? {}), at);
       }
     }
+    // What you sent that it hasn't taken yet: it waits for the step it is in to end.
+    for (const x of queuedIn(tail(f, 2048 * 1024))) items.push({ kind: 'ask', text: keepLines(x.text, 40_000), at: x.at, pending: true, queued: true });
   }
   return { ok: true, items: items.slice(-400) };
 }
@@ -1087,12 +1233,45 @@ export async function fork(a) {
   return /^Workspace not trusted/.test(why) ? { ok: false, untrusted: true, cwd: tilde(row.cwd), error: why } : { ok: false, error: why };
 }
 
+// ---------------------------------------------------------------- interject
+/** Your message now, not after the step it is in. A message you send while a session works waits for its current step to
+ *  end; this ends that step: the command it runs is stopped (that command's own process group, and nothing else: not the
+ *  session, its tool servers or its background tasks), so the step returns at once and Claude Code hands the session what
+ *  you queued, there and then. A step that is not a command (an agent, a web fetch) can't be cut: it says so. */
+export async function interject(a) {
+  const p = claudeProfiles().find((x) => x.id === a?.profile);
+  if (!p || !/^[0-9a-f-]{36}$/.test(a?.sessionId ?? '')) return { ok: false, error: 'Pick a session.' };
+  const file = findTranscript(p.id, a.sessionId);
+  const t = file ? readTranscript(file) : null;
+  if (!t?.running) return { ok: false, error: 'It is not in the middle of a step: what you send reaches it now.' };
+  if (t.running.tool !== 'Bash' || !t.running.cmd) return { ok: false, error: `Its step (${t.running.step}) is not a command that can be stopped: your message waits for it to end.` };
+  // Its process: the session file Claude Code keeps per process names its session.
+  let pid = null;
+  try { for (const n of fs.readdirSync(path.join(p.dir, 'sessions'))) { const d = readJson(path.join(p.dir, 'sessions', n), 1 << 20); if (d?.sessionId === a.sessionId && Number.isInteger(d.pid)) { try { process.kill(d.pid, 0); pid = d.pid; } catch {} } } } catch {}
+  if (!pid) return { ok: false, error: 'Its process is not running here.' };
+  // The step's shell: a child of it, leading a process group of its own, started when the step was, running that command.
+  const r = await run('ps', ['-A', '-o', 'pid=,ppid=,pgid=,etime=,args=']);
+  const flat = (v) => String(v).replace(/['"\\\s]/g, ''), want = flat(t.running.cmd).slice(0, 48);
+  const steps = [];
+  for (const line of r.stdout.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+    if (!m || Number(m[2]) !== pid || m[1] !== m[3]) continue;
+    const started = Date.now() - (etimeMs(m[4]) ?? Infinity);
+    if (started >= (t.running.since ?? 0) - 5000 && want && flat(m[5]).includes(want)) steps.push(Number(m[3]));
+  }
+  if (!steps.length) return { ok: false, error: 'Its command could not be found: it may just have ended.' };
+  for (const g of steps) try { process.kill(-g, 'SIGTERM'); } catch {}
+  await new Promise((ok) => setTimeout(ok, 2000));
+  for (const g of steps) try { process.kill(-g, 'SIGKILL'); } catch {}
+  return { ok: true, stopped: t.running.step };
+}
+
 // ---------------------------------------------------------------- run over SSH: `FLEET_DO=collect node --input-type=module -`
 
 if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
   const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
-                 close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args) }[process.env.FLEET_DO];
+                 close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args), interject: () => interject(args) }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };
   process.stdout.write(JSON.stringify(r));
 }

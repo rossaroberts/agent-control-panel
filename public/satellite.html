@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Satellite</title>
+<link rel="preload" href="/vendor/plex-mono-400.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+/* IBM Plex Mono (SIL OFL, vendor/LICENSE-plex-mono), served from here: nothing waits on another site. */
+@font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap; src: url(/vendor/plex-mono-400.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap; src: url(/vendor/plex-mono-500.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap; src: url(/vendor/plex-mono-400-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap; src: url(/vendor/plex-mono-500-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+/* After iA Writer: paper, ink, one typeface, one blue. Structure is whitespace and tone, never boxes; words only where a
+   glyph can't say it. Every text colour clears 4.5:1 on paper and on the selection tint; --quiet is for drawn marks only. */
+:root {
+  --paper: #f6f7f7; --tint: #eceeef; --ink: #1e2124; --grey: #5f666b; --quiet: #858c91; --rule: #e2e5e7;
+  --blue: #0a72a3; --orange: #a5560f; --red: #bf3f33; --green: #2b7d52;
+  --font: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #191b1d; --tint: #232729; --ink: #dcdfe1; --grey: #9ba2a7; --quiet: #6c7277; --rule: #2c3033;
+          --blue: #3fb6ee; --orange: #ef9a4c; --red: #ec7468; --green: #5fbd8b; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html { background: var(--paper); }
+body { margin: 0; color: var(--ink); font: 15px/1.7 var(--font); font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+::selection { background: color-mix(in srgb, var(--blue) 24%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+main { width: min(1500px, 100% - 64px); margin: 0 auto; padding: 44px 0 120px; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 2px; }
+svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; }
+
+/* top line: the three screens of the panel; the one you are on is in ink */
+.top { display: flex; align-items: center; gap: 26px; margin-bottom: 36px; }
+.top .tabs { display: flex; gap: 26px; flex: 1; }
+.top .tabs a { color: var(--grey); letter-spacing: .01em; }
+.top .tabs a:hover { color: var(--ink); }
+.top .tabs a[aria-current] { color: var(--ink); font-weight: 500; }
+.top .read { font-size: 13px; color: var(--grey); white-space: nowrap; }
+.top .nstuck { font-size: 13px; color: var(--orange); white-space: nowrap; }
+.top button { color: var(--grey); display: inline-flex; align-items: center; }
+.top button:hover { color: var(--ink); }
+.top button.busy svg { animation: turn 900ms linear infinite; }
+@keyframes turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .top button.busy svg { animation: none; opacity: .5; } }
+.err { color: var(--red); font-size: 13px; margin: -16px 0 22px; white-space: pre-line; }
+.note { color: var(--grey); font-size: 13px; margin: -16px 0 22px; white-space: pre-line; }
+
+/* every workflow of the repo, the last run of each: one wrapping line, a glyph and an age each */
+.wf { display: flex; flex-wrap: wrap; gap: 2px 24px; font-size: 13px; color: var(--grey); margin: -8px 0 30px; line-height: 1.7; }
+.wf .k { color: var(--grey); }
+.wf .w { white-space: nowrap; display: inline-flex; align-items: baseline; color: var(--ink); }
+.wf .w .at { color: var(--grey); margin-left: 6px; }
+.wf .w.fail { color: var(--red); }
+.wf .w.old { color: var(--grey); }
+.wf a.w:hover { text-decoration: underline; text-underline-offset: 3px; }
+.wf .g { margin-right: 6px; }
+
+/* the table: one column per stage, left to right is the way work travels */
+.wrap { margin: 0 -10px; overflow-x: auto; }
+table { width: 100%; min-width: 1120px; border-collapse: collapse; table-layout: fixed; }
+col.c-agent { width: 232px; } col.c-checks { width: 140px; } col.c-land { width: 142px; } col.c-promotion { width: 150px; } col.c-test { width: 140px; } col.c-prod { width: 140px; }
+th { text-align: left; font-weight: 400; vertical-align: top; padding: 0 10px 12px; position: sticky; top: 0; z-index: 2; background: var(--paper); box-shadow: 0 1px 0 var(--rule); }
+th .hn { font-weight: 500; }
+th .hs, th .hx { font-size: 13px; line-height: 1.5; color: var(--grey); white-space: normal; overflow-wrap: anywhere; }
+th .at { margin-left: 6px; color: var(--grey); }
+th .hs { color: var(--ink); }
+th .hx { min-height: 1.5em; }
+th .fail { color: var(--red); }
+td { padding: 2px 10px; font-size: 13px; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: baseline; }
+tr.row { cursor: pointer; }
+tr.row:hover td { background: color-mix(in srgb, var(--tint) 60%, transparent); }
+tr.row td:first-child { border-radius: 4px 0 0 4px; } tr.row td:last-child { border-radius: 0 4px 4px 0; }
+td.pr { font-size: 15px; color: var(--ink); }
+td.pr .n { font-size: 13px; color: var(--grey); margin-right: 10px; }
+td.pr .w { font-size: 13px; color: var(--grey); margin-right: 10px; }
+td.pr .b { font-size: 13px; color: var(--grey); }
+td .at { color: var(--grey); margin-left: 6px; }
+td .more { color: var(--grey); margin-left: 6px; }
+td .since { color: var(--grey); margin-left: 6px; }
+td .since.stuck, td.pr .w.stuck { color: var(--orange); }
+td .why { font-size: 13px; line-height: 1.5; color: var(--orange); margin: 0 0 3px 33px; overflow: hidden; text-overflow: ellipsis; }
+td.fail .tx, td.fail a { color: var(--red); }
+td.pr .w { white-space: nowrap; }
+td.ag { color: var(--ink); }
+td.ag .in { display: flex; align-items: baseline; min-width: 0; }
+td.ag .tx { font-size: 13px; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+td.ag .m, td.ag .more { color: var(--grey); margin-left: 8px; flex: none; }
+td a:hover { text-decoration: underline; text-underline-offset: 3px; }
+th a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.g { width: 15px; height: 15px; vertical-align: -3px; margin-right: 8px; flex: none; overflow: visible; }
+.g path { fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.g.done path { stroke: var(--green); } .g.fail path { stroke: var(--red); }
+.g.run circle { fill: var(--blue); } .g.need circle { fill: var(--orange); } .g.wait circle { fill: var(--quiet); }
+.g.run circle.halo { fill: none; stroke: var(--blue); stroke-width: 1.5; opacity: 0; animation: ping 2.4s ease-out infinite; transform-origin: 8px 8px; }
+@keyframes ping { 0% { opacity: .55; transform: scale(.7); } 70%, 100% { opacity: 0; transform: scale(1.5); } }
+@media (prefers-reduced-motion: reduce) { .g.run circle.halo { animation: none; } }
+/* the agent column keeps Fleet's own dots: working, needs you, at its limit, idle */
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; position: relative; top: -1px; margin: 0 11px 0 4px; }
+.dot.run { background: var(--blue); } .dot.need { background: var(--orange); } .dot.fail { background: var(--red); }
+.dot.wait { box-shadow: inset 0 0 0 1.5px var(--quiet); }
+th .dot { margin: 0 10px 0 4px; }
+
+/* the three groups: blocked, on its way, shipped */
+tr.group td { padding: 30px 10px 6px; font-size: 15px; font-weight: 500; color: var(--ink); overflow: visible; }
+tr.group:first-child td { padding-top: 14px; }
+tr.group.blocked td { color: var(--red); }
+tr.group.stuck td { color: var(--orange); }
+tr.group td .c { font-weight: 400; font-size: 13px; color: var(--grey); margin-left: 12px; }
+tr.group td button { color: var(--grey); font-size: 13px; margin-left: 18px; font-weight: 400; }
+tr.group td button:hover { color: var(--ink); }
+.reading { color: var(--grey); font-size: 13px; margin-top: 34px; }
+.foot { color: var(--grey); font-size: 13px; margin-top: 44px; }
+</style>
+</head>
+<body>
+<main>
+  <nav class="top" aria-label="Panel">
+    <div class="tabs"><a href="/">Fleet</a><a href="/satellite" aria-current="page">Satellite</a><a href="/world">World</a></div>
+    <span class="nstuck" id="nstuck" hidden></span>
+    <span class="read" id="read"></span>
+    <button id="refresh" title="Read GitHub again" aria-label="Read GitHub again"><svg class="i" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg></button>
+  </nav>
+  <div class="err" id="err" hidden></div>
+  <div class="note" id="note" hidden></div>
+  <div class="wf" id="wf" hidden aria-label="Workflows: the last run of each"></div>
+  <div class="wrap"><table id="table" hidden>
+    <colgroup><col class="c-agent"><col class="c-pr"><col class="c-checks"><col class="c-land"><col class="c-promotion"><col class="c-test"><col class="c-prod"></colgroup>
+    <thead><tr id="head"></tr></thead>
+    <tbody id="body"></tbody>
+  </table></div>
+  <div class="reading" id="reading">Reading GitHub…</div>
+  <div class="foot" id="foot"></div>
+</main>
+<script>
+const TOKEN = '__ACP_TOKEN__';
+const $ = (id) => document.getElementById(id);
+const store = { get(k) { try { return localStorage.getItem('satellite.' + k); } catch { return null; } }, set(k, v) { try { localStorage.setItem('satellite.' + k, v); } catch {} } };
+/** Elements are built with textContent only: PR titles and session names are other people's text. */
+function h(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+async function api(p, body = {}) {
+  let r;
+  try {
+    r = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN }, body: JSON.stringify(body), signal: AbortSignal.timeout(40_000) });
+  } catch (e) { throw new Error(e?.name === 'TimeoutError' ? 'The panel did not answer in time.' : 'The panel is not reachable: is it running?'); }
+  if (r.status === 403) { reloadFresh(); throw new Error('reloading'); }
+  return r.json();
+}
+/** The panel restarted (a new token): load the page again, once. */
+function reloadFresh() {
+  try {
+    if (Date.now() - (Number(sessionStorage.getItem('satellite.reloadAt')) || 0) < 10_000) return;
+    sessionStorage.setItem('satellite.reloadAt', String(Date.now()));
+  } catch {}
+  location.reload();
+}
+const ago = (t) => { if (!t) return ''; const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
+const when = (t) => { const a = ago(t); return !a ? '' : a === 'now' ? 'now' : `${a} ago`; };
+
+// ---------------------------------------------------------------- glyphs
+// ✓ done · ● running · ✕ failed · · waiting; a stage that does not apply yet is left blank.
+const WORD = { done: 'done', run: 'running', fail: 'failed', wait: 'waiting', need: 'needs you' };
+const NS = 'http://www.w3.org/2000/svg';
+function glyph(s, still) {
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16'); svg.setAttribute('class', `g ${s}`); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', WORD[s] ?? s);
+  const add = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); svg.append(e); };
+  if (s === 'done') add('path', { d: 'M3.5 8.5l3 3 6-7' });
+  else if (s === 'fail') { add('path', { d: 'M4.5 4.5l7 7' }); add('path', { d: 'M11.5 4.5l-7 7' }); }
+  else if (s === 'wait') add('circle', { cx: 8, cy: 8, r: 1.4 });
+  else { if (s === 'run' && !still) add('circle', { class: 'halo', cx: 8, cy: 8, r: 5 }); add('circle', { cx: 8, cy: 8, r: 3.2 }); }
+  return svg;
+}
+/** The agent column keeps Fleet's dots. */
+const dot = (s) => h('i', { class: `dot ${s}`, role: 'img', 'aria-label': s === 'run' ? 'working' : s === 'need' ? 'needs you' : s === 'fail' ? 'at its limit' : 'idle' });
+
+// ---------------------------------------------------------------- the table
+const STAGES = ['agent', 'pr', 'checks', 'land', 'promotion', 'test', 'prod'];
+const AGE_IN_ROW = new Set(['land']); // a landing's age is worth the room; a deploy's is in the column header and the tooltip
+let data = null, loadedAt = 0, loading = false;
+
+function headCell(st) {
+  const line = st.t ? h('div', { class: `hs ${st.s === 'fail' ? 'fail' : ''}` }, st.s ? (st.key === 'agent' ? dot(st.s) : glyph(st.s)) : null,
+    st.href ? h('a', { href: st.href, target: '_blank', rel: 'noopener', text: st.t }) : st.t, st.at ? h('span', { class: 'at', text: ago(st.at) }) : null) : h('div', { class: 'hs' }, '');
+  return h('th', { scope: 'col' }, h('div', { class: 'hn', text: st.name }), line, h('div', { class: 'hx', text: st.subAt ? `${st.sub} ${ago(st.subAt)}`.trim() : st.sub ?? '' }));
+}
+
+const VERB = { land: 'landed', promotion: 'promoted', test: 'deployed', prod: 'deployed' };
+function cellTitle(c, key) {
+  const bits = [];
+  if (c.tip) bits.push(c.tip);
+  if (c.at && VERB[key]) bits.push(`${VERB[key]} ${when(c.at)}`);
+  return bits.join('\n') || null;
+}
+
+function cell(key, c, row) {
+  if (!c) return h('td', { class: key });
+  if (key === 'agent') {
+    return h('td', { class: 'ag', title: cellTitle(c, 'agent') }, h('div', { class: 'in' }, dot(c.s), h('span', { class: 'tx', text: c.t }), c.sub ? h('span', { class: 'm', text: c.sub }) : null, c.more ? h('span', { class: 'more', text: `+${c.more}` }) : null));
+  }
+  if (key === 'pr') {
+    const label = row.number != null ? `#${row.number}` : null;
+    const words = [row.state === 'draft' || row.state === 'open' ? row.state : null, row.promo ? 'promotion' : null, row.bot ? 'bot' : null].filter(Boolean).join(' ');
+    const age = c.since ? ago(c.since) : '';
+    const word = [words, age].filter(Boolean).join(' ');
+    return h('td', { class: 'pr', title: [row.title, row.branch, row.author && `by ${row.author}`, row.base && row.base !== 'staging' ? `into ${row.base}` : null, ...(row.labels ?? [])].filter(Boolean).join('\n') },
+      glyph(c.s, true), label ? h('span', { class: 'n', text: label }) : null,
+      word ? h('span', { class: `w${c.stuck ? ' stuck' : ''}`, text: word }) : null,
+      h('a', { href: row.url, target: '_blank', rel: 'noopener', text: row.kind === 'branch' ? row.branch : row.title }),
+      row.kind === 'branch' ? h('span', { class: 'b', text: `  ${c.t}` }) : null,
+      row.stuck ? h('div', { class: 'why', text: row.stuck.why }) : null);
+  }
+  // The cell, and its words; the whole of it opens the run or the PR it is about, where there is one.
+  const inner = [glyph(c.s), c.t ? h('span', { class: 'tx', text: c.t }) : null];
+  return h('td', { class: `${key} ${c.s === 'fail' ? 'fail' : ''}`, title: cellTitle(c, key) },
+    c.href ? h('a', { href: c.href, target: '_blank', rel: 'noopener' }, inner) : inner,
+    c.at && AGE_IN_ROW.has(key) ? h('span', { class: 'at', text: ago(c.at) }) : null,
+    c.since ? h('span', { class: `since${c.stuck ? ' stuck' : ''}`, text: ago(c.since), title: 'here since' }) : null);
+}
+
+function groupRow(cls, label, count, extra) {
+  return h('tr', { class: `group ${cls}` }, h('td', { colspan: 7 }, label, h('span', { class: 'c', text: String(count) }), extra));
+}
+
+const STALE_MS = 14 * 86_400_000;
+function renderWorkflows(list) {
+  const items = (list ?? []).filter((w) => !w.none), box = $('wf');
+  box.hidden = !items.length;
+  box.replaceChildren(h('span', { class: 'k', text: 'workflows' }), ...items.map((w) => h(w.href ? 'a' : 'span',
+    { class: `w ${w.s}${w.at && Date.now() - w.at > STALE_MS ? ' old' : ''}`, href: w.href, target: w.href ? '_blank' : null, rel: w.href ? 'noopener' : null,
+      title: [`${w.name}${w.branch ? ` on ${w.branch}` : ''}${w.event ? `, ${w.event}` : ''}`, w.t || null, w.at ? `${when(w.at)}` : null].filter(Boolean).join('\n') },
+    glyph(w.s), w.label, w.s === 'wait' && w.t ? h('span', { class: 'at', text: w.t }) : null, h('span', { class: 'at', text: ago(w.at) }))));
+}
+
+function render() {
+  const d = data;
+  if (!d) return;
+  renderWorkflows(d.workflows);
+  $('reading').hidden = true;
+  $('table').hidden = false;
+  const head = $('head');
+  head.replaceChildren(...d.stages.map(headCell));
+  const body = $('body');
+  const stuck = d.rows.filter((r) => r.stuck), blocked = d.rows.filter((r) => !r.stuck && r.attention);
+  const flying = d.rows.filter((r) => !r.stuck && !r.attention && !r.shipped), shipped = d.rows.filter((r) => !r.stuck && !r.attention && r.shipped);
+  const hide = store.get('hideShipped') === '1';
+  const line = (r) => {
+    const tr = h('tr', { class: 'row', onclick: (e) => { if (!e.target.closest('a') && r.url) window.open(r.url, '_blank', 'noopener'); } });
+    for (const k of STAGES) tr.append(cell(k, r.cells[k], r));
+    return tr;
+  };
+  const kids = [];
+  if (stuck.length) kids.push(groupRow('stuck', 'stuck', stuck.length), ...stuck.map(line));
+  if (blocked.length) kids.push(groupRow('blocked', 'blocked', blocked.length), ...blocked.map(line));
+  if (flying.length) kids.push(groupRow('', 'on its way', flying.length), ...flying.map(line));
+  if (shipped.length) {
+    kids.push(groupRow('', 'shipped', shipped.length, h('button', { text: hide ? 'show' : 'hide', onclick: () => { store.set('hideShipped', hide ? '0' : '1'); render(); } })));
+    if (!hide) kids.push(...shipped.map(line));
+  }
+  $('nstuck').hidden = !stuck.length;
+  $('nstuck').textContent = `${stuck.length} stuck`;
+  document.title = stuck.length ? `Satellite · ${stuck.length} stuck` : 'Satellite';
+  body.replaceChildren(...kids);
+  const warn = [...(d.warnings ?? [])];
+  $('note').hidden = !warn.length;
+  $('note').textContent = warn.join('\n');
+  $('foot').textContent = `${d.repo} · the last ${d.days} days · ${d.calls} GitHub reads in ${(d.took / 1000).toFixed(1)}s`;
+  showRead();
+}
+
+function showRead() {
+  if (!data) return;
+  $('read').textContent = `read ${when(data.at) || 'now'}`;
+  $('read').title = `${new Date(data.at).toLocaleTimeString()}\n${data.calls} GitHub reads, ${(data.took / 1000).toFixed(1)}s`;
+}
+
+async function load(fresh = false) {
+  if (loading) return;
+  loading = true;
+  $('refresh').classList.add('busy');
+  try {
+    const r = await api('/api/satellite', fresh ? { fresh: true } : {});
+    if (r?.ok) {
+      data = r; loadedAt = Date.now();
+      $('err').hidden = !r.stale;
+      if (r.stale) $('err').textContent = `GitHub could not be read just now (${r.stale}). This is the last read.`;
+      render();
+    } else if (r) {
+      $('err').hidden = false; $('err').textContent = r.error || 'The panel could not read GitHub.';
+      if (!data) $('reading').textContent = '';
+    }
+  } catch (e) {
+    if (e?.message === 'reloading') return;
+    $('err').hidden = false; $('err').textContent = e.message;
+  } finally { loading = false; $('refresh').classList.remove('busy'); }
+}
+$('refresh').addEventListener('click', () => load(true));
+// Every 30 s while the tab is visible (a hidden one asks again when it comes back); the age on the page moves on without a read.
+setInterval(() => { if (!document.hidden) load(); }, 30_000);
+setInterval(() => { if (!document.hidden) { showRead(); if (data) render(); } }, 20_000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - loadedAt > 25_000) load(); });
+load();
+</script>
+</body>
+</html>

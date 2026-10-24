@@ -14,7 +14,8 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere } from './machine.mjs';
+import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere,
+  interject as interjectHere, watchHooks, sessionState } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 
@@ -44,11 +45,12 @@ const clean = (v, n) => String(v ?? '').replace(/[<>\x00-\x08\x0b-\x1f\x7f]/g, '
 
 // The worker each machine keeps for the panel (see worker() below): it reads machine.mjs as base64 on its first line,
 // then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. A read asked
-// for while one runs shares it (a slow machine never piles reads up). On end of input it finishes what it started, then
-// exits.
-export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork']);"
+// for while one runs shares it (a slow machine never piles reads up). Between answers it says when a session's hook file
+// changes ({ event }). On end of input it finishes what it started, then exits.
+export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject']);"
   + " const running = new Set(); let m = null, reading = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
-  + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n'); continue; }"
+  + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n');"
+  + " try { m.watchHooks?.((ev) => process.stdout.write(JSON.stringify({ event: ev }) + '\\n')); } catch {} continue; }"
   + " let q; try { q = JSON.parse(line); } catch { continue; } if (!ALLOWED.has(q.do)) continue;"
   + " const go = () => Promise.resolve().then(() => m[q.do](q.args ?? {}));"
   + " const job = (q.do === 'collect' ? (reading ??= go().finally(() => { reading = null; })) : go()).catch((e) => ({ ok: false, error: String(e?.message ?? e) }))"
@@ -112,6 +114,7 @@ export function createFleet({ dir, quiet = () => {} }) {
         let msg;
         try { msg = JSON.parse(line); } catch { continue; }
         if (msg.ready) { clearTimeout(late); w.isReady(true); continue; }
+        if (msg.event) { onHook(m.name, msg.event); continue; }
         const p = w.pending.get(msg.id);
         if (p) { w.pending.delete(msg.id); clearTimeout(p.timer); p.resolve(msg.r); }
       }
@@ -174,8 +177,9 @@ export function createFleet({ dir, quiet = () => {} }) {
       child.stdin.end(fs.readFileSync(SCRIPT));
     });
   }
-  // Open every machine's connection and worker now, so the first read finds them up.
+  // Open every machine's connection and worker now, so the first read finds them up; and watch this Mac's hook files.
   setTimeout(() => { for (const m of config().machines) worker(m); }, 0).unref?.();
+  try { watchHooks((ev) => onHook(config().self, ev)); } catch {}
 
   const askHash = (x) => crypto.createHash('sha1').update(`v3\n${x.firstAsk ?? ''}\n${x.lastAsk ?? ''}`).digest('hex').slice(0, 12);
   let writing = null;
@@ -262,6 +266,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   /** After anything that changes a session: the next read starts afresh, and one already under way is not kept. */
   const changed = () => { last = null; inflight = null; readGen++; };
   const good = new Map(); // machine, or machine:engine:account → its last good read
+  const doubt = new Map(); // machine:engine:account → reads in a row that listed nothing
   /** A read that failed keeps the last good one, marked stale: one missed read must not take sessions (and an open
    *  terminal) off the page. */
   function steady(reads) {
@@ -269,8 +274,13 @@ export function createFleet({ dir, quiet = () => {} }) {
       if (m.ok === false) return good.has(m.name) ? { ...structuredClone(good.get(m.name)), stale: m.error ?? 'no answer' } : m;
       for (const a of m.accounts ?? []) {
         const k = `${m.name}:${a.engine}:${a.id}`;
-        if (a.error && !(a.sessions ?? []).length && good.has(k)) Object.assign(a, { sessions: structuredClone(good.get(k)), stale: a.error });
-        else if (!a.error) good.set(k, structuredClone(a.sessions ?? []));
+        const was = good.get(k) ?? [];
+        if (a.error && !(a.sessions ?? []).length && good.has(k)) Object.assign(a, { sessions: structuredClone(was), stale: a.error });
+        // A list with no rows at all where there were some (Claude Code's daemon restarting, say) is not believed at once:
+        // the last read stands, marked stale, for two more reads. (Closing sessions keeps their rows, as closed.)
+        else if (!a.error && !(a.sessions ?? []).length && was.length && (doubt.set(k, (doubt.get(k) ?? 0) + 1), doubt.get(k) <= 2)) {
+          Object.assign(a, { sessions: structuredClone(was), stale: 'listed no sessions just now: showing the last read' });
+        } else if (!a.error) { doubt.delete(k); good.set(k, structuredClone(a.sessions ?? [])); }
       }
       good.set(m.name, structuredClone(m));
       return m;
@@ -297,7 +307,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   function named(machine, engine, x) {
     const t = titles[`${machine}:${x.sessionId}`], l = labels[`${machine}:${x.sessionId}`];
     const own = engine === 'claude' && typeof x.name === 'string' && x.name.trim() && !PLACEHOLDER.test(x.name.trim()) ? x.name.trim() : null;
-    return Object.assign(x, { title: l?.title ?? own ?? t?.title ?? x.name ?? null, stage: t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
+    return Object.assign(x, { title: l?.title ?? own ?? t?.title ?? x.name ?? null, stage: x.stage ?? t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
   }
   /** Groups you made, after the epics in fleet.json. */
   const groupsMade = (epics) => [...new Set(Object.values(labels).map((l) => l.group).filter((g) => g && !epics.some((e) => e.name === g)))].sort();
@@ -307,6 +317,87 @@ export function createFleet({ dir, quiet = () => {} }) {
     const x = last.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'codex' ? a.sessions ?? [] : [])).find((s) => s.sessionId === sessionId);
     return x?.live ? 'It is open in Codex (the app or a terminal): finish there, or close it there first.' : null;
   }
+  // ---------------------------------------------------------------- live, between reads
+  // A hook event (a session's state as Claude Code says it, the moment it changes): that session changes on the page at
+  // once, the pages are told, and you get a notification when it now needs you. A session the last read doesn't have (just
+  // started) brings a read a moment later.
+  const listeners = new Set();
+  let soonT = null, tellT = null;
+  function onHook(machine, { sessionId, hook }) {
+    const x = last?.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'claude' ? a.sessions ?? [] : [])).find((y) => y.sessionId === sessionId);
+    if (!x || !x.live) { soon(); return; }
+    // The last read's job state, without its word on waiting or busy: the hook is newer than that.
+    const r = { pid: x.pid, active: x.rs?.active ?? x.live, state: x.rs?.state === 'blocked' ? null : x.rs?.state ?? null };
+    const { state, live } = sessionState(r, { writtenAt: x.writtenAt }, hook);
+    if (state === x.state && live === x.live) return;
+    Object.assign(x, { state, live, hookAt: hook.at });
+    looked();
+  }
+  function soon() {
+    if (soonT) return;
+    soonT = setTimeout(() => { soonT = null; read().catch(() => {}); }, 800);
+    soonT.unref?.();
+  }
+  /** After a read or a hook event: a notification for each session that now needs you, and the pages told. */
+  const was = new Map(); // machine:session → its state when last looked at
+  function looked() {
+    if (!last) return;
+    const first = !was.size;
+    for (const m of last.machines) for (const a of m.accounts ?? []) for (const x of a.sessions ?? []) {
+      const k = `${m.name}:${x.sessionId ?? x.id}`, before = was.get(k);
+      if (!first && x.live && x.state === 'needs-you' && before !== undefined && before !== 'needs-you') notify(m.name, x);
+      was.set(k, x.live ? x.state : 'closed');
+    }
+    clearTimeout(tellT);
+    tellT = setTimeout(() => { for (const fn of listeners) try { fn(); } catch {} }, 50);
+  }
+  /** Pages hear when something changed (server.mjs passes it on over their sockets). */
+  function onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
+  // A Mac notification when a session comes to need you: once per session a minute at most; "notify": false in fleet.json
+  // turns them off.
+  const notified = new Map();
+  function notify(machine, x) {
+    let off = false;
+    try { off = JSON.parse(fs.readFileSync(file, 'utf8')).notify === false; } catch {}
+    const k = `${machine}:${x.sessionId ?? x.id}`;
+    if (off || process.platform !== 'darwin' || Date.now() - (notified.get(k) ?? 0) < 60_000) return;
+    notified.set(k, Date.now());
+    const what = clean(typeof x.waitingFor === 'string' ? x.waitingFor : x.doing ?? 'It waits for you', 160) || 'It waits for you';
+    execFile('osascript', ['-e', 'on run argv', '-e', 'display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv)', '-e', 'end run',
+      what, 'Fleet · needs you', clean(`${x.title ?? x.name ?? 'A session'} · ${machine}`, 120)], { timeout: 5000 }, () => {});
+  }
+
+  // Every session ever seen, so none just disappears: one that a machine that answered no longer reports stays on the
+  // page, closed, as it was last seen, until you archive it. machine:session → what it was.
+  const seenFile = path.join(dir, 'fleet-seen.json');
+  let seen = {};
+  try { seen = JSON.parse(fs.readFileSync(seenFile, 'utf8')); } catch {}
+  let seenDirty = false, seenWritten = 0;
+  const KEPT = ['engine', 'id', 'sessionId', 'name', 'title', 'cwd', 'startedAt', 'lastAt', 'model', 'via', 'web', 'effort', 'kind', 'stage'];
+  function ledger(reads) {
+    for (const m of reads) {
+      const reported = new Set();
+      for (const a of m.accounts ?? []) for (const x of a.sessions ?? []) {
+        const k = `${m.name}:${x.sessionId ?? x.id}`;
+        reported.add(k);
+        const rec = { acct: `${a.engine}:${a.id}`, ...Object.fromEntries(KEPT.map((f) => [f, x[f] ?? null])) };
+        if (JSON.stringify(seen[k]?.rec) !== JSON.stringify(rec)) { seen[k] = { rec, at: Date.now() }; seenDirty = true; }
+        else seen[k].at = Date.now();
+      }
+      if (m.ok === false || m.stale) continue; // a machine that didn't answer shows its last read anyway
+      for (const [k, { rec }] of Object.entries(seen)) {
+        if (!k.startsWith(`${m.name}:`) || reported.has(k) || archived[k]) continue;
+        const a = (m.accounts ?? []).find((y) => `${y.engine}:${y.id}` === rec.acct);
+        if (a) a.sessions = [...(a.sessions ?? []), { ...rec, acct: undefined, live: false, state: 'closed', unlisted: true }];
+      }
+    }
+    // An archived one long gone is forgotten.
+    for (const [k, v] of Object.entries(seen)) if (archived[k] && Date.now() - v.at > 30 * 86_400_000) { delete seen[k]; seenDirty = true; }
+    if (seenDirty && Date.now() - seenWritten > 20_000) {
+      try { fs.writeFileSync(seenFile + '.tmp', JSON.stringify(seen)); fs.renameSync(seenFile + '.tmp', seenFile); seenDirty = false; seenWritten = Date.now(); } catch {}
+    }
+  }
+
   /** One read of every machine; reads asked for while one runs share it. */
   async function read() {
     const gen = readGen;
@@ -317,6 +408,7 @@ export function createFleet({ dir, quiet = () => {} }) {
         collect().then((d) => ({ ...d, name: self, local: true })).catch((e) => ({ name: self, local: true, ok: false, error: String(e?.message ?? e) })),
         ...machines.map((m) => overSsh(m, 'collect').then((d) => ({ ...d, name: m.name, ssh: m.ssh, user: m.user, local: false }))),
       ]));
+      ledger(reads);
       for (const m of reads) for (const a of m.accounts ?? []) {
         const real = a.engine === 'claude' && logins[`${m.name}:${a.id}`];
         if (real && a.account) a.account = { ...a.account, email: real, says: a.account.email };
@@ -327,10 +419,10 @@ export function createFleet({ dir, quiet = () => {} }) {
       try { writeTitles(reads); } catch (e) { console.error('fleet titles:', e?.message ?? e); }
       // What the page shows of each session: what it was asked and its steps are for the titles only (half the bytes).
       const shown = reads.map((m) => ({ ...m, accounts: (m.accounts ?? []).map((a) => ({ ...a, sessions: (a.sessions ?? []).map(({ firstAsk, lastAsk, steps, ...x }) =>
-        ({ ...x, said: typeof x.said === 'string' ? x.said.slice(0, 400) : x.said })) })) }));
+        ({ ...x, said: typeof x.said === 'string' ? x.said.slice(0, 400) : x.said, running: x.running && { step: x.running.step, since: x.running.since, tool: x.running.tool } })) })) }));
       const fresh = { ok: true, at: Date.now(), machines: shown, names, epics, groups: groupsMade(epics), configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
       // A close, archive, message or launch that landed while this read ran makes it out of date: hand it back, keep none.
-      if (gen === readGen) last = fresh;
+      if (gen === readGen) { last = fresh; looked(); }
       return fresh;
     })().catch((e) => { restUntil = Date.now() + 10_000; throw e; }).finally(() => { if (inflight === mine) inflight = null; });
     inflight = mine;
@@ -446,6 +538,15 @@ export function createFleet({ dir, quiet = () => {} }) {
     return r;
   }
 
+  /** Stop the command a session's current step runs, so what you queued reaches it now (machine.mjs interject). */
+  async function interject(body) {
+    const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? '') };
+    if (!/^[\w.-]{1,40}$/.test(args.profile) || !/^[0-9a-f-]{36}$/.test(args.sessionId)) return { ok: false, error: 'Pick a session.' };
+    const r = await onMachine(String(body?.machine ?? ''), 'interject', args, interjectHere);
+    soon();
+    return r;
+  }
+
   /** Archive several closed sessions at once (an epic's): each as archive() does; a job record that refuses stays. */
   async function archiveAll(body) {
     const list = Array.isArray(body?.sessions) ? body.sessions.slice(0, 300) : [];
@@ -455,5 +556,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, config, codexBusy };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, interject, config, codexBusy, onChange };
 }
