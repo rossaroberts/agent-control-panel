@@ -984,12 +984,32 @@ export async function adopt(a) {
   return id ? { ok: true, id } : { ok: false, error: `It was closed but did not start again: ${oneLine(r.stderr || r.stdout || r.err?.message, 240) || 'claude --bg --resume failed'}. Resume it with claude --resume ${row.sessionId}` };
 }
 
+/** Continue a session as a copy in the background, so it opens as a terminal here while the original (a desktop-app
+ *  session, say) stays exactly as it is: `claude --bg --resume <id> --fork-session`, in its folder, on its model. Only an
+ *  idle one: a copy taken mid-turn would start from half a turn. */
+export async function fork(a) {
+  const p = claudeProfiles().find((x) => x.id === a?.profile);
+  if (!p) return { ok: false, error: 'There is no such account here.' };
+  let row = null;
+  try { row = JSON.parse((await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) })).stdout).find((r) => r.sessionId === a.sessionId); } catch {}
+  if (!row) return { ok: false, error: 'It is not listed any more.' };
+  if (row.status === 'busy' || row.status === 'waiting' || row.waitingFor) return { ok: false, error: 'It is busy: continue it here once it is idle.' };
+  const file = row.cwd && transcriptOf(p, row.sessionId, row.cwd);
+  if (!file) return { ok: false, error: 'It has no saved conversation to continue.' };
+  const t = readTranscript(file);
+  const args = ['--bg', '--resume', row.sessionId, '--fork-session'];
+  if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
+  const r = await run(bin('claude'), args, { cwd: row.cwd, env: profileEnv(p), timeout: 30_000 });
+  const id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
+  return id ? { ok: true, id } : { ok: false, error: oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg --resume --fork-session failed' };
+}
+
 // ---------------------------------------------------------------- run over SSH: `FLEET_DO=collect node --input-type=module -`
 
 if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
   const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
-                 close: () => close(args), archive: () => archive(args), adopt: () => adopt(args) }[process.env.FLEET_DO];
+                 close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args) }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };
   process.stdout.write(JSON.stringify(r));
 }

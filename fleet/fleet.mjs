@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere } from './machine.mjs';
+import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 
@@ -40,7 +40,7 @@ const clean = (v, n) => String(v ?? '').replace(/[<>]/g, '').replace(/\s+/g, ' '
 // The worker each machine keeps for the panel (see worker() below): it reads machine.mjs as base64 on its first line,
 // then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. On end of
 // input it finishes what it started, then exits.
-export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt']);"
+export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork']);"
   + " const running = new Set(); let m = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
   + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n'); continue; }"
   + " let q; try { q = JSON.parse(line); } catch { continue; } if (!ALLOWED.has(q.do)) continue;"
@@ -126,7 +126,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   }
   /** Run machine.mjs's `todo` on a machine: through its worker, else the one-shot way. */
   async function overSsh(m, todo, args = {}) {
-    const ms = todo === 'launch' || todo === 'adopt' ? 150_000 : todo === 'send' ? 90_000 : SSH_MS;
+    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' ? 150_000 : todo === 'send' ? 90_000 : SSH_MS;
     const w = worker(m);
     if (await w.ready && !w.dead) {
       return new Promise((resolve) => {
@@ -366,6 +366,15 @@ export function createFleet({ dir, quiet = () => {} }) {
     return r;
   }
 
+  /** Continue a session as a copy in the background, the original untouched. */
+  async function fork(body) {
+    const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? '') };
+    if (!/^[\w.-]{1,40}$/.test(args.profile) || !/^[0-9a-f-]{36}$/.test(args.sessionId)) return { ok: false, error: 'Pick a session.' };
+    const r = await onMachine(String(body?.machine ?? ''), 'fork', args, forkHere);
+    changed();
+    return r;
+  }
+
   /** Archive several closed sessions at once (an epic's): each as archive() does; a job record that refuses stays. */
   async function archiveAll(body) {
     const list = Array.isArray(body?.sessions) ? body.sessions.slice(0, 300) : [];
@@ -375,5 +384,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, config };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, config };
 }

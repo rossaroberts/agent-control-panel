@@ -154,7 +154,13 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 #p-rail .v { writing-mode: vertical-rl; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-height: 70vh; }
 #p-term { flex: 1; min-height: 0; background: var(--term-bg); padding: 6px 2px 2px 12px; }
 #p-term[hidden] { display: none; }
+#p-term { position: relative; }
+#p-term .tview { height: 100%; position: relative; }
+#p-term .tview[hidden] { display: none; }
 #p-term .xterm { height: 100%; }
+#p-term .ghost { position: absolute; z-index: 10; pointer-events: none; white-space: pre; color: #8f979c; background: var(--term-bg);
+                 font: 13px "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+#p-term .ghost[hidden] { display: none; }
 #p-term .xterm-viewport { scrollbar-color: #3a3f43 transparent; }
 #pane { --paper: var(--term-bg); --tint: #232729; --ink: #dcdfe1; --grey: #9ba2a7; --quiet: #6c7277; --rule: #2c3033;
         --blue: #3fb6ee; --orange: #ef9a4c; --red: #ec7468; --green: #5fbd8b; color-scheme: dark; color: var(--ink); font-size: 13px; }
@@ -250,6 +256,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 <datalist id="fleet-groups"></datalist>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/addon-webgl.js"></script>
 <script>
 const TOKEN = '__ACP_TOKEN__';
 const $ = (id) => document.getElementById(id);
@@ -535,7 +542,7 @@ function openTrust({ machine, profile, cwd, sub }) {
 const attachable = (x) => x?.engine === 'claude' && x.live && x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '');
 /** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
 const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
-const termView = (x) => (attachable(x) || x?.via === 'trust') && pane.view !== 'log';
+const termView = (x) => attachable(x) || x?.via === 'trust';
 // What each session last said, kept for when you come back to it or hover it first: the pane shows it at once and reads
 // again behind it.
 const seen = new Map();
@@ -543,6 +550,7 @@ const remember = (key, items) => { seen.delete(key); seen.set(key, { items, at: 
 let hoverTimer = null;
 function prefetch(x) {
   clearTimeout(hoverTimer);
+  if (attachable(x)) { if (!terms.has(keyOf(x))) hoverTimer = setTimeout(() => attachTerm(x), 200); return; }
   if (!x?.sessionId || attachable(x) || keyOf(x) === pane.key || Date.now() - (seen.get(keyOf(x))?.at ?? 0) < 15_000) return;
   hoverTimer = setTimeout(async () => {
     const r = await api('/api/fleet/peek', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => null);
@@ -560,7 +568,7 @@ function applyPaneUi() {
 function fold(min) {
   paneUi.min = min; store.set('pane.min', min ? '1' : '');
   applyPaneUi();
-  if (!min) requestAnimationFrame(() => { try { tv.fit?.fit(); } catch {} tv.term?.focus(); });
+  if (!min) requestAnimationFrame(() => fitShown(true));
 }
 $('p-rail').addEventListener('click', () => fold(false));
 $('p-grip').addEventListener('pointerdown', (e) => {
@@ -588,7 +596,7 @@ function select(x) {
 function deselect() {
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
   clearInterval(pane.timer);
-  closeTerm();
+  hideTerms(); // the terminal stays attached out of sight, so opening it again is instant
   pane.key = null;
   document.body.classList.remove('has-pane');
   renderMachines(); renderPane();
@@ -625,68 +633,148 @@ async function sendText(text) {
   renderPane(true); peek();
 }
 
-// ---------------------------------------------------------------- the live terminal
+// ---------------------------------------------------------------- live terminals
 // A background session opens as its own Claude Code screen, attached where it runs: what you type reaches it as yours,
-// /model, /effort and its permission prompts included. Letting go (another session, closing the pane) detaches; the
-// session keeps running.
-const tv = { key: null, term: null, fit: null, ctl: null, id: null, queue: '', sending: false, ended: false, ro: null };
+// /model, /effort and its permission prompts included. The last few you opened stay attached out of sight, so going back
+// to one is instant, and hovering one attaches ahead of your click. Where a key takes long to come back (another machine,
+// a quarter of a second away), what you type shows at once over the cursor until its real screen catches up: an overlay,
+// so the terminal's own contents are never touched. /exit ends the session and closes the pane.
+const KEEP = 4;
+const terms = new Map(); // key → one attached terminal
+let shown = null, lastSize = { cols: 100, rows: 30 };
 const TERM_THEME = { background: '#16181a', foreground: '#dcdfe1', cursor: '#3fb6ee', cursorAccent: '#16181a', selectionBackground: 'rgba(63,182,238,.3)' };
-async function openTerm(x) {
-  closeTerm();
-  const key = keyOf(x), el = $('p-term');
-  el.hidden = false;
-  tv.key = key;
-  try { await document.fonts.load('13px "IBM Plex Mono"'); } catch {}
-  if (tv.key !== key) return;
-  if (typeof Terminal === 'undefined') { el.textContent = 'The terminal did not load.'; return; }
+const printable = (d) => d.length <= 64 && !/[\x00-\x1f\x7f]/.test(d);
+
+/** The terminal for a session, attached now if it isn't yet; out of sight unless shown. */
+function attachTerm(x) {
+  const key = keyOf(x);
+  let T = terms.get(key);
+  if (T) { T.used = Date.now(); T.x = x; return T; }
+  if (typeof Terminal === 'undefined') return null;
+  const el = h('div', { class: 'tview', hidden: true });
+  const ghost = h('div', { class: 'ghost', hidden: true });
+  el.append(ghost);
+  $('p-term').append(el);
   const term = new Terminal({ fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace', fontSize: 13, lineHeight: 1.2, cursorBlink: true,
-    scrollback: 5000, theme: TERM_THEME, macOptionIsMeta: true });
+    scrollback: 5000, theme: TERM_THEME, macOptionIsMeta: true, cols: lastSize.cols, rows: lastSize.rows });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  try { fit.fit(); } catch {}
-  const ctl = new AbortController();
-  Object.assign(tv, { term, fit, ctl, id: null, queue: '', sending: false, ended: false });
-  term.onData((d) => {
-    if (tv.term !== term) return;
-    if (tv.ended) { if (d === '\r') { const y = current(); if (y && attachable(y)) openTerm(y); } return; }
-    tv.queue += d; flushTerm();
-  });
-  term.onResize(({ cols, rows }) => { if (tv.term === term && tv.id) api('/api/term/resize', { term: tv.id, cols, rows }).catch(() => {}); });
-  tv.ro = new ResizeObserver(() => { if (el.clientWidth > 120 && el.clientHeight > 60) try { fit.fit(); } catch {} });
-  tv.ro.observe(el);
-  if (x.state !== 'needs-you') term.focus();
+  T = { key, x, el, ghost, term, fit, ctl: new AbortController(), id: null, queue: '', sending: false, ended: false, used: Date.now(),
+        rtt: x.local ? 0 : 250, sentAt: 0, pend: [], line: '', gl: null };
+  terms.set(key, T);
+  term.onData((d) => typed(T, d));
+  term.onResize(({ cols, rows }) => { if (T.id) api('/api/term/resize', { term: T.id, cols, rows }).catch(() => {}); });
+  stream(T);
+  trimTerms();
+  return T;
+}
+async function stream(T) {
+  const { term, x } = T;
   try {
-    const r = await fetch('/api/term/open', { method: 'POST', signal: ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
+    const r = await fetch('/api/term/open', { method: 'POST', signal: T.ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
       body: JSON.stringify({ machine: x.machine, profile: x.profile, ...(x.via === 'trust' ? { trust: x.cwd } : { id: x.id }), cols: term.cols, rows: term.rows }) });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${r.status}`); }
-    tv.id = r.headers.get('x-term-id');
-    flushTerm();
+    T.id = r.headers.get('x-term-id');
+    flushTerm(T);
     const reader = r.body.getReader();
-    for (;;) { const { value, done } = await reader.read(); if (done || tv.term !== term) break; term.write(value); }
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done || terms.get(T.key) !== T) break;
+      // How long a key takes to come back: the first output after one was sent.
+      if (T.sentAt) { const took = Date.now() - T.sentAt; T.rtt = T.rtt ? T.rtt * 0.7 + took * 0.3 : took; T.sentAt = 0; }
+      const now = Date.now();
+      T.pend = T.pend.filter((p) => p.at > now - Math.max(40, T.rtt * 0.7)); // what has had time to come back has
+      term.write(value, () => drawGhost(T));
+    }
   } catch (e) {
-    if (e.name === 'AbortError' || tv.term !== term) return;
+    if (e.name === 'AbortError' || terms.get(T.key) !== T) return;
     term.write(`\r\n\x1b[31m${e.message}\x1b[0m`);
   }
-  if (tv.term !== term) return;
-  tv.ended = true; tv.id = null;
+  if (terms.get(T.key) !== T) return;
+  T.ended = true; T.id = null; T.pend = []; drawGhost(T);
+  // It ended where it runs (exited, closed, or its trust prompt answered): its pane goes, it moves to closed.
+  if (T.x.via === 'trust') return finish(T);
+  await load();
+  const y = everything.find((s) => keyOf(s) === T.key);
+  if (!y?.live) return finish(T);
   term.write('\r\n\x1b[2mdetached · enter to attach again\x1b[0m\r\n');
 }
+/** A key you typed: to the session in order; shown at once when it takes long to come back; /exit ends it. */
+function typed(T, d) {
+  if (T.ended) { if (d === '\r') { dropTerm(T.key); const y = current(); if (y && pane.key === T.key) showTerm(y); } return; }
+  T.queue += d; flushTerm(T);
+  if (d === '\r') {
+    const ask = T.line.trim(); T.line = ''; T.pend = [];
+    if (/^\/(exit|quit)$/.test(ask)) setTimeout(() => exitSession(T), 600);
+  } else if (d === '\x7f') { T.line = T.line.slice(0, -1); if (T.pend.length) T.pend.pop(); }
+  else if (printable(d)) { T.line += d; if (T.rtt > 80) for (const ch of d) T.pend.push({ ch, at: Date.now() }); }
+  else T.pend = [];
+  drawGhost(T);
+  if (T.pend.length) setTimeout(() => { T.pend = T.pend.filter((p) => p.at > Date.now() - (T.rtt * 2 + 400)); drawGhost(T); }, T.rtt * 2 + 450);
+}
 /** Keys go in order, one request at a time; whatever was typed meanwhile goes with the next. */
-async function flushTerm() {
-  if (tv.sending || !tv.id || !tv.queue) return;
-  tv.sending = true;
-  const id = tv.id, data = tv.queue;
-  tv.queue = '';
+async function flushTerm(T) {
+  if (T.sending || !T.id || !T.queue) return;
+  T.sending = true;
+  const id = T.id, data = T.queue;
+  T.queue = '';
+  T.sentAt ||= Date.now();
   await api('/api/term/input', { term: id, data }).catch(() => {});
-  tv.sending = false;
-  flushTerm();
+  T.sending = false;
+  flushTerm(T);
 }
-function closeTerm() {
-  tv.ctl?.abort(); tv.ro?.disconnect(); tv.term?.dispose();
-  Object.assign(tv, { key: null, term: null, fit: null, ctl: null, id: null, queue: '', sending: false, ended: false, ro: null });
-  $('p-term').hidden = true; $('p-term').replaceChildren();
+/** The characters still on their way, drawn over the cursor in the terminal's own cell grid. */
+function drawGhost(T) {
+  const b = T.term.buffer.active, screen = T.el.querySelector('.xterm-screen');
+  if (!T.pend.length || !screen || b.viewportY !== b.baseY) { T.ghost.hidden = true; return; }
+  const cw = screen.clientWidth / T.term.cols, ch = screen.clientHeight / T.term.rows;
+  Object.assign(T.ghost.style, { left: `${screen.offsetLeft + b.cursorX * cw}px`, top: `${screen.offsetTop + b.cursorY * ch}px`, height: `${ch}px`, lineHeight: `${ch}px` });
+  T.ghost.textContent = T.pend.map((p) => p.ch).join('');
+  T.ghost.hidden = false;
 }
+/** The session on screen in the pane: its terminal, attached if need be. */
+function showTerm(x) {
+  const T = attachTerm(x);
+  if (!T) { $('p-term').hidden = false; return; }
+  $('p-term').hidden = false;
+  if (shown !== T.key) {
+    for (const o of terms.values()) o.el.hidden = o !== T;
+    shown = T.key;
+    if (!T.gl && window.WebglAddon) { try { T.gl = new WebglAddon.WebglAddon(); T.gl.onContextLoss(() => { T.gl?.dispose(); T.gl = null; }); T.term.loadAddon(T.gl); } catch { T.gl = null; } }
+    fitShown(x.state !== 'needs-you'); // a session waiting on you doesn't take the next Enter by accident
+  }
+  T.used = Date.now();
+}
+function fitShown(focus = false) {
+  const T = terms.get(shown);
+  if (!T || $('p-term').hidden) return;
+  try { T.fit.fit(); } catch {}
+  lastSize = { cols: T.term.cols, rows: T.term.rows };
+  T.term.refresh(0, T.term.rows - 1);
+  if (focus) T.term.focus();
+}
+function hideTerms() { shown = null; for (const o of terms.values()) o.el.hidden = true; $('p-term').hidden = true; }
+function dropTerm(key) {
+  const T = terms.get(key);
+  if (!T) return;
+  terms.delete(key); T.ctl.abort(); T.gl?.dispose(); T.term.dispose(); T.el.remove();
+  if (shown === key) shown = null;
+}
+/** Only the last few stay attached: the oldest out of sight lets go first. */
+function trimTerms() {
+  const old = [...terms.values()].filter((o) => o.key !== shown).sort((a, b) => b.used - a.used).slice(KEEP - 1);
+  for (const o of old) dropTerm(o.key);
+}
+/** /exit typed in its terminal: the session ends (conversation kept), the pane closes, it moves to closed. */
+async function exitSession(T) {
+  const x = T.x;
+  if (x.via !== 'trust' && x.sessionId) await api('/api/fleet/close', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => {});
+  finish(T);
+  load();
+}
+function finish(T) { dropTerm(T.key); if (pane.key === T.key) deselect(); }
+new ResizeObserver(() => { const el = $('p-term'); if (el.clientWidth > 120 && el.clientHeight > 60) fitShown(); }).observe($('p-term'));
 
 // ---------------------------------------------------------------- your name and group for it
 async function saveLabel(x, change) {
@@ -720,18 +808,30 @@ async function moveHere() {
   const r = await api('/api/fleet/adopt', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
   pane.moving = false;
   pane.said = r.ok ? null : { cls: 'no', text: r.error };
-  pane.view = null;
   await load();
 }
 
+/** A copy of an app session, in the background here: opens on its terminal. Only on your second click. */
+async function continueHere() {
+  const x = current();
+  if (!x || pane.moving) return;
+  if (!pane.armMove) { pane.armMove = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.armMove) { pane.armMove = false; renderPane(); } }, 4000); return; }
+  pane.armMove = false; pane.moving = true; pane.said = null; renderPane();
+  const r = await api('/api/fleet/fork', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
+  pane.moving = false;
+  if (!r.ok) { pane.said = { cls: 'no', text: r.error }; renderPane(); return; }
+  await load();
+  const y = everything.find((s) => s.machine === x.machine && s.id === r.id);
+  if (y) select(y);
+}
 function renderPane(toEnd = false) {
   const aside = $('pane'), x = current();
   aside.hidden = !pane.key;
   applyPaneUi();
   if (!pane.key) return;
-  if (!x && tv.key === pane.key) return; // a read that missed it: its terminal stays as it is
+  if (!x && shown === pane.key) return; // a read that missed it: its terminal stays as it is
   if (!x) {
-    closeTerm();
+    hideTerms();
     $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' }));
     $('p-body').hidden = false; $('p-body').replaceChildren(); $('p-foot').hidden = true;
     return;
@@ -743,10 +843,10 @@ function renderPane(toEnd = false) {
   if (!document.activeElement?.matches?.('.p-title, .p-group')) renderHead(x, term);
   if (term) {
     $('p-body').hidden = true; $('p-foot').hidden = true;
-    if (tv.key !== pane.key) openTerm(x);
+    showTerm(x);
     return;
   }
-  if (tv.key) closeTerm();
+  hideTerms();
   // The conversation: stay at the bottom if you were there; leave your place if you had scrolled up to read.
   // Drawn again only when it changed, so what you selected stays selected.
   const body = $('p-body'), atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
@@ -787,12 +887,16 @@ function renderHead(x, term) {
   // In the bar: its name, what turns it into a terminal (or back), and an error if there is one. The rest is behind ⋯.
   const move = movable(x) && !pane.moving ? h('button', { class: `act${pane.armMove ? ' armed' : ''}`, text: pane.armMove ? 'move here?' : 'move here', onclick: moveHere,
     title: 'Restart it here in the background, conversation kept, and open its terminal' + (x.headless ? '' : '. The terminal window it is in now closes.') }) : null;
-  const view = attachable(x) ? h('button', { class: 'act', text: term ? 'log' : 'terminal', onclick: () => { pane.view = term ? 'log' : null; renderPane(true); if (term) peek(); } }) : null;
+  // A desktop-app session can't be typed into from here: continue it as a copy in the background instead, the app's own
+  // session untouched.
+  const copy = x.engine === 'claude' && x.via === 'app' && x.live && x.sessionId && (x.state === 'ready' || x.state === 'capped') && !pane.moving
+    ? h('button', { class: `act${pane.armMove ? ' armed' : ''}`, text: pane.armMove ? 'continue here?' : 'continue here', onclick: continueHere,
+        title: 'Continue this conversation as a copy in the background here, with its terminal; the app\'s own session stays as it is' }) : null;
   const state = pane.moving ? h('span', { class: 'p-err', style: 'color:var(--grey)', text: '…' })
     : pane.said?.cls === 'no' ? h('span', { class: 'p-err', text: pane.said.text, title: pane.said.text }) : null;
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
   $('p-head').replaceChildren(...[
-    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, view,
+    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, copy,
       h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),

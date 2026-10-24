@@ -161,14 +161,19 @@ what each one is working on, talk to it, and decide where the next one goes. The
   account, effort, how full its context is, and about how much of its account's weekly limit it used. Every session is
   listed: open ones first, then one "N closed" line that opens them. An epic's closed sessions archive in one go.
 - **Click a session** and it opens on the right, full height, as a terminal window: one line on top (its name, which is
-  yours to change; **terminal**/**log**; ⋯ for the rest), then its screen. Drag the pane's edge to widen it; ⌘\\ or »
+  yours to change; ⋯ for the rest), then its screen. Drag the pane's edge to widen it; ⌘\\ or »
   folds it to a strip. Behind ⋯: what it is, its group (pick one, or type a new one; empty puts haiku's back), one
   control that closes an open session or archives a closed one, **TEST** (the epic's TEST site in a window beside the
   panel), its claude.ai page and its attach command.
 - **A background session opens as its terminal**: its own Claude Code screen, attached where it runs (`claude attach`,
   over `ssh -tt` on another machine). What you type reaches it as yours, `/model`, `/effort` and its permission prompts
-  included. Closing the pane detaches; the session keeps running. **log** shows its conversation as text instead, the
-  way its terminal prints it: every step, nothing folded.
+  included. The last four you opened stay attached out of sight, so going back to one is instant (about 20 ms), and
+  hovering one attaches ahead of the click. Where a key takes long to come back (redbat is a quarter of a second away),
+  what you type shows at once over the cursor, an overlay only, until the real screen catches up. **/exit** ends the
+  session and closes the pane. xterm draws on the GPU (WebGL) where it can.
+- **A session that isn't a terminal** shows its conversation the way its terminal prints it: every step, nothing folded.
+  A desktop-app session can't be typed into from here: **continue here** (a second click confirms) continues it as a copy
+  in the background (`claude --bg --resume <id> --fork-session`), with its terminal, the app's own session untouched.
 - **move here** (a second click confirms) takes an idle session, or one stopped at a limit, from a terminal or claude.ai
   into the background, conversation kept (`claude --bg --resume <id>`, same folder, model and permission mode), so it
   opens as a terminal too. Never one that works or waits on you, never by itself, and not a desktop-app session. Its old

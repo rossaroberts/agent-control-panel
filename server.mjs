@@ -105,7 +105,7 @@ const PREFS = prefsPath();
 const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
 const terms = createTerms({ config: () => fleet.config() });
 // The terminal in Fleet's page: xterm.js, kept here so the page needs no network for it.
-const VENDOR = { 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8' };
+const VENDOR = { 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8' };
 const HOOK_URL = `127.0.0.1:${PORT}/hook/`;
 function listProfiles() {
   let names = [];
@@ -1780,7 +1780,7 @@ async function handle(req, res) {
                       '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/send': (b) => fleet.send(b),
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
                       '/api/fleet/archive-all': (b) => fleet.archiveAll(b),
-                      '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b),
+                      '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b), '/api/fleet/fork': (b) => fleet.fork(b),
                       '/api/term/input': (b) => terms.input(b), '/api/term/resize': (b) => terms.resize(b) };
     if (Object.hasOwn(ACTIONS, url.pathname)) {
       let r;
