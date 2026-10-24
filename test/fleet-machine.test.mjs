@@ -89,10 +89,16 @@ test('working while the transcript is mid-turn', () => {
   assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(false, 3000), NOW), { state: 'working', live: true });
 });
 
-test('busy only because a background task runs: its turn ended and nothing was written for a minute', () => {
-  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(true, 6 * 60_000), NOW), { state: 'ready', live: true });
-  // a turn that just ended may be the moment between two steps
-  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(true, 5000), NOW), { state: 'working', live: true });
+test('busy while its own background tasks run, its turn over: still working, as Claude Code says (it carries on by itself)', () => {
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'busy' }, turn(true, 6 * 60_000), NOW), { state: 'working', live: true });
+});
+
+import { realAsk } from '../fleet/machine.mjs';
+test('the real ask: a continued session\'s request from its summary; a peer message\'s own words', () => {
+  const summary = 'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion.\n\nSummary:\n1. Primary Request and Intent:\n   Audit last month\'s ERPx syncing issues and the GL fields posted twice.\n\n2. Key Technical Concepts:\n   - ERPx';
+  assert.equal(realAsk(summary), "(continued) Audit last month's ERPx syncing issues and the GL fields posted twice.");
+  assert.equal(realAsk('Another Claude session sent a message: okay hows it going?\n\nThis came from another Claude session — not typed by your user'), 'okay hows it going?');
+  assert.equal(realAsk('Fix the login page'), 'Fix the login page');
 });
 
 test('its last word was a limit stop: capped, whatever the roster says', () => {

@@ -99,7 +99,18 @@ function askOf(d) {
   const text = typeof c === 'string' ? c : Array.isArray(c) && !c.some((x) => x.type === 'tool_result') ? c.filter((x) => x.type === 'text').map((x) => x.text).join('\n') : '';
   const t = text.trim();
   if (!t || t.startsWith('<') || t.startsWith('[Request interrupted') || t.startsWith('Caveat:')) return null;
-  return t.slice(0, 4000);
+  return realAsk(t).slice(0, 4000);
+}
+/** What was really asked. A session continued after its context ran out opens with Claude Code's summary: its "Primary
+ *  Request and Intent" section says what the work is. A message from another session comes wrapped: its own words. */
+export function realAsk(t) {
+  if (/^This session is being continued from a previous conversation/.test(t)) {
+    const m = /Primary Request and Intent:?\**\s*([\s\S]*?)(?:\n\s*(?:\d+\.|#+)\s*\**[A-Z][^\n]{2,60}:|$)/.exec(t);
+    const body = (m?.[1] ?? t.replace(/^This session is being continued[^\n]*\n+/, '')).trim();
+    return `(continued) ${body}`;
+  }
+  const peer = /^Another Claude session sent a message:\s*([\s\S]*?)\s*This came from another Claude session/.exec(t);
+  return peer ? peer[1].trim() : t;
 }
 const keepLines = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : null);
 const oneLine = (v, n = 220) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, n) : null);
@@ -173,7 +184,7 @@ export function contextOf(sl, t, window, settings) {
 /** From the end of a transcript: the context its last reply carried, its model, and what it last did or said. */
 function readTranscript(file) {
   const out = { model: null, contextTokens: null, lastAt: null, doing: null, said: null, limitHit: undefined, turnOver: null, writtenAt: mtime(file),
-                firstAsk: null, lastAsk: null };
+                firstAsk: null, lastAsk: null, steps: [] };
   for (const l of headLines(file)) if ((out.firstAsk = oneLine(askOf(parse(l)), 500))) break;
   const lines = tail(file);
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -199,12 +210,14 @@ function readTranscript(file) {
       out.effort = typeof d.effort === 'string' ? d.effort : null;
     }
     for (const c of Array.isArray(d.message.content) ? [...d.message.content].reverse() : []) {
+      if (c.type === 'tool_use' && out.steps.length < 8) { const st = stepOf(c.name, c.input ?? {}); if (st) out.steps.push(st); }
       if (!out.doing && c.type === 'tool_use') out.doing = stepOf(c.name, c.input ?? {});
       if (!out.said && c.type === 'text' && c.text?.trim()) out.said = oneLine(c.text, 400);
     }
-    if (out.contextTokens !== null && (out.doing || out.said) && out.lastAsk) break;
+    if (out.contextTokens !== null && (out.doing || out.said) && out.lastAsk && out.steps.length >= 8) break;
   }
   out.lastAsk ??= out.firstAsk;
+  out.steps.reverse();
   return out;
 }
 
@@ -303,8 +316,8 @@ export function sessionState(r, t, now = Date.now()) {
   // needs you.
   if (r.status === 'waiting' || r.waitingFor || (r.state === 'blocked' && r.status !== 'idle')) return { state: 'needs-you', live };
   if (t?.limitHit && t.limitHit.at >= (t.lastAt ?? 0) - 120_000) return { state: 'capped', live };
-  const busy = r.status === 'busy' || r.state === 'working' || r.state === 'running';
-  if (busy && !(t?.turnOver && now - (t.writtenAt ?? now) > 60_000)) return { state: 'working', live };
+  // Working is what Claude Code says: a turn that ended while its own background tasks run still carries on by itself.
+  if (r.status === 'busy' || r.state === 'working' || r.state === 'running') return { state: 'working', live };
   return { state: 'ready', live };
 }
 
@@ -352,7 +365,7 @@ async function claudeProfile(p, learned, usage) {
              state, live, rawState: r.state ?? r.status ?? null, waitingFor: r.waitingFor ?? null, pid: r.pid ?? null,
              cwd: tilde(r.cwd ?? null), startedAt: r.startedAt ?? null, lastAt: t.lastAt ?? null,
              model: t.model ?? null, context: ctx && { pct: ctx.pct, tokens: ctx.tokens, size: ctx.size, compactAt: ctx.compactAt, guessed: !ctx.fresh && w.guessed },
-             doing: t.doing ?? null, said: t.said ?? null, limitHit: t.limitHit ?? null, firstAsk: t.firstAsk ?? null, lastAsk: t.lastAsk ?? null,
+             doing: t.doing ?? null, said: t.said ?? null, limitHit: t.limitHit ?? null, firstAsk: t.firstAsk ?? null, lastAsk: t.lastAsk ?? null, steps: t.steps ?? [],
              via, web: remote ? `https://claude.ai/code/${remote}` : null, effort: t.effort ?? null, unitsWeek: units,
              // No screen of its own: a Remote Control server spawned it for claude.ai. Nothing is lost moving it here.
              headless: rec?.entrypoint === 'sdk-cli' };
@@ -533,7 +546,7 @@ function readRollout(f, m, open) {
   }
   const size = tokens?.model_context_window ?? null, used = tokens?.last_token_usage?.input_tokens ?? null;
   // Open while a running Codex holds its log; without a process scan, while it was written in the last ten minutes.
-  const live = open ? open.has(f) : Date.now() - m < CODEX_LIVE_MS;
+  const live = Boolean(open?.has(f)) || Date.now() - m < CODEX_LIVE_MS;
   return {
     session: { engine: 'codex', id: meta.id ?? path.basename(f, '.jsonl'), sessionId: meta.id ?? null,
                name: oneLine(meta.originator, 60), kind: meta.source ?? null, live,

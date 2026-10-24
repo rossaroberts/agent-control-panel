@@ -157,12 +157,13 @@ what each one is working on, talk to it, and decide where the next one goes. The
 - **Needs you**, above everything: every session waiting on a question or permission, then every one stopped at a limit,
   the longest wait first, each with what it waits on under it. The tab's title carries the count.
 - **Sessions**, grouped by epic (`epics` in `fleet.json`), then by the groups you make: each with a title of a few words
-  and a stage (planning, building, testing, promoting, deploying) that haiku writes from what you asked it, its machine,
+  and a stage (planning, building, testing, promoting, deploying) that Sonnet writes from what you asked it last, what it
+  said last and its last steps (a continued session by its summary's request, not Claude Code's boilerplate), its machine,
   account, effort, how full its context is, and about how much of its account's weekly limit it used. Every session is
   listed: open ones first, then one "N closed" line that opens them. An epic's closed sessions archive in one go.
 - **Click a session** and it opens on the right, full height, as a terminal window: one line on top (its name, which is
   yours to change; ⋯ for the rest), then its screen. Drag the pane's edge to widen it; ⌘\\ or »
-  folds it to a strip. Behind ⋯: what it is, its group (pick one, or type a new one; empty puts haiku's back), one
+  folds it to a strip. Behind ⋯: what it is, its group (pick one, or type a new one; empty puts the written one back), one
   control that closes an open session or archives a closed one, **TEST** (the epic's TEST site in a window beside the
   panel), its claude.ai page and its attach command.
 - **A background session opens as its terminal**: its own Claude Code screen, attached where it runs (`claude attach`,
@@ -221,9 +222,9 @@ Other machines, names and epics go in `fleet.json` beside `prefs.json`:
 socket in `~/.fleet-panel/`) and, on it, one worker: `node` with `fleet/machine.mjs` sent once, answering a request a line,
 so a read costs a round trip rather than a login. Terminals open as channels on the same connection. A read that fails
 keeps the machine's last good one on the page, marked as such. `names` labels an account (keyed `engine:email`), `self`
-names this Mac, each epic's `about` is what haiku files sessions by, and `logins` says which account a profile's login
-really is where its config file says another (`machine:profile`). Titles are one haiku call for every session whose ask changed (no tools, hooks, MCP servers or saved
-session), kept in `fleet-titles.json`; your names and groups in `fleet-labels.json`; archived sessions in
+names this Mac, each epic's `about` is what Sonnet files sessions by, and `logins` says which account a profile's login
+really is where its config file says another (`machine:profile`). Titles are one Sonnet call for every session whose ask changed, and every ten minutes for one that works (no tools,
+hooks, MCP servers or saved session), kept in `fleet-titles.json`; your names and groups in `fleet-labels.json`; archived sessions in
 `fleet-archived.json`.
 
 ## The Mac app

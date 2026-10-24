@@ -154,7 +154,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   // Open every machine's connection and worker now, so the first read finds them up.
   setTimeout(() => { for (const m of config().machines) worker(m); }, 0).unref?.();
 
-  const askHash = (x) => crypto.createHash('sha1').update(`v2\n${x.firstAsk ?? ''}\n${x.lastAsk ?? ''}`).digest('hex').slice(0, 12);
+  const askHash = (x) => crypto.createHash('sha1').update(`v3\n${x.firstAsk ?? ''}\n${x.lastAsk ?? ''}`).digest('hex').slice(0, 12);
   let writing = null;
   const asked = {}; // key → when haiku was last asked for it: one that came back without a title waits before it is asked again
   /** Titles for the open sessions whose asks changed since their title was written. Runs in the background, one at a time. */
@@ -173,10 +173,12 @@ export function createFleet({ dir, quiet = () => {} }) {
     for (const b of batch) asked[b.key] = Date.now();
     const { epics } = config();
     const prompt = [
-      'Each <session> below is a coding agent at work: the folder it is in, what it was first asked, what it was asked last, the',
-      'last thing it said, and the step it is on. For each, write a title of 3 to 5 words naming what it is working on now, the way a',
-      'to-do list would: specific (the system, feature, issue or PR), plain words, sentence case, no period, no quotes, never the',
-      'word "session". When the last ask changed the subject, the title follows the last ask. Then pick its stage: planning',
+      'Each <session> below is a coding agent at work: the folder it is in, whether it is working now, what it was first asked,',
+      'what it was asked last, the last thing it said, and its last steps (oldest first). "(continued)" marks a session carried on',
+      'from an earlier one: what follows is what that work is for. For each, write a title of 3 to 6 words naming what it is',
+      'working on NOW, the way a to-do list would: specific (the system, feature, issue or PR number), plain words, sentence case,',
+      'no period, no quotes, never the words "session", "agent" or "continued". The last ask, its last words and its last steps',
+      'say what it does now; the first ask only says where it began. Then pick its stage from what its last steps do: planning',
       '(working out what to do: investigating, designing, writing a plan), building (writing or changing code or data), testing',
       '(running tests or checks, reviewing), promoting (pull requests, merging, landing, promotion to main), or deploying (shipping',
       'to a server, a release, production). Then file it under one epic, by what the work is for:',
@@ -184,14 +186,14 @@ export function createFleet({ dir, quiet = () => {} }) {
       '- Other: anything else.',
       'Answer only with the schema, one entry per id.',
       '',
-      ...batch.map((b, i) => `<session id="${i}">\nfolder: ${clean(b.x.cwd, 120)}\nfirst asked: ${clean(b.x.firstAsk, 400)}\nlast asked: ${clean(b.x.lastAsk, 400)}\nlast said: ${clean(b.x.said, 300)}\nstep: ${clean(b.x.doing, 200)}\n</session>`),
+      ...batch.map((b, i) => `<session id="${i}">\nfolder: ${clean(b.x.cwd, 120)}\nnow: ${b.x.state ?? ''}\nfirst asked: ${clean(b.x.firstAsk, 500)}\nlast asked: ${clean(b.x.lastAsk, 500)}\nlast said: ${clean(b.x.said, 400)}\nlast steps:\n${(b.x.steps ?? [b.x.doing].filter(Boolean)).map((st) => `- ${clean(st, 140)}`).join('\n')}\n</session>`),
     ].join('\n');
     const id = crypto.randomUUID();
     quiet(id);
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE')));
     const cwd = path.join(dir, 'fleet', 'titles');
     fs.mkdirSync(cwd, { recursive: true });
-    writing = new Promise((resolve) => execFile('claude', ['-p', '--model', 'haiku', '--output-format', 'json', '--json-schema', JSON.stringify(titleSchema(epics.map((e) => e.name))),
+    writing = new Promise((resolve) => execFile('claude', ['-p', '--model', 'sonnet', '--output-format', 'json', '--json-schema', JSON.stringify(titleSchema(epics.map((e) => e.name))),
       '--settings', '{"disableAllHooks": true}', '--no-session-persistence', '--tools', '', '--disallowedTools', ...DENIED_TOOLS,
       '--strict-mcp-config', '--disable-slash-commands', '--session-id', id, '--', prompt], { cwd, env, timeout: 180_000, maxBuffer: 4_000_000 },
     (err, stdout) => {
