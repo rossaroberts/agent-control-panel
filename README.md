@@ -170,8 +170,9 @@ what each one is working on, talk to it, and decide where the next one goes. The
   panel), its claude.ai page and its attach command.
 - **A background session opens as its terminal**: its own Claude Code screen, attached where it runs (`claude attach`,
   over `ssh -tt` on another machine). What you type reaches it as yours, `/model`, `/effort` and its permission prompts
-  included. The last four you opened stay attached out of sight, so going back to one is instant (about 20 ms), and
-  hovering one attaches ahead of the click. Where a key takes long to come back (redbat is a quarter of a second away),
+  included. The last three you opened stay attached out of sight, still taking in what they print, so going back to one
+  is instant (about 40 ms) with its scrollback all there. Hovering a row attaches nothing (a terminal is a process where
+  the session runs); a row opens as you press it. Where a key takes long to come back (redbat is a quarter of a second away),
   what you type shows at once over the cursor, an overlay only, until the real screen catches up. **/exit** ends the
   session and closes the pane. xterm draws on the GPU (WebGL) where it can.
 - **An Astra (Codex) session** shows its conversation; one that is closed and finished its last turn has **terminal**,
@@ -199,8 +200,17 @@ but won't take `/model`, `/effort` or a yes it needs from you that way. A termin
 typing only where it runs, or here after **move here**.
 
 The terminal is a pseudo-terminal on this Mac: a few lines of Python (`/usr/bin/python3`, no native module to build) relay
-its bytes, streamed to the page as one long response, and the page's keys come back as small requests. xterm.js draws it,
-kept in `public/vendor` (MIT) so the page needs no network for it.
+its bytes. Every terminal of a tab shares one WebSocket to the panel (`fleet/ws.mjs`; a browser keeps only six connections
+to a site, and a stream per terminal starved the rest of the page): what each prints comes as binary messages, its keys,
+sizes and closes go back. A page that can't keep up makes its terminals wait rather than the panel's memory grow; a tab
+that closes, or a browser that quits, closes its terminals; letting go hangs up, then kills what is left 1.5 s later. A
+Codex terminal is never let go to make room (there the terminal is the agent), opens once at a time, and not while the
+thread runs in Codex. xterm.js draws it, and IBM Plex Mono (OFL) sets the page, both kept in `public/vendor` so the page
+needs no network.
+
+The list is read every 10 seconds behind the page while one is open (and on any change you make), so a page gets it at
+once: the Mac's read is about 0.2 s (logins and containers are asked less often), redbat's 1.3 s. A machine that stops
+answering keeps its last read, marked stale, and its connection is replaced.
 
 Where the numbers come from. Claude Code shows an account's limits only to its status line, so `fleet/statusline.mjs`
 keeps the newest one per session in `<profile>/fleet-status/` (set it as each profile's `statusLine`; it prints

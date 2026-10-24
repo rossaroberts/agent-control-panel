@@ -4,10 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fleet</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="preload" href="/vendor/plex-mono-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <style>
+/* IBM Plex Mono (SIL OFL, vendor/LICENSE-plex-mono), served from here: nothing waits on another site. */
+@font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap; src: url(/vendor/plex-mono-400.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap; src: url(/vendor/plex-mono-500.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap; src: url(/vendor/plex-mono-400-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap; src: url(/vendor/plex-mono-500-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
 /* After iA Writer: paper, ink, one typeface, one blue. Structure is whitespace and tone, never boxes; words only where a
    glyph can't say it. Every text colour clears 4.5:1 on paper and on the selection tint; --quiet is for drawn marks only. */
 :root {
@@ -283,10 +291,24 @@ function icon(name) {
   for (const d of ICONS[name]) { const path = document.createElementNS(ns, 'path'); path.setAttribute('d', d); svg.append(path); }
   return svg;
 }
+// How long a call may take before the page stops waiting: starting or moving a session waits on the machine.
+const PATIENCE = { '/api/fleet/launch': 160_000, '/api/fleet/adopt': 160_000, '/api/fleet/fork': 160_000, '/api/fleet/send': 95_000, '/api/fleet/archive-all': 300_000 };
 async function api(p, body = {}) {
-  const r = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN }, body: JSON.stringify(body) });
-  if (r.status === 403) { location.reload(); throw new Error('reloading'); }
+  let r;
+  try {
+    r = await fetch(p, { method: 'POST', headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN }, body: JSON.stringify(body), signal: AbortSignal.timeout(PATIENCE[p] ?? 30_000) });
+  } catch (e) { throw new Error(e?.name === 'TimeoutError' ? 'The panel did not answer in time.' : 'The panel is not reachable: is it running?'); }
+  if (r.status === 403) { reloadFresh(); throw new Error('reloading'); }
   return r.json();
+}
+/** The panel restarted (a new token): load the page again, once, and open the same session in it. */
+function reloadFresh() {
+  try {
+    if (Date.now() - (Number(sessionStorage.getItem('fleet.reloadAt')) || 0) < 10_000) return;
+    sessionStorage.setItem('fleet.reloadAt', String(Date.now()));
+    sessionStorage.setItem('fleet.pane', pane.key ?? '');
+  } catch {}
+  location.reload();
 }
 const when = (t) => { const a = ago(t); return !a ? '' : a === 'now' ? 'now' : `${a} ago`; };
 const ago = (t) => { if (!t) return ''; const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
@@ -558,7 +580,9 @@ const remember = (key, items) => { seen.delete(key); seen.set(key, { items, at: 
 let hoverTimer = null;
 function prefetch(x) {
   clearTimeout(hoverTimer);
-  if (attachable(x)) { if (!terms.has(keyOf(x))) hoverTimer = setTimeout(() => attachTerm(x), 350); return; }
+  // Hovering reads what it last said, ahead of your click. Never a terminal: that is a process where the session runs
+  // (and, in tmux, a new size for your own window).
+  if (termView(x)) return;
   if (!x?.sessionId || attachable(x) || keyOf(x) === pane.key || Date.now() - (seen.get(keyOf(x))?.at ?? 0) < 15_000) return;
   hoverTimer = setTimeout(async () => {
     const r = await api('/api/fleet/peek', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => null);
@@ -596,32 +620,36 @@ function select(x) {
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
   Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null });
   $('p-reply').value = drafts.get(key) ?? '';
-  clearInterval(pane.timer);
-  pane.timer = x.live ? setInterval(() => { if (!document.hidden) peek(); }, 2500) : null;
   document.body.classList.add('has-pane');
   renderMachines(); renderPane(true); peek();
 }
 function deselect() {
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
-  clearInterval(pane.timer);
   hideTerms(); // the terminal stays attached out of sight, so opening it again is instant
   pane.key = null;
   document.body.classList.remove('has-pane');
   renderMachines(); renderPane();
 }
+let peeking = false;
 async function peek() {
   const x = current(), key = pane.key;
   if (!x?.sessionId || termView(x)) return renderPane();
+  peeking = true;
   try {
     const r = await api('/api/fleet/peek', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId });
     if (pane.key !== key) return; // switched away while it read
     // Keep what you just sent on show until the transcript has it.
     const sent = (pane.items ?? []).filter((it) => it.pending && !(r.items ?? []).some((n) => n.kind === 'ask' && n.text.includes(it.text.slice(0, 80))));
-    Object.assign(pane, r.ok ? { items: [...r.items, ...sent], error: null } : { error: r.error });
-    if (r.ok) remember(key, r.items);
-  } catch (e) { if (pane.key === key) pane.error = String(e.message); }
+    // A read that failed keeps what was on show (the error goes in the bar); with nothing on show yet, it is the error.
+    if (r.ok) { Object.assign(pane, { items: [...r.items, ...sent], error: null }); remember(key, r.items); if (pane.said?.peek) pane.said = null; }
+    else if (pane.items) pane.said = { cls: 'no', text: r.error, peek: true };
+    else pane.error = r.error;
+  } catch (e) { if (pane.key === key) { if (pane.items) pane.said = { cls: 'no', text: String(e.message), peek: true }; else pane.error = String(e.message); } }
+  finally { peeking = false; }
   renderPane();
 }
+// While a session that runs is open in the pane, what it says is read again every 2.5 s, never two reads at once.
+setInterval(() => { if (!document.hidden && pane.key && !peeking && current()?.live) peek(); }, 2500);
 /** Its conversation the way its terminal prints it: what you asked, what it said, every step, nothing folded or cut. */
 function conversation(items) {
   return items.map((it) => (it.kind === 'step'
@@ -643,23 +671,61 @@ async function sendText(text) {
 
 // ---------------------------------------------------------------- live terminals
 // A background session opens as its own Claude Code screen, attached where it runs: what you type reaches it as yours,
-// /model, /effort and its permission prompts included. The last few you opened stay attached out of sight, so going back
-// to one is instant, and hovering one attaches ahead of your click. Where a key takes long to come back (another machine,
-// a quarter of a second away), what you type shows at once over the cursor until its real screen catches up: an overlay,
-// so the terminal's own contents are never touched. /exit ends the session and closes the pane.
+// /model, /effort and its permission prompts included. The last few you opened stay attached out of sight, still taking in
+// what they print (a terminal out of sight draws nothing, so that costs little), so going back to one is instant and its
+// scrollback is all there. Where a key takes long to come back (another machine, a quarter of a second away), what you type
+// shows at once over the cursor until its real screen catches up: an overlay, so the terminal's own contents are never
+// touched. /exit ends the session and closes the pane.
+//
+// Every terminal of this tab goes over one connection to the panel (a browser keeps six to a site, and a stream each
+// starved the rest of the page): what each prints comes as a binary message with its number first; keys, sizes and
+// closes go back as small JSON ones.
 const KEEP = 3;
 const terms = new Map(); // key → one attached terminal
 let shown = null, lastSize = { cols: 100, rows: 30 };
 const TERM_THEME = { background: '#16181a', foreground: '#dcdfe1', cursor: '#3fb6ee', cursorAccent: '#16181a', selectionBackground: 'rgba(63,182,238,.3)' };
 const printable = (d) => d.length <= 64 && !/[\x00-\x1f\x7f]/.test(d);
+const wire = { ws: null, open: null, next: 1, refs: new Map() }; // the connection, and each terminal on it by number
 
-/** The terminal for a session, attached now if it isn't yet; out of sight unless shown. */
-function attachTerm(x) {
+/** The connection, opened if need be: a promise of it, open. */
+function wired() {
+  if (wire.ws && wire.ws.readyState <= WebSocket.OPEN) return wire.open;
+  const ws = new WebSocket(`ws://${location.host}/api/term/ws?t=${encodeURIComponent(TOKEN)}`);
+  ws.binaryType = 'arraybuffer';
+  wire.ws = ws;
+  wire.open = new Promise((ok, no) => { ws.onopen = () => ok(ws); ws.onerror = () => no(new Error('no connection to the panel')); });
+  wire.open.catch(() => {});
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      let m;
+      try { m = JSON.parse(e.data); } catch { return; }
+      if (m.op === 'end') ended(wire.refs.get(m.ref), m.error ?? null);
+      return;
+    }
+    const T = wire.refs.get(new DataView(e.data).getUint32(0));
+    if (T) printed(T, new Uint8Array(e.data, 4));
+  };
+  // The panel restarted or the line dropped: every terminal on it has ended (Enter in one attaches it again).
+  ws.onclose = () => { if (wire.ws === ws) wire.ws = null; for (const T of [...wire.refs.values()]) ended(T, null); };
+  return wire.open;
+}
+/** One message to the panel about a terminal; they go in the order sent. */
+function tell(T, m) { wired().then((ws) => ws.send(JSON.stringify({ ref: T.ref, ...m }))).catch(() => {}); }
+/** A paste in pieces the panel takes, never split inside a character. */
+function pieces(d, n = 65536) {
+  const out = [];
+  for (let i = 0; i < d.length;) { let j = Math.min(d.length, i + n); if (j < d.length && /[\ud800-\udbff]/.test(d[j - 1])) j--; out.push(d.slice(i, j)); i = j; }
+  return out;
+}
+
+/** The terminal for a session, attached now if it isn't yet; out of sight unless `now` (it is about to be shown). */
+function attachTerm(x, now = false) {
   const key = keyOf(x);
   let T = terms.get(key);
   if (T) { T.used = Date.now(); T.x = x; return T; }
-  if (typeof Terminal === 'undefined') return null;
-  const el = h('div', { class: 'tview', hidden: true });
+  if (typeof Terminal === 'undefined' || typeof WebSocket === 'undefined') return null;
+  if (now) for (const o of terms.values()) o.el.hidden = true;
+  const el = h('div', { class: 'tview', hidden: !now });
   const ghost = h('div', { class: 'ghost', hidden: true });
   el.append(ghost);
   $('p-term').append(el);
@@ -668,54 +734,46 @@ function attachTerm(x) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  T = { key, x, el, ghost, term, fit, ctl: new AbortController(), id: null, queue: '', sending: false, ended: false, used: Date.now(),
-        rtt: x.local ? 0 : 250, sentAt: 0, pend: [], line: '', gl: null };
+  // Sized to the pane before it attaches: the program draws its screen once, at the size you see.
+  if (now) { try { fit.fit(); } catch {} lastSize = { cols: term.cols, rows: term.rows }; }
+  T = { key, x, el, ghost, term, fit, ref: wire.next++, ended: false, used: Date.now(), rtt: x.local ? 0 : 250, sentAt: 0, pend: [], line: '', gl: null, sizeT: null };
   terms.set(key, T);
+  wire.refs.set(T.ref, T);
   term.onData((d) => typed(T, d));
-  term.onResize(({ cols, rows }) => { if (T.id) api('/api/term/resize', { term: T.id, cols, rows }).catch(() => {}); });
-  stream(T);
+  // Its size goes once you stop dragging: every change makes the program draw its whole screen again.
+  term.onResize(({ cols, rows }) => { clearTimeout(T.sizeT); T.sizeT = setTimeout(() => { if (!T.ended) tell(T, { op: 'size', cols, rows }); }, 80); });
+  tell(T, { op: 'open', machine: x.machine, profile: x.profile, cols: term.cols, rows: term.rows,
+    ...(x.via === 'trust' ? { trust: x.cwd } : x.engine === 'codex' ? { codex: { sessionId: x.sessionId, cwd: x.cwd } } : x.tmux && x.via !== 'background' ? { tmux: x.tmux } : { id: x.id }) });
   trimTerms();
   return T;
 }
-async function stream(T) {
-  const { term, x } = T;
-  try {
-    const r = await fetch('/api/term/open', { method: 'POST', signal: T.ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
-      body: JSON.stringify({ machine: x.machine, profile: x.profile, cols: term.cols, rows: term.rows,
-        ...(x.via === 'trust' ? { trust: x.cwd } : x.engine === 'codex' ? { codex: { sessionId: x.sessionId, cwd: x.cwd } } : x.tmux && x.via !== 'background' ? { tmux: x.tmux } : { id: x.id }) }) });
-    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${r.status}`); }
-    T.id = r.headers.get('x-term-id');
-    flushTerm(T);
-    const reader = r.body.getReader();
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done || terms.get(T.key) !== T) break;
-      // How long a key takes to come back: the first output after one was sent.
-      if (T.sentAt) { const took = Date.now() - T.sentAt; T.rtt = T.rtt ? T.rtt * 0.7 + took * 0.3 : took; T.sentAt = 0; }
-      const now = Date.now();
-      T.pend = T.pend.filter((p) => p.at > now - Math.max(40, T.rtt * 0.7)); // what has had time to come back has
-      // Out of sight it stays connected but draws nothing (a busy session redraws all the time): shown again, its
-      // screen is drawn afresh.
-      if (T.el.hidden) { T.stale = true; continue; }
-      term.write(value, () => drawGhost(T));
-    }
-  } catch (e) {
-    if (e.name === 'AbortError' || terms.get(T.key) !== T) return;
-    term.write(`\r\n\x1b[31m${e.message}\x1b[0m`);
-  }
-  if (terms.get(T.key) !== T) return;
-  T.ended = true; T.id = null; T.pend = []; drawGhost(T);
-  // It ended where it runs (exited, closed, or its trust prompt answered): its pane goes, it moves to closed.
+/** What its program printed. */
+function printed(T, bytes) {
+  // How long a key takes to come back: the first output after one was sent.
+  if (T.sentAt) { const took = Date.now() - T.sentAt; T.rtt = T.rtt ? T.rtt * 0.7 + took * 0.3 : took; T.sentAt = 0; }
+  const now = Date.now();
+  T.pend = T.pend.filter((p) => p.at > now - Math.max(40, T.rtt * 0.7)); // what has had time to come back has
+  T.term.write(bytes, () => drawGhost(T));
+}
+/** It ended where it runs (exited, closed, its trust prompt answered) or could not start: an ended session's pane goes and
+ *  it moves to closed; one still running says so, and Enter attaches it again. */
+async function ended(T, error) {
+  if (!T || T.ended) return;
+  wire.refs.delete(T.ref);
+  if (terms.get(T.key) !== T) return; // let go of here
+  T.ended = true; T.pend = []; drawGhost(T);
+  if (error) { T.term.write(`\r\n\x1b[31m${error}\x1b[0m\r\n\x1b[2menter to try again\x1b[0m\r\n`); return; }
   if (T.x.via === 'trust') return finish(T);
   await load();
   const y = everything.find((s) => keyOf(s) === T.key);
   if (!y?.live) return finish(T);
-  term.write('\r\n\x1b[2mdetached · enter to attach again\x1b[0m\r\n');
+  T.term.write('\r\n\x1b[2mdetached · enter to attach again\x1b[0m\r\n');
 }
 /** A key you typed: to the session in order; shown at once when it takes long to come back; /exit ends it. */
 function typed(T, d) {
   if (T.ended) { if (d === '\r') { dropTerm(T.key); const y = current(); if (y && pane.key === T.key) showTerm(y); } return; }
-  T.queue += d; flushTerm(T);
+  for (const part of pieces(d)) tell(T, { op: 'in', data: part });
+  T.sentAt ||= Date.now();
   if (d === '\r') {
     const ask = T.line.trim(); T.line = ''; T.pend = [];
     if (/^\/(exit|quit)$/.test(ask)) setTimeout(() => exitSession(T), 600);
@@ -724,17 +782,6 @@ function typed(T, d) {
   else T.pend = [];
   drawGhost(T);
   if (T.pend.length) setTimeout(() => { T.pend = T.pend.filter((p) => p.at > Date.now() - (T.rtt * 2 + 400)); drawGhost(T); }, T.rtt * 2 + 450);
-}
-/** Keys go in order, one request at a time; whatever was typed meanwhile goes with the next. */
-async function flushTerm(T) {
-  if (T.sending || !T.id || !T.queue) return;
-  T.sending = true;
-  const id = T.id, data = T.queue;
-  T.queue = '';
-  T.sentAt ||= Date.now();
-  await api('/api/term/input', { term: id, data }).catch(() => {});
-  T.sending = false;
-  flushTerm(T);
 }
 /** The characters still on their way, drawn over the cursor in the terminal's own cell grid. */
 function drawGhost(T) {
@@ -747,27 +794,16 @@ function drawGhost(T) {
 }
 /** The session on screen in the pane: its terminal, attached if need be. */
 function showTerm(x) {
-  const T = attachTerm(x);
-  if (!T) { $('p-term').hidden = false; return; }
   $('p-term').hidden = false;
+  const T = attachTerm(x, true);
+  if (!T) return;
   if (shown !== T.key) {
     for (const o of terms.values()) o.el.hidden = o !== T;
     shown = T.key;
-    if (T.stale) redraw(T);
     if (!T.gl && window.WebglAddon) { try { T.gl = new WebglAddon.WebglAddon(); T.gl.onContextLoss(() => { T.gl?.dispose(); T.gl = null; }); T.term.loadAddon(T.gl); } catch { T.gl = null; } }
     fitShown(x.state !== 'needs-you'); // a session waiting on you doesn't take the next Enter by accident
   }
   T.used = Date.now();
-}
-/** A terminal shown again after drawing nothing out of sight: start clean and have the program draw its screen again,
- *  by changing its size and back (every full-screen program redraws on that). */
-function redraw(T) {
-  T.stale = false;
-  T.term.reset();
-  if (!T.id) return;
-  const { cols, rows } = T.term;
-  api('/api/term/resize', { term: T.id, cols: Math.max(20, cols - 1), rows }).catch(() => {})
-    .then(() => new Promise((ok) => setTimeout(ok, 60))).then(() => api('/api/term/resize', { term: T.id, cols, rows })).catch(() => {});
 }
 function fitShown(focus = false) {
   const T = terms.get(shown);
@@ -781,14 +817,19 @@ function hideTerms() { shown = null; for (const o of terms.values()) o.el.hidden
 function dropTerm(key) {
   const T = terms.get(key);
   if (!T) return;
-  terms.delete(key); T.ctl.abort(); T.gl?.dispose(); T.term.dispose(); T.el.remove();
+  terms.delete(key); wire.refs.delete(T.ref); clearTimeout(T.sizeT);
+  if (!T.ended) tell(T, { op: 'close' });
+  T.gl?.dispose(); T.term.dispose(); T.el.remove();
   if (shown === key) shown = null;
 }
-/** Only the last few stay attached: the oldest out of sight lets go first. */
+/** Only the last few stay attached: the oldest out of sight lets go first. Never a Codex one: there the terminal is the
+ *  agent itself, and letting go would stop it mid-turn. */
 function trimTerms() {
-  const old = [...terms.values()].filter((o) => o.key !== shown).sort((a, b) => b.used - a.used).slice(KEEP - 1);
+  const old = [...terms.values()].filter((o) => o.key !== shown && o.x.engine !== 'codex').sort((a, b) => b.used - a.used).slice(KEEP - 1);
   for (const o of old) dropTerm(o.key);
 }
+// Closing the tab (or reloading) stops a Codex terminal's agent with it: ask first.
+addEventListener('beforeunload', (e) => { if ([...terms.values()].some((o) => o.x.engine === 'codex' && !o.ended)) e.preventDefault(); });
 /** /exit typed in its terminal: the session ends (conversation kept), the pane closes, it moves to closed. */
 async function exitSession(T) {
   const x = T.x;
@@ -862,7 +903,7 @@ function renderPane(toEnd = false) {
   if (!x && shown === pane.key) return; // a read that missed it: its terminal stays as it is
   if (!x) {
     hideTerms();
-    $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' }));
+    $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' })); headSig = '';
     $('p-body').hidden = false; $('p-body').replaceChildren(); $('p-foot').hidden = true;
     return;
   }
@@ -895,7 +936,7 @@ function renderPane(toEnd = false) {
   const talk = x.live && (x.via === 'background' || x.via === 'remote' || (x.via === 'app' && Boolean(x.web)));
   $('p-foot').hidden = !talk;
   $('p-reply').hidden = !talk;
-  $('p-reply').disabled = pane.sending;
+  $('p-reply').readOnly = pane.sending; // not disabled: that would take the focus away
   $('p-reply').placeholder = x.via === 'background' ? 'Message it' : 'Note to it';
   $('p-reply').title = x.via !== 'background' ? 'It reads this as a note from another session: use claude.ai or move it here for /model, /effort or a yes it needs from you' : '';
   $('p-tools').replaceChildren(...[pane.sending ? h('span', { text: '…' }) : null].filter(Boolean));
@@ -934,7 +975,7 @@ function renderHead(x, term) {
   const state = pane.moving ? h('span', { class: 'p-err', style: 'color:var(--grey)', text: '…' })
     : pane.said?.cls === 'no' ? h('span', { class: 'p-err', text: pane.said.text, title: pane.said.text }) : null;
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
-  $('p-head').replaceChildren(...[
+  const parts = [
     h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, copy, codexOpen,
       h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
@@ -945,8 +986,13 @@ function renderHead(x, term) {
     pane.more ? h('div', { class: 'p-acts' }, groupField(x), act, test,
       x.web ? h('a', { class: 'act', href: x.web, target: '_blank', rel: 'noopener' }, 'claude.ai', icon('ext')) : null,
       cmd ? h('button', { class: 'act', text: 'attach', title: `Copy: ${cmd}`, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null) : null]
-    .filter(Boolean));
+    .filter(Boolean);
+  const box = h('div', {}, ...parts), sig = `${pane.key}\n${box.innerHTML}`;
+  if (sig === headSig) return;
+  headSig = sig;
+  $('p-head').replaceChildren(...box.childNodes);
 }
+let headSig = '';
 const growReply = () => { const t = $('p-reply'); t.style.height = 'auto'; t.style.height = `${Math.min(t.scrollHeight, 240)}px`; };
 $('p-reply').addEventListener('input', growReply);
 $('p-reply').addEventListener('keydown', (e) => {
@@ -960,6 +1006,15 @@ document.addEventListener('keydown', (e) => {
   deselect();
 });
 
+/** A row opens its session as you press it, so a redraw of the list between press and release can't lose the click; and
+ *  always the session as the last read has it (a row kept from an earlier draw still opens what is there now). */
+function rowActs(x) {
+  const key = keyOf(x), now = () => everything.find((y) => keyOf(y) === key) ?? x;
+  const plain = (e) => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+  // The press keeps the focus where opening put it (its terminal), not on the row the browser would move it to.
+  return { onpointerdown: (e) => { if (plain(e)) select(now()); }, onmousedown: (e) => { if (plain(e)) e.preventDefault(); },
+           onkeydown: (e) => { if (e.key === 'Enter') select(now()); }, onmouseenter: () => prefetch(now()), onmouseleave: () => clearTimeout(hoverTimer) };
+}
 function row(x) {
   const c = x.context, on = pane.key === keyOf(x);
   const lifted = x.state === 'capped' && (resetOf(x.limitHit) ?? Infinity) < Date.now();
@@ -968,7 +1023,7 @@ function row(x) {
     : x.state === 'capped' ? (lifted ? 'its limit has lifted: tell it to go on' : x.limitHit?.text ?? '') : '';
   const what = x.state === 'working' ? (x.doing ?? x.said ?? '') : '';
   return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
-      onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); }, onmouseenter: () => prefetch(x) },
+      ...rowActs(x) },
     h('span', { class: `dot ${x.state}${lifted ? ' lifted' : ''}`, title: lifted ? 'its limit has lifted' : WORD[x.state] ?? '' }),
     h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine }),
     h('span', { class: `stage ${x.stage ?? ''}`, text: x.stage ?? '' }),
@@ -984,7 +1039,7 @@ function row(x) {
 }
 /** A closed session, as one quiet line: what it was, where, whose, and when it last moved. */
 function gone(x) {
-  return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); }, onmouseenter: () => prefetch(x) },
+  return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', ...rowActs(x) },
     h('span', { class: 'dot closed' }), h('span', { text: x.title ?? x.name ?? x.id ?? x.engine }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
     h('span', { class: 'use' }), h('span', { class: 'what' }));
@@ -1042,31 +1097,50 @@ function renderMachines() {
           onclick: () => { if (openShut.has(name)) openShut.delete(name); else openShut.add(name); store.set('open-closed', JSON.stringify([...openShut])); renderMachines(); } }), sweep),
         openShut.has(name) ? closed.map(gone) : null) : null);
   }).filter(Boolean);
-  $('machines').replaceChildren(...[top, ...blocks].filter(Boolean));
+  const box = h('div', {}, ...[top, ...blocks].filter(Boolean));
+  if (box.innerHTML === $('machines').innerHTML) return;
+  const had = document.activeElement?.closest?.('#machines [data-key]')?.dataset.key;
+  $('machines').replaceChildren(...box.childNodes);
+  if (had) $('machines').querySelector(`[data-key="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
 }
 
 // ---------------------------------------------------------------- load
-// A load asked for while one runs (after a close, an archive, a move or Fire) runs right after it, never dropped.
-let loading = false, again = false, loadedAt = 0;
-async function load() {
-  if (loading) { again = true; return; }
-  loading = true; loadedAt = Date.now(); $('refresh').classList.add('busy');
+// A load asked for while one runs (after a close, an archive, a move or Fire) runs right after it, never dropped, and
+// `await load()` waits for that one: what it gets is fresh.
+let loading = null, queued = null, loadedAt = 0, restored = false, soonT = null;
+function load() {
+  if (loading) return (queued ??= loading.then(() => { queued = null; return load(); }));
+  loadedAt = Date.now(); $('refresh').classList.add('busy');
+  return (loading = reload().finally(() => { loading = null; $('refresh').classList.remove('busy'); }));
+}
+async function reload() {
   try {
-    snap = await api('/api/fleet');
+    const s = await api('/api/fleet');
+    if (!Array.isArray(s?.machines)) throw new Error(s?.error ?? 'The panel sent no sessions; trying again shortly.');
+    snap = s;
     subs = accounts(snap);
     const bad = snap.machines.filter((m) => m.ok === false || m.stale);
     $('err').hidden = !bad.length;
     $('err').textContent = bad.map((m) => (m.stale ? `${m.name} didn't answer (${m.stale}): showing its last read` : `${m.name}: ${m.error ?? 'no answer'}`)).join('\n');
     renderHow(); renderMachines(); renderPane();
     $('refresh').title = `Read ${new Date(snap.at).toLocaleTimeString()}`;
+    // An old read (nobody had looked for a while) is on show at once; the fresh one behind it comes in a moment.
+    if (Date.now() - snap.at > 12_000) { clearTimeout(soonT); soonT = setTimeout(load, 1500); }
+    // Back after the panel restarted: the session that was open opens again.
+    if (!restored) {
+      restored = true;
+      let key = null;
+      try { key = sessionStorage.getItem('fleet.pane'); sessionStorage.removeItem('fleet.pane'); } catch {}
+      const y = key && everything.find((x) => keyOf(x) === key);
+      if (y && !pane.key) select(y);
+    }
   } catch (e) { if (e.message !== 'reloading') { $('err').hidden = false; $('err').textContent = String(e.message); } }
-  loading = false; $('refresh').classList.remove('busy');
-  if (again) { again = false; load(); }
 }
 $('refresh').addEventListener('click', load);
 load();
-// Every 20 seconds while you look; every minute in a background tab, so the Needs you count in its title stays true.
-setInterval(() => { if (!document.hidden || Date.now() - loadedAt > 60_000) load(); }, 20_000);
+// Every 10 seconds while you look (the panel reads behind it as often, so each answers at once); every minute in a
+// background tab, so the Needs you count in its title stays true.
+setInterval(() => { if (!document.hidden || Date.now() - loadedAt > 60_000) load(); }, 10_000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 </script>
 </body>

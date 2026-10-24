@@ -38,6 +38,18 @@ const baseEnv = () => ({ ...Object.fromEntries(Object.entries(process.env).filte
 const run = (cmd, args, opts = {}) => new Promise((resolve) =>
   execFile(cmd, args, { timeout: 8000, maxBuffer: 8_000_000, env: baseEnv(), ...opts },
     (err, stdout, stderr) => resolve({ err, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') })));
+// What changes rarely (a login, the containers running) is asked again only every `ms`; an answer that failed is not
+// kept, unless failing is the answer (`claude logs` of a job that is gone).
+const kept = new Map();
+function every(ms, key, ask, keepFailed = false) {
+  const k = kept.get(key);
+  if (k && Date.now() - k.at < ms) return k.p;
+  const p = ask();
+  kept.set(key, { at: Date.now(), p });
+  p.then((r) => { if (r.err && !keepFailed && kept.get(key)?.p === p) kept.delete(key); });
+  if (kept.size > 500) for (const [key2, v] of kept) if (Date.now() - v.at > 10 * 60_000) kept.delete(key2);
+  return p;
+}
 
 const readJson = (f, max = 8 << 20) => { try { if (fs.statSync(f).size > max) return null; return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 function tail(file, bytes = TAIL) {
@@ -321,21 +333,30 @@ export function sessionState(r, t, now = Date.now()) {
   return { state: 'ready', live };
 }
 
+const runningWas = new Map(); // profile → the jobs it last said run
+/** Whether a background job is gone: Claude Code says "job not found" for it. A timeout or another failure proves nothing
+ *  (and isn't kept); the answer is kept half a minute. */
+const gone = (p, env, id) => every(30_000, `logs:${p.dir}:${id}`, () => run(bin('claude'), ['logs', id], { env, timeout: 5000 })
+  .then((r) => ({ err: r.err && !/job not found/i.test(r.stderr) ? r.err : null, gone: Boolean(r.err) && /job not found/i.test(r.stderr) })))
+  .then((r) => r.gone);
+
 async function claudeProfile(p, learned, usage) {
   const env = profileEnv(p), claude = bin('claude');
   const [auth, roster, active] = await Promise.all([
-    run(claude, ['auth', 'status', '--json'], { env, timeout: 8000 }),
+    every(5 * 60_000, `auth:${p.dir}`, () => run(claude, ['auth', 'status', '--json'], { env, timeout: 8000 })),
     run(claude, ['agents', '--json', '--all'], { env, timeout: 8000 }),
     run(claude, ['agents', '--json'], { env, timeout: 8000 }), // without --all: only what is running
   ]);
-  let running = new Set();
-  try { running = new Set(JSON.parse(active.stdout).map((r) => r.sessionId ?? r.id)); } catch {}
+  // What runs, by the list without --all; when that list can't be read, the last one that could.
+  let running = null;
+  try { if (!active.err) running = new Set(JSON.parse(active.stdout).map((r) => r.sessionId ?? r.id)); } catch {}
+  if (running) runningWas.set(p.dir, running); else running = new Set(runningWas.get(p.dir) ?? []);
   // Listed as running but with no process: waiting at a startup question, or a record left behind long ago (one from July
   // was still listed). Only one whose screen Claude Code can still show is live.
   let rows = [];
   try { rows = JSON.parse(roster.stdout); } catch {}
   await Promise.all(rows.filter((r) => r?.sessionId && !r.pid && running.has(r.sessionId) && /^[0-9a-f]{8}$/.test(r.id ?? ''))
-    .map(async (r) => { if ((await run(claude, ['logs', r.id], { env, timeout: 5000 })).err) running.delete(r.sessionId); }));
+    .map(async (r) => { if (await gone(p, env, r.id)) running.delete(r.sessionId); }));
   const cfg = readJson(p.config)?.oauthAccount ?? null;
   let a = null;
   try { a = JSON.parse(auth.stdout); } catch {}
@@ -419,8 +440,11 @@ async function processes() {
     for (const line of r.stdout.split('\n')) {
       const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
       if (!m) continue;
-      // macOS ps can't split args that contain spaces: an app path with spaces is the one case that matters here
-      const args = m[4].startsWith('/') && m[4].includes('.app/Contents/MacOS/') ? [m[4].slice(0, m[4].indexOf(' --') > 0 ? m[4].indexOf(' --') : undefined), ...m[4].slice(m[4].indexOf(' --') + 1).split(' ')] : m[4].split(' ');
+      // macOS ps can't split args that contain spaces: an app path with spaces is the one case that matters here (the
+      // Codex inside ChatGPT.app is …/CodexCLI.app/Contents/MacOS/codex -c … app-server). Its program ends at the first
+      // space after its name.
+      const app = /^(\/.*?\.app\/Contents\/MacOS\/[^ ]+)(?: (.*))?$/.exec(m[4]);
+      const args = app ? [app[1], ...(app[2] ? app[2].split(' ') : [])] : m[4].split(' ');
       const engine = ENGINE(args);
       if (engine) list.push({ pid: Number(m[1]), ppid: Number(m[2]), args, engine, env: {}, cwd: null, open: [], since: Date.now() - (etimeMs(m[3]) ?? 0) });
     }
@@ -623,6 +647,14 @@ function fleetState() {
 // ---------------------------------------------------------------- the machine itself
 
 /** Load, memory, disk, the dev servers listening, and the database stacks and containers running. */
+let statusWas = null;
+/** The machine's status within three seconds: a docker or lsof that hangs makes this read use the last one, never the
+ *  whole read late. */
+function statusSoon() {
+  const now = machineStatus().then((s) => (statusWas = s)).catch(() => statusWas);
+  return Promise.race([now, new Promise((ok) => setTimeout(() => ok(statusWas), 3000).unref?.())]);
+}
+
 async function machineStatus() {
   const out = { cpus: os.cpus().length, load: Math.round(os.loadavg()[0] * 10) / 10, memPct: null, diskPct: null, dev: [], stacks: [], containers: null };
   if (process.platform === 'linux') {
@@ -642,7 +674,7 @@ async function machineStatus() {
   // Rootless Docker answers on the user's own socket; Docker Desktop and OrbStack on the default one.
   const sock = process.env.XDG_RUNTIME_DIR && path.join(process.env.XDG_RUNTIME_DIR, 'docker.sock');
   const env = sock && fs.existsSync(sock) ? { ...baseEnv(), DOCKER_HOST: `unix://${sock}` } : baseEnv();
-  const dk = await run(bin('docker'), ['ps', '--format', '{{.Names}}'], { env, timeout: 6000 });
+  const dk = await every(30_000, 'docker', () => run(bin('docker'), ['ps', '--format', '{{.Names}}'], { env, timeout: 6000 }));
   if (!dk.err) {
     const names = dk.stdout.split('\n').filter(Boolean);
     out.containers = names.length;
@@ -711,7 +743,7 @@ export async function collect() {
   const [procs, claude, status, paneOf] = await Promise.all([
     processes().catch(() => null),
     Promise.all(profiles.map((p) => claudeProfile(p, learned, usage).catch((e) => ({ engine: 'claude', id: p.id, dir: tilde(p.dir), error: String(e?.message ?? e).slice(0, 200), sessions: [] })))),
-    machineStatus().catch(() => null),
+    statusSoon(),
     tmuxPanes().catch(() => () => null),
   ]);
   for (const a of claude) for (const x of a.sessions ?? []) if (x.live && x.pid && x.via !== 'background') { const t = paneOf(x.pid); if (t) x.tmux = t; }
@@ -986,8 +1018,11 @@ export async function archive(a) {
   const p = claudeProfiles().find((x) => x.id === a?.profile);
   if (!p || !/^[0-9a-f]{8}$/.test(a?.id ?? '')) return { ok: true };
   // Read fresh: the page's list can be half a minute old, and a job resumed since must not lose its record.
-  let row = null;
-  try { row = JSON.parse((await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) })).stdout).find((r) => r.id === a.id); } catch {}
+  const [all, active] = await Promise.all([run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) }), run(bin('claude'), ['agents', '--json'], { env: profileEnv(p) })]);
+  if (all.err || active.err) return { ok: false, error: 'Could not read its jobs just now: try again in a moment.' };
+  let row = null, running = [];
+  try { row = JSON.parse(all.stdout).find((r) => r.id === a.id); running = JSON.parse(active.stdout); } catch { return { ok: false, error: 'Could not read its jobs just now: try again in a moment.' }; }
+  if (row && running.some((r) => r.id === a.id || (row.sessionId && r.sessionId === row.sessionId)) && !(await gone(p, profileEnv(p), a.id))) row.active = true;
   if (row && sessionState(row, null).live) return { ok: false, error: 'It is running again: close it first.' };
   const r = await run(bin('claude'), ['rm', a.id], { env: profileEnv(p) });
   return r.err && !/not found|no such/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true };
@@ -997,8 +1032,8 @@ export async function archive(a) {
 // project's own MCP servers enabled without the startup question (for that session only; settings files are untouched).
 const ALLOW_ALL = ['--dangerously-skip-permissions', '--settings', JSON.stringify({ enableAllProjectMcpServers: true })];
 /** Move an idle session into the background, conversation kept, so it opens as a terminal here: its process is closed the
- *  way close() does it, then `claude --bg --resume <id>` continues it under the same id, in its folder, on its model and
- *  permission mode. Never while it works or waits on you, and never a desktop-app session. */
+ *  way close() does it, then `claude --bg --resume <id>` continues it under the same id, in its folder, on its model,
+ *  with every permission allowed (ALLOW_ALL). Never while it works or waits on you, and never a desktop-app session. */
 export async function adopt(a) {
   const p = claudeProfiles().find((x) => x.id === a?.profile);
   if (!p) return { ok: false, error: 'There is no such account here.' };

@@ -29,6 +29,7 @@ import { workerOf, markStarted, rolledBack, checkForUpdate, recordCheck, lastChe
 import { checkClone, updateClone, appFor } from './clone-update.mjs';
 import { createFleet } from './fleet/fleet.mjs';
 import { createTerms } from './fleet/term.mjs';
+import { accept as acceptWs, refuse as refuseWs } from './fleet/ws.mjs';
 
 // `node server.mjs <command>` runs the CLI (cli.mjs) and never starts the server.
 if (process.argv.length > 2) { const { main } = await import('./cli.mjs'); process.exit(await main(process.argv.slice(2))); }
@@ -103,9 +104,10 @@ const HOME = os.homedir();
 const PREFS = prefsPath();
 // Every machine's agents and accounts in one view (fleet/); its machines are listed in fleet.json beside prefs.json.
 const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
-const terms = createTerms({ config: () => fleet.config() });
+const terms = createTerms({ config: () => fleet.config(), codexBusy: (machine, sessionId) => fleet.codexBusy(machine, sessionId) });
 // The terminal in Fleet's page: xterm.js, kept here so the page needs no network for it.
-const VENDOR = { 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8' };
+const VENDOR = { 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
+  'plex-mono-400.woff2': 'font/woff2', 'plex-mono-500.woff2': 'font/woff2', 'plex-mono-400-ext.woff2': 'font/woff2', 'plex-mono-500-ext.woff2': 'font/woff2' };
 const HOOK_URL = `127.0.0.1:${PORT}/hook/`;
 function listProfiles() {
   let names = [];
@@ -1679,6 +1681,10 @@ const send = (res, code, body, type = 'application/json') => {
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 };
 
+// A fault in one request, read or terminal must not stop the panel (and drop every terminal open on it): log it, go on.
+process.on('uncaughtException', (e) => console.error('uncaught:', e?.stack ?? e));
+process.on('unhandledRejection', (e) => console.error('unhandled:', e?.stack ?? e));
+
 // Nothing a request carries may throw out of the handler: an unhandled rejection would stop the server.
 const server = http.createServer((req, res) => handle(req, res).catch((err) => {
   console.error('request failed:', err?.message ?? err);
@@ -1762,7 +1768,6 @@ async function handle(req, res) {
       const r = await launch(body);
       return send(res, r.ok ? 200 : 422, r);
     }
-    if (url.pathname === '/api/term/open') return terms.open(body, res);
     if (url.pathname === '/api/interrupt') {
       const r = interrupt(body);
       return send(res, r.ok ? 200 : 422, r);
@@ -1780,8 +1785,7 @@ async function handle(req, res) {
                       '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/send': (b) => fleet.send(b),
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
                       '/api/fleet/archive-all': (b) => fleet.archiveAll(b),
-                      '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b), '/api/fleet/fork': (b) => fleet.fork(b),
-                      '/api/term/input': (b) => terms.input(b), '/api/term/resize': (b) => terms.resize(b) };
+                      '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b), '/api/fleet/fork': (b) => fleet.fork(b) };
     if (Object.hasOwn(ACTIONS, url.pathname)) {
       let r;
       try { r = await ACTIONS[url.pathname](body); } catch (err) { r = { ok: false, error: String(err?.message ?? err).slice(0, 300) }; }
@@ -1851,6 +1855,16 @@ function setRosterPace(fast) {
 }
 /** Whether someone may be looking: always outside the daemon, and under it while a page is connected. */
 const looking = () => !DAEMON || clients.size > 0;
+
+// Fleet's terminals: one WebSocket per tab (fleet/ws.mjs), checked as the API is: this host, this page, this start's token.
+server.on('upgrade', (req, socket, head) => {
+  socket.on('error', () => socket.destroy());
+  let url;
+  try { url = new URL(req.url, 'http://127.0.0.1'); } catch { return refuseWs(socket, 400, 'Bad Request'); }
+  if (!HOSTS.has(req.headers.host) || !ORIGINS.has(req.headers.origin) || url.pathname !== '/api/term/ws' || url.searchParams.get('t') !== TOKEN) return refuseWs(socket, 403, 'Forbidden');
+  const ws = acceptWs(req, socket, head);
+  if (ws) terms.serve(ws);
+});
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`agent control panel → http://127.0.0.1:${PORT}`);

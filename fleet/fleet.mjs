@@ -19,9 +19,12 @@ import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 
 const SCRIPT = new URL('./machine.mjs', import.meta.url);
-const FRESH_MS = 4000;
-const SSH_MS = 25_000;
-const HOST = /^[\w.@-]{1,100}$/, USER = /^[a-z_][\w-]{0,31}$/, NAME = /^[\w .-]{1,40}$/;
+// A page gets the last read at once, however old (it carries when it was read, and the page asks again soon after an old
+// one); while a page has asked in the last WATCH_MS, the panel reads every machine again every WARM_MS behind it.
+const WARM_MS = 10_000, WATCH_MS = 90_000;
+const SSH_MS = 25_000, COLLECT_MS = 12_000;
+// An ssh host never starts with "-" (ssh would take it as an option).
+const HOST = /^[\w.@][\w.@-]{0,99}$/, USER = /^[a-z_][\w-]{0,31}$/, NAME = /^[\w .-]{1,40}$/;
 const ENGINES = new Set(['claude', 'codex', 'muse', 'fleet']);
 const MODELS = new Set(['', 'opus', 'opus[1m]', 'sonnet', 'haiku', 'fable']);
 
@@ -36,16 +39,19 @@ const TITLE_BATCH = 40;
 // A working session's stage moves on without a new ask (building, then testing, then promoting): ask again this often.
 const RESTAGE_MS = 10 * 60_000;
 const PLACEHOLDER = /^[\w.-]+-[0-9a-f]{2}$/; // the name Claude Code makes up for an unnamed session
-const clean = (v, n) => String(v ?? '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
+// Control characters out too: a NUL in a session's text must never reach a command line.
+const clean = (v, n) => String(v ?? '').replace(/[<>\x00-\x08\x0b-\x1f\x7f]/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
 
 // The worker each machine keeps for the panel (see worker() below): it reads machine.mjs as base64 on its first line,
-// then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. On end of
-// input it finishes what it started, then exits.
+// then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. A read asked
+// for while one runs shares it (a slow machine never piles reads up). On end of input it finishes what it started, then
+// exits.
 export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork']);"
-  + " const running = new Set(); let m = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
+  + " const running = new Set(); let m = null, reading = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
   + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n'); continue; }"
   + " let q; try { q = JSON.parse(line); } catch { continue; } if (!ALLOWED.has(q.do)) continue;"
-  + " const job = Promise.resolve().then(() => m[q.do](q.args ?? {})).catch((e) => ({ ok: false, error: String(e?.message ?? e) }))"
+  + " const go = () => Promise.resolve().then(() => m[q.do](q.args ?? {}));"
+  + " const job = (q.do === 'collect' ? (reading ??= go().finally(() => { reading = null; })) : go()).catch((e) => ({ ok: false, error: String(e?.message ?? e) }))"
   + ".then((r) => process.stdout.write(JSON.stringify({ id: q.id, r }) + '\\n')); running.add(job); job.finally(() => running.delete(job)); }"
   + " await Promise.allSettled([...running]); process.exit(0);";
 
@@ -90,10 +96,10 @@ export function createFleet({ dir, quiet = () => {} }) {
   function worker(m) {
     const mtime = fs.statSync(SCRIPT).mtimeMs;
     let w = workers.get(m.name);
-    if (w && !w.dead && w.mtime === mtime && w.ssh === m.ssh && w.user === m.user) return w;
-    if (w) w.child.kill();
+    if (w && !w.dead && !w.stuck && w.mtime === mtime && w.ssh === m.ssh && w.user === m.user) return w;
+    if (w) retire(w);
     const child = spawn('ssh', [...sshArgs(), m.ssh, `${asUser(m)} node --input-type=module -e ${shq(WORKER_BOOT)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
-    w = { child, mtime, ssh: m.ssh, user: m.user, pending: new Map(), next: 1, dead: false, err: '' };
+    w = { name: m.name, child, mtime, ssh: m.ssh, user: m.user, pending: new Map(), next: 1, dead: false, stuck: false, err: '' };
     w.ready = new Promise((resolve) => { w.isReady = resolve; });
     const late = setTimeout(() => { if (!w.dead) { w.isReady(false); child.kill(); } }, 30_000);
     let buf = '';
@@ -125,18 +131,33 @@ export function createFleet({ dir, quiet = () => {} }) {
     workers.set(m.name, w);
     return w;
   }
-  /** Run machine.mjs's `todo` on a machine: through its worker, else the one-shot way. */
+  /** A worker that is replaced: what it is still doing finishes (its input ends, so it exits after), then it goes. */
+  function retire(w) {
+    if (workers.get(w.name) === w) workers.delete(w.name);
+    if (!w.pending.size) { w.child.kill(); return; }
+    w.child.stdin.end();
+    setTimeout(() => w.child.kill(), 160_000).unref?.();
+  }
+  /** Run machine.mjs's `todo` on a machine: through its worker, else (an action it never got) the one-shot way. */
   async function overSsh(m, todo, args = {}) {
-    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' ? 150_000 : todo === 'send' ? 90_000 : SSH_MS;
+    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' ? 150_000 : todo === 'send' ? 90_000 : todo === 'collect' ? COLLECT_MS : SSH_MS;
     const w = worker(m);
-    if (await w.ready && !w.dead) {
+    const up = await Promise.race([w.ready, new Promise((ok) => setTimeout(() => ok(false), ms).unref?.())]);
+    if (up && !w.dead) {
       return new Promise((resolve) => {
         const id = w.next++;
-        const timer = setTimeout(() => { w.pending.delete(id); resolve({ ok: false, error: `${m.name} did not answer in ${ms / 1000}s.` }); }, ms);
+        const timer = setTimeout(() => {
+          w.pending.delete(id);
+          // No answer in time: the next call goes to a new worker on a fresh channel; this one finishes what it has.
+          w.stuck = true;
+          resolve({ ok: false, error: `${m.name} did not answer in ${ms / 1000}s.${todo === 'collect' || todo === 'peek' ? '' : ' It may or may not have happened: look before trying again.'}` });
+        }, ms);
         w.pending.set(id, { resolve, timer });
         w.child.stdin.write(JSON.stringify({ id, do: todo, args }) + '\n');
       });
     }
+    // A read waits for the next one rather than starting a second connection.
+    if (todo === 'collect') return { ok: false, error: `${m.name}: ${w.err.trim().split('\n').at(-1) || 'no connection'}`.slice(0, 200) };
     return oneShot(m, todo, args, ms);
   }
   /** The one-shot way: machine.mjs on stdin to a `node` of its own, what to do and its arguments in the environment. */
@@ -149,6 +170,7 @@ export function createFleet({ dir, quiet = () => {} }) {
           try { return resolve(JSON.parse(String(stdout))); } catch {}
           resolve({ ok: false, error: String(stderr || err?.message || 'no answer').trim().split('\n').at(-1).slice(0, 300) });
         });
+      child.stdin.on('error', () => {}); // ssh that exits before it has read the script (host down) must not stop the panel
       child.stdin.end(fs.readFileSync(SCRIPT));
     });
   }
@@ -194,40 +216,51 @@ export function createFleet({ dir, quiet = () => {} }) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE')));
     const cwd = path.join(dir, 'fleet', 'titles');
     fs.mkdirSync(cwd, { recursive: true });
-    writing = new Promise((resolve) => execFile('claude', ['-p', '--model', 'sonnet', '--output-format', 'json', '--json-schema', JSON.stringify(titleSchema(epics.map((e) => e.name))),
-      '--settings', '{"disableAllHooks": true}', '--no-session-persistence', '--tools', '', '--disallowedTools', ...DENIED_TOOLS,
-      '--strict-mcp-config', '--disable-slash-commands', '--session-id', id, '--', prompt], { cwd, env, timeout: 180_000, maxBuffer: 4_000_000 },
-    (err, stdout) => {
-      let out = null;
-      try { out = JSON.parse(String(stdout)); } catch {}
-      // It has no tools: a refused one means it tried something else, so throw the answer away.
-      const tried = (out?.permission_denials?.length ?? 0) > 0;
-      const list = !err && !out?.is_error && !tried ? out?.structured_output?.titles : null;
-      if (Array.isArray(list)) {
-        for (const t of list) {
-          const b = batch[Number(t?.id)];
-          // A title, once written, stays: only its stage and epic move on.
-          if (b && typeof t.title === 'string' && t.title.trim()) titles[b.key] = { h: b.h, title: titles[b.key]?.title ?? clean(t.title, 40), stage: STAGES.includes(t.stage) ? t.stage : null,
-            epic: [...epics.map((e) => e.name), 'Other'].includes(t.epic) ? t.epic : 'Other', at: Date.now() };
-        }
-        // Keep a fortnight of them.
-        for (const [k, v] of Object.entries(titles)) if (Date.now() - (v.at ?? 0) > 14 * 86_400_000) delete titles[k];
-        try { fs.writeFileSync(titlesFile + '.tmp', JSON.stringify(titles)); fs.renameSync(titlesFile + '.tmp', titlesFile); } catch {}
-        last = null;
-        writing = null;
-        resolve();
-        if (want.length > batch.length) writeTitles(reads); // the rest, straight after
-        return;
-      } else console.error('fleet titles:', err?.message ?? out?.result ?? 'no answer');
-      writing = null;
-      resolve();
-    }));
+    const done = () => { writing = null; };
+    writing = new Promise((resolve) => {
+      try {
+        const child = execFile('claude', ['-p', '--model', 'sonnet', '--output-format', 'json', '--json-schema', JSON.stringify(titleSchema(epics.map((e) => e.name))),
+          '--settings', '{"disableAllHooks": true}', '--no-session-persistence', '--tools', '', '--disallowedTools', ...DENIED_TOOLS,
+          '--strict-mcp-config', '--disable-slash-commands', '--session-id', id, '--', prompt], { cwd, env, timeout: 180_000, maxBuffer: 4_000_000 },
+        (err, stdout) => {
+          let out = null;
+          try { out = JSON.parse(String(stdout)); } catch {}
+          // It has no tools: a refused one means it tried something else, so throw the answer away.
+          const tried = (out?.permission_denials?.length ?? 0) > 0;
+          // The schema's answer, or the same answer given as its text.
+          const list = !err && !out?.is_error && !tried ? out?.structured_output?.titles ?? titlesIn(out?.result) : null;
+          if (Array.isArray(list)) {
+            for (const t of list) {
+              const b = batch[Number(t?.id)];
+              // A title, once written, stays: only its stage and epic move on.
+              if (b && typeof t.title === 'string' && t.title.trim()) titles[b.key] = { h: b.h, title: titles[b.key]?.title ?? clean(t.title, 40), stage: STAGES.includes(t.stage) ? t.stage : null,
+                epic: [...epics.map((e) => e.name), 'Other'].includes(t.epic) ? t.epic : 'Other', at: Date.now() };
+            }
+            // Keep a fortnight of them.
+            for (const [k, v] of Object.entries(titles)) if (Date.now() - (v.at ?? 0) > 14 * 86_400_000) delete titles[k];
+            try { fs.writeFileSync(titlesFile + '.tmp', JSON.stringify(titles)); fs.renameSync(titlesFile + '.tmp', titlesFile); } catch {}
+            done(); resolve();
+            if (want.length > batch.length) writeTitles(reads); // the rest, straight after
+            return;
+          }
+          console.error('fleet titles:', String(err?.message ?? out?.result ?? 'no answer').slice(0, 300));
+          done(); resolve();
+        });
+        child.stdin?.on('error', () => {});
+        child.stdin?.end(); // nothing comes on stdin: it would wait for it otherwise
+      } catch (e) { console.error('fleet titles:', e?.message ?? e); done(); resolve(); }
+    });
+  }
+  /** The titles in an answer given as text: the JSON in it, fenced or not. */
+  function titlesIn(text) {
+    const s = String(text ?? ''), a = s.indexOf('{'), z = s.lastIndexOf('}');
+    if (a < 0 || z < a) return null;
+    try { const v = JSON.parse(s.slice(a, z + 1)); return Array.isArray(v?.titles) ? v.titles : null; } catch { return null; }
   }
 
-  let last = null, inflight = null, readGen = 0;
+  let last = null, inflight = null, readGen = 0, askedAt = 0, warm = null, restUntil = 0;
   /** After anything that changes a session: the next read starts afresh, and one already under way is not kept. */
   const changed = () => { last = null; inflight = null; readGen++; };
-  /** Every machine, read at most every FRESH_MS however many pages ask. */
   const good = new Map(); // machine, or machine:engine:account → its last good read
   /** A read that failed keeps the last good one, marked stale: one missed read must not take sessions (and an open
    *  terminal) off the page. */
@@ -243,8 +276,39 @@ export function createFleet({ dir, quiet = () => {} }) {
       return m;
     });
   }
-  async function snapshot() {
-    if (last && Date.now() - last.at < FRESH_MS) return last;
+  /** Every machine, as of the last read, at once: while a page looks, the panel reads again every WARM_MS behind it, so a
+   *  page never waits on a read. Only the first (and the next after a change you made) waits for one. */
+  function snapshot() {
+    askedAt = Date.now();
+    if (!warm) {
+      warm = setInterval(() => {
+        if (Date.now() - askedAt > WATCH_MS) { clearInterval(warm); warm = null; return; }
+        if ((!last || Date.now() - last.at >= WARM_MS) && Date.now() >= restUntil) read().catch(() => {});
+      }, 1000);
+      warm.unref?.();
+    }
+    if (!last) return read();
+    if (Date.now() - last.at >= WARM_MS && Date.now() >= restUntil) read().catch(() => {});
+    return last;
+  }
+  /** A session's name, group and stage: yours, else the one it has in Claude Code (the app's, claude.ai's, /rename's), else
+   *  a written one, but only where Claude Code's is a placeholder (its folder and two characters, "chai-expense-tracker-54").
+   *  (A Codex session's "name" is only the app that ran it.) */
+  function named(machine, engine, x) {
+    const t = titles[`${machine}:${x.sessionId}`], l = labels[`${machine}:${x.sessionId}`];
+    const own = engine === 'claude' && typeof x.name === 'string' && x.name.trim() && !PLACEHOLDER.test(x.name.trim()) ? x.name.trim() : null;
+    return Object.assign(x, { title: l?.title ?? own ?? t?.title ?? x.name ?? null, stage: t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
+  }
+  /** Groups you made, after the epics in fleet.json. */
+  const groupsMade = (epics) => [...new Set(Object.values(labels).map((l) => l.group).filter((g) => g && !epics.some((e) => e.name === g)))].sort();
+  /** Why a Codex thread must not be resumed in a terminal here: it runs somewhere (the Codex app), by the last read. */
+  function codexBusy(machine, sessionId) {
+    if (!last || Date.now() - last.at > 60_000) return null;
+    const x = last.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'codex' ? a.sessions ?? [] : [])).find((s) => s.sessionId === sessionId);
+    return x?.live ? 'It is open in Codex (the app or a terminal): finish there, or close it there first.' : null;
+  }
+  /** One read of every machine; reads asked for while one runs share it. */
+  async function read() {
     const gen = readGen;
     if (inflight) return inflight;
     const mine = (async () => {
@@ -258,23 +322,17 @@ export function createFleet({ dir, quiet = () => {} }) {
         if (real && a.account) a.account = { ...a.account, email: real, says: a.account.email };
         // An archived session that runs again (resumed) is back on the page.
         a.sessions = (a.sessions ?? []).filter((x) => x.live || !archived[`${m.name}:${x.sessionId ?? x.id}`]);
-        for (const x of a.sessions) {
-          const t = titles[`${m.name}:${x.sessionId}`], l = labels[`${m.name}:${x.sessionId}`];
-          // Its name: yours, else the one it has in Claude Code (the app's, claude.ai's, /rename's), else a written one, but
-          // only where Claude Code's is a placeholder (its folder and two characters, "chai-expense-tracker-54").
-          // (A Codex session's "name" is only the app that ran it.)
-          const own = a.engine === 'claude' && typeof x.name === 'string' && x.name.trim() && !PLACEHOLDER.test(x.name.trim()) ? x.name.trim() : null;
-          Object.assign(x, { title: l?.title ?? own ?? t?.title ?? x.name ?? null, stage: t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
-        }
+        for (const x of a.sessions) named(m.name, a.engine, x);
       }
-      writeTitles(reads);
-      // Groups you made, after the epics in fleet.json.
-      const groups = [...new Set(Object.values(labels).map((l) => l.group).filter((g) => g && !epics.some((e) => e.name === g)))].sort();
-      const fresh = { ok: true, at: Date.now(), machines: reads, names, epics, groups, configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
+      try { writeTitles(reads); } catch (e) { console.error('fleet titles:', e?.message ?? e); }
+      // What the page shows of each session: what it was asked and its steps are for the titles only (half the bytes).
+      const shown = reads.map((m) => ({ ...m, accounts: (m.accounts ?? []).map((a) => ({ ...a, sessions: (a.sessions ?? []).map(({ firstAsk, lastAsk, steps, ...x }) =>
+        ({ ...x, said: typeof x.said === 'string' ? x.said.slice(0, 400) : x.said })) })) }));
+      const fresh = { ok: true, at: Date.now(), machines: shown, names, epics, groups: groupsMade(epics), configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
       // A close, archive, message or launch that landed while this read ran makes it out of date: hand it back, keep none.
       if (gen === readGen) last = fresh;
       return fresh;
-    })().finally(() => { if (inflight === mine) inflight = null; });
+    })().catch((e) => { restUntil = Date.now() + 10_000; throw e; }).finally(() => { if (inflight === mine) inflight = null; });
     inflight = mine;
     return mine;
   }
@@ -361,7 +419,12 @@ export function createFleet({ dir, quiet = () => {} }) {
     }
     if (Object.keys(l).length) labels[key] = l; else delete labels[key];
     try { fs.writeFileSync(labelsFile + '.tmp', JSON.stringify(labels)); fs.renameSync(labelsFile + '.tmp', labelsFile); } catch {}
-    changed();
+    // On the page at once: the last read gets it now (a read under way names its sessions as it ends, so it has it too).
+    if (last) {
+      const m = last.machines.find((y) => y.name === machine);
+      for (const a of m?.accounts ?? []) for (const x of a.sessions ?? []) if (x.sessionId === sid) named(machine, a.engine, x);
+      last.groups = groupsMade(config().epics);
+    }
     return { ok: true };
   }
 
@@ -392,5 +455,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, config };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, config, codexBusy };
 }
