@@ -13,9 +13,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
+import { sshArgs, shq } from './ssh.mjs';
 
 const SCRIPT = new URL('./machine.mjs', import.meta.url);
 const FRESH_MS = 8000;
@@ -35,6 +36,17 @@ const TITLE_BATCH = 40;
 // A working session's stage moves on without a new ask (building, then testing, then promoting): ask again this often.
 const RESTAGE_MS = 10 * 60_000;
 const clean = (v, n) => String(v ?? '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
+
+// The worker each machine keeps for the panel (see worker() below): it reads machine.mjs as base64 on its first line,
+// then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. On end of
+// input it finishes what it started, then exits.
+export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt']);"
+  + " const running = new Set(); let m = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
+  + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n'); continue; }"
+  + " let q; try { q = JSON.parse(line); } catch { continue; } if (!ALLOWED.has(q.do)) continue;"
+  + " const job = Promise.resolve().then(() => m[q.do](q.args ?? {})).catch((e) => ({ ok: false, error: String(e?.message ?? e) }))"
+  + ".then((r) => process.stdout.write(JSON.stringify({ id: q.id, r }) + '\\n')); running.add(job); job.finally(() => running.delete(job)); }"
+  + " await Promise.allSettled([...running]); process.exit(0);";
 
 export function createFleet({ dir, quiet = () => {} }) {
   const file = path.join(dir, 'fleet.json');
@@ -62,19 +74,76 @@ export function createFleet({ dir, quiet = () => {} }) {
     const epics = (Array.isArray(c.epics) ? c.epics : []).filter((e) => NAME.test(e?.name ?? '')).slice(0, 12)
       .map((e) => ({ name: e.name, about: String(e.about ?? '').slice(0, 300), test: /^https:\/\/[\w.-]+(\/[\w./?=&%-]*)?$/.test(e.test ?? '') ? e.test : null }));
     const self = typeof c.self === 'string' && NAME.test(c.self) ? c.self : host; // what this machine is called on the page
-    return { machines, names, self, epics, file };
+    // The account a profile's login really is, where its config file says another (`machine:profile` → email).
+    const logins = c.logins && typeof c.logins === 'object'
+      ? Object.fromEntries(Object.entries(c.logins).filter(([k, v]) => /^[\w .-]{1,40}:[\w.-]{1,40}$/.test(k) && /^[^\s@]+@[^\s@]+$/.test(String(v))).map(([k, v]) => [k, String(v)])) : {};
+    return { machines, names, self, epics, logins, file };
   }
 
-  /** Run machine.mjs on a machine over SSH, with what to do and its arguments in the environment. */
-  function overSsh(m, todo, args = {}) {
+  // Each machine has one worker for the panel's life: through the machine's open connection, one `node` that has
+  // machine.mjs loaded (sent once, as the first line) and answers a request a line, many at a time. A call costs a round
+  // trip, not a login, a sudo, a node start and the script sent again. It starts again after a drop, or when machine.mjs
+  // changes here; a request it never got goes the one-shot way instead.
+  const workers = new Map();
+  const asUser = (m) => (m.user ? `sudo -n -u ${m.user} -H env XDG_RUNTIME_DIR=/run/user/$(id -u ${m.user})` : 'env');
+  function worker(m) {
+    const mtime = fs.statSync(SCRIPT).mtimeMs;
+    let w = workers.get(m.name);
+    if (w && !w.dead && w.mtime === mtime && w.ssh === m.ssh && w.user === m.user) return w;
+    if (w) w.child.kill();
+    const child = spawn('ssh', [...sshArgs(), m.ssh, `${asUser(m)} node --input-type=module -e ${shq(WORKER_BOOT)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
+    w = { child, mtime, ssh: m.ssh, user: m.user, pending: new Map(), next: 1, dead: false, err: '' };
+    w.ready = new Promise((resolve) => { w.isReady = resolve; });
+    const late = setTimeout(() => { if (!w.dead) { w.isReady(false); child.kill(); } }, 30_000);
+    let buf = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d) => {
+      buf += d;
+      for (let i; (i = buf.indexOf('\n')) >= 0;) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.ready) { clearTimeout(late); w.isReady(true); continue; }
+        const p = w.pending.get(msg.id);
+        if (p) { w.pending.delete(msg.id); clearTimeout(p.timer); p.resolve(msg.r); }
+      }
+    });
+    child.stderr.on('data', (d) => { w.err = (w.err + d).slice(-2000); });
+    const gone = () => {
+      if (w.dead) return;
+      w.dead = true; clearTimeout(late); w.isReady(false);
+      const why = w.err.trim().split('\n').at(-1) || 'the connection dropped';
+      for (const p of w.pending.values()) { clearTimeout(p.timer); p.resolve({ ok: false, error: `${m.name}: ${why.slice(0, 200)}. It may or may not have happened: look before trying again.` }); }
+      w.pending.clear();
+      if (workers.get(m.name) === w) workers.delete(m.name);
+    };
+    child.on('exit', gone); child.on('error', gone);
+    child.stdin.on('error', () => {});
+    child.stdin.write(fs.readFileSync(SCRIPT).toString('base64') + '\n');
+    workers.set(m.name, w);
+    return w;
+  }
+  /** Run machine.mjs's `todo` on a machine: through its worker, else the one-shot way. */
+  async function overSsh(m, todo, args = {}) {
+    const ms = todo === 'launch' || todo === 'adopt' ? 150_000 : todo === 'send' ? 90_000 : SSH_MS;
+    const w = worker(m);
+    if (await w.ready && !w.dead) {
+      return new Promise((resolve) => {
+        const id = w.next++;
+        const timer = setTimeout(() => { w.pending.delete(id); resolve({ ok: false, error: `${m.name} did not answer in ${ms / 1000}s.` }); }, ms);
+        w.pending.set(id, { resolve, timer });
+        w.child.stdin.write(JSON.stringify({ id, do: todo, args }) + '\n');
+      });
+    }
+    return oneShot(m, todo, args, ms);
+  }
+  /** The one-shot way: machine.mjs on stdin to a `node` of its own, what to do and its arguments in the environment. */
+  function oneShot(m, todo, args, ms) {
     const b64 = Buffer.from(JSON.stringify(args)).toString('base64'); // [A-Za-z0-9+/=] only: safe in the remote shell
-    const env = `env FLEET_DO=${todo} FLEET_ARGS=${b64}`;
-    const cmd = m.user
-      ? `sudo -n -u ${m.user} -H ${env} XDG_RUNTIME_DIR=/run/user/$(id -u ${m.user}) node --input-type=module -`
-      : `${env} node --input-type=module -`;
+    const cmd = `${asUser(m)} FLEET_DO=${todo} FLEET_ARGS=${b64} node --input-type=module -`;
     return new Promise((resolve) => {
-      const child = execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', m.ssh, cmd],
-        { timeout: todo === 'launch' || todo === 'adopt' ? 150_000 : SSH_MS, maxBuffer: 16_000_000 },
+      const child = execFile('ssh', [...sshArgs(), m.ssh, cmd], { timeout: ms, maxBuffer: 16_000_000 },
         (err, stdout, stderr) => {
           try { return resolve(JSON.parse(String(stdout))); } catch {}
           resolve({ ok: false, error: String(stderr || err?.message || 'no answer').trim().split('\n').at(-1).slice(0, 300) });
@@ -82,9 +151,12 @@ export function createFleet({ dir, quiet = () => {} }) {
       child.stdin.end(fs.readFileSync(SCRIPT));
     });
   }
+  // Open every machine's connection and worker now, so the first read finds them up.
+  setTimeout(() => { for (const m of config().machines) worker(m); }, 0).unref?.();
 
   const askHash = (x) => crypto.createHash('sha1').update(`v2\n${x.firstAsk ?? ''}\n${x.lastAsk ?? ''}`).digest('hex').slice(0, 12);
   let writing = null;
+  const asked = {}; // key → when haiku was last asked for it: one that came back without a title waits before it is asked again
   /** Titles for the open sessions whose asks changed since their title was written. Runs in the background, one at a time. */
   function writeTitles(reads) {
     if (writing) return;
@@ -92,11 +164,13 @@ export function createFleet({ dir, quiet = () => {} }) {
     for (const m of reads) for (const a of m.accounts ?? []) for (const x of a.sessions ?? []) {
       if (!(x.firstAsk || x.lastAsk) || !x.sessionId) continue;
       const key = `${m.name}:${x.sessionId}`, h = askHash(x), t = titles[key];
+      if (Date.now() - (asked[key] ?? 0) < RESTAGE_MS) continue;
       if (t?.h !== h || !t.epic || (x.state === 'working' && Date.now() - (t.at ?? 0) > RESTAGE_MS)) want.push({ key, h, x });
     }
     want.sort((a, b) => Number(b.x.live) - Number(a.x.live)); // the open ones first
     if (!want.length) return;
     const batch = want.slice(0, TITLE_BATCH);
+    for (const b of batch) asked[b.key] = Date.now();
     const { epics } = config();
     const prompt = [
       'Each <session> below is a coding agent at work: the folder it is in, what it was first asked, what it was asked last, the',
@@ -123,8 +197,8 @@ export function createFleet({ dir, quiet = () => {} }) {
     (err, stdout) => {
       let out = null;
       try { out = JSON.parse(String(stdout)); } catch {}
-      // A structured answer takes two turns; more, or a refused tool, means it tried something else: throw it away.
-      const tried = (Number.isInteger(out?.num_turns) && out.num_turns > 2) || (out?.permission_denials?.length ?? 0) > 0;
+      // It has no tools: a refused one means it tried something else, so throw the answer away.
+      const tried = (out?.permission_denials?.length ?? 0) > 0;
       const list = !err && !out?.is_error && !tried ? out?.structured_output?.titles : null;
       if (Array.isArray(list)) {
         for (const t of list) {
@@ -150,16 +224,34 @@ export function createFleet({ dir, quiet = () => {} }) {
   /** After anything that changes a session: the next read starts afresh, and one already under way is not kept. */
   const changed = () => { last = null; inflight = null; readGen++; };
   /** Every machine, read at most every FRESH_MS however many pages ask. */
+  const good = new Map(); // machine, or machine:engine:account → its last good read
+  /** A read that failed keeps the last good one, marked stale: one missed read must not take sessions (and an open
+   *  terminal) off the page. */
+  function steady(reads) {
+    return reads.map((m) => {
+      if (m.ok === false) return good.has(m.name) ? { ...structuredClone(good.get(m.name)), stale: m.error ?? 'no answer' } : m;
+      for (const a of m.accounts ?? []) {
+        const k = `${m.name}:${a.engine}:${a.id}`;
+        if (a.error && !(a.sessions ?? []).length && good.has(k)) Object.assign(a, { sessions: structuredClone(good.get(k)), stale: a.error });
+        else if (!a.error) good.set(k, structuredClone(a.sessions ?? []));
+      }
+      good.set(m.name, structuredClone(m));
+      return m;
+    });
+  }
   async function snapshot() {
     if (last && Date.now() - last.at < FRESH_MS) return last;
     const gen = readGen;
-    inflight ??= (async () => {
-      const { machines, names, self, epics } = config();
-      const reads = await Promise.all([
+    if (inflight) return inflight;
+    const mine = (async () => {
+      const { machines, names, self, epics, logins } = config();
+      const reads = steady(await Promise.all([
         collect().then((d) => ({ ...d, name: self, local: true })).catch((e) => ({ name: self, local: true, ok: false, error: String(e?.message ?? e) })),
         ...machines.map((m) => overSsh(m, 'collect').then((d) => ({ ...d, name: m.name, ssh: m.ssh, user: m.user, local: false }))),
-      ]);
+      ]));
       for (const m of reads) for (const a of m.accounts ?? []) {
+        const real = a.engine === 'claude' && logins[`${m.name}:${a.id}`];
+        if (real && a.account) a.account = { ...a.account, email: real, says: a.account.email };
         // An archived session that runs again (resumed) is back on the page.
         a.sessions = (a.sessions ?? []).filter((x) => x.live || !archived[`${m.name}:${x.sessionId ?? x.id}`]);
         for (const x of a.sessions) {
@@ -173,10 +265,10 @@ export function createFleet({ dir, quiet = () => {} }) {
       const fresh = { ok: true, at: Date.now(), machines: reads, names, epics, groups, configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
       // A close, archive, message or launch that landed while this read ran makes it out of date: hand it back, keep none.
       if (gen === readGen) last = fresh;
-      inflight = null;
       return fresh;
-    })();
-    return inflight;
+    })().finally(() => { if (inflight === mine) inflight = null; });
+    inflight = mine;
+    return mine;
   }
 
   /** Start an agent on a machine. Checked here and again on the machine. */

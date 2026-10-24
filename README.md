@@ -153,27 +153,32 @@ what each one is working on, talk to it, and decide where the next one goes. The
   Claude account, `codex exec --sandbox workspace-write` for Codex, `muse exec` for Muse, or a fleet dispatch
   (`fleet-workers --dispatch`) on a machine with the fleet kit.
 - **Needs you**, above everything: every session waiting on a question or permission, then every one stopped at a limit,
-  the longest wait first. The tab's title carries the count.
+  the longest wait first, each with what it waits on under it. The tab's title carries the count.
 - **Sessions**, grouped by epic (`epics` in `fleet.json`), then by the groups you make: each with a title of a few words
   and a stage (planning, building, testing, promoting, deploying) that haiku writes from what you asked it, its machine,
   account, effort, how full its context is, and about how much of its account's weekly limit it used. Every session is
   listed: open ones first, closed ones greyed under them. An epic's closed sessions archive in one go.
-- **Click a session** and it opens on the right, full height (drag its edge to widen it, ⌘\\ or » folds it to a strip).
-  Its name is yours to change, and its group (pick one, or type a new one); empty puts haiku's back. One control closes an
-  open session or archives a closed one. **TEST** opens the epic's TEST site in a window beside the panel.
+- **Click a session** and it opens on the right, full height, as a terminal window: one line on top (its name, which is
+  yours to change; **terminal**/**log**; ⋯ for the rest), then its screen. Drag the pane's edge to widen it; ⌘\\ or »
+  folds it to a strip. Behind ⋯: what it is, its group (pick one, or type a new one; empty puts haiku's back), one
+  control that closes an open session or archives a closed one, **TEST** (the epic's TEST site in a window beside the
+  panel), its claude.ai page and its attach command.
 - **A background session opens as its terminal**: its own Claude Code screen, attached where it runs (`claude attach`,
   over `ssh -tt` on another machine). What you type reaches it as yours, `/model`, `/effort` and its permission prompts
-  included. Closing the pane detaches; the session keeps running. **log** shows its conversation as text instead.
-- **move here** takes an idle session (or one stopped at a limit) from a terminal or claude.ai into the background, conversation kept
-  (`claude --bg --resume <id>`, same folder, model and permission mode), so it opens as a terminal too. Not one that
-  works or waits on you, and not a desktop-app session.
+  included. Closing the pane detaches; the session keeps running. **log** shows its conversation as text instead, the
+  way its terminal prints it: every step, nothing folded.
+- **move here** (a second click confirms) takes an idle session, or one stopped at a limit, from a terminal or claude.ai
+  into the background, conversation kept (`claude --bg --resume <id>`, same folder, model and permission mode), so it
+  opens as a terminal too. Never one that works or waits on you, never by itself, and not a desktop-app session. Its old
+  claude.ai page is done with: a message there starts a second process on the same conversation. It gets a new one.
 
 How a message gets in, for a session that isn't a terminal here. A background job gets it as yours, the way agent view's
-reply does (`claude --resume <id> -- <text>`), after `claude respawn` when it still runs an older Claude Code than the one
-installed. A Remote Control session (a bridge's, or any started with `"remoteControlAtStartup": true`) gets it through its
-claude.ai session, `claude -p --cloud session_<id> <text>`: Claude Code hands that over as another session's note, so the
-session acts on it but won't take `/model`, `/effort` or a yes it needs from you that way. A terminal or desktop-app
-session started before Remote Control was on says to type `/rc` in it once.
+reply does (`claude --resume <id> -- <text>`); one still on an older Claude Code than the one installed says to type in its
+terminal (restarting it is never a message's call). A Remote Control session (a bridge's, a desktop-app one with Remote
+Control on, or any started with `"remoteControlAtStartup": true`) gets it through its claude.ai session,
+`claude -p --cloud session_<id> <text>`: Claude Code hands that over as another session's note, so the session acts on it
+but won't take `/model`, `/effort` or a yes it needs from you that way. A terminal session without Remote Control takes
+typing only where it runs, or here after **move here**.
 
 The terminal is a pseudo-terminal on this Mac: a few lines of Python (`/usr/bin/python3`, no native module to build) relay
 its bytes, streamed to the page as one long response, and the page's keys come back as small requests. xterm.js draws it,
@@ -181,7 +186,10 @@ kept in `public/vendor` (MIT) so the page needs no network for it.
 
 Where the numbers come from. Claude Code shows an account's limits only to its status line, so `fleet/statusline.mjs`
 keeps the newest one per session in `<profile>/fleet-status/` (set it as each profile's `statusLine`; it prints
-`ctx 20% · 5h 22% · 7d 2%`). Without a reading, an account's card shows the last limit stop its sessions met. Codex writes
+`ctx 20% · 5h 22% · 7d 2%`). A session with no screen (a Remote Control bridge's) has no status line: an account whose
+sessions are all like that shows `·` until one runs as a terminal. Without a reading, an account's card shows the last
+limit stop its sessions met. Two accounts reporting the same limits to the second get a red `?`: one profile is signed
+in as the other's account (set `logins`, below). Codex writes
 its limits into each session's log. A session's weekly share is the account's weekly figure split by each session's
 tokens this week, weighted as usage is priced; transcripts are read once from the week's start and then only their new
 lines (`~/.fleet-panel/usage.json`).
@@ -192,13 +200,17 @@ Other machines, names and epics go in `fleet.json` beside `prefs.json`:
 { "self": "Mac",
   "machines": [ { "name": "server", "ssh": "my-server", "user": "agents" } ],
   "names": { "claude:me@example.com": "personal", "codex:me@example.com": "codex" },
-  "epics": [ { "name": "Web app", "about": "the web app: features, CI, deploys", "test": "https://test.example.com" } ] }
+  "epics": [ { "name": "Web app", "about": "the web app: features, CI, deploys", "test": "https://test.example.com" } ],
+  "logins": { "Mac:default": "other@example.com" } }
 ```
 
 `ssh` is a host or `~/.ssh/config` alias that logs in without a password; `user` is who the agents run as there (`sudo
--u`). Nothing is installed on it: each read sends `fleet/machine.mjs` over SSH to `node --input-type=module -`, so it needs
-Node 20+. `names` labels an account (keyed `engine:email`), `self` names this Mac, and each epic's `about` is what haiku
-files sessions by. Titles are one haiku call for every session whose ask changed (no tools, hooks, MCP servers or saved
+-u`). Nothing is installed on it, and it needs Node 20+. The panel keeps one connection to it open (ssh's ControlMaster,
+socket in `~/.fleet-panel/`) and, on it, one worker: `node` with `fleet/machine.mjs` sent once, answering a request a line,
+so a read costs a round trip rather than a login. Terminals open as channels on the same connection. A read that fails
+keeps the machine's last good one on the page, marked as such. `names` labels an account (keyed `engine:email`), `self`
+names this Mac, each epic's `about` is what haiku files sessions by, and `logins` says which account a profile's login
+really is where its config file says another (`machine:profile`). Titles are one haiku call for every session whose ask changed (no tools, hooks, MCP servers or saved
 session), kept in `fleet-titles.json`; your names and groups in `fleet-labels.json`; archived sessions in
 `fleet-archived.json`.
 

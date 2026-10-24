@@ -1,6 +1,7 @@
 // Live terminals: a background session's own Claude Code screen in the page, typed into as you.
 //
-// A pseudo-terminal on this Mac runs `claude attach <id>`: here, or through `ssh -tt` on the machine the session runs on.
+// A pseudo-terminal on this Mac runs `claude attach <id>`: here, or through `ssh -tt` on the machine the session runs on,
+// as a channel on that machine's open connection (ssh.mjs).
 // Its bytes stream to the page as they come (one long POST response) and the page's keys come back as small POSTs. The pty
 // is a few lines of Python, so there is no native module to build: it relays bytes both ways and sets the window size it is
 // told on fd 3. When the page lets go of the stream, the attach ends; the session keeps running in the background.
@@ -10,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { sshArgs, shq } from './ssh.mjs';
 
 const PTY = String.raw`
 import os, sys, pty, select, signal, struct, fcntl, termios
@@ -59,7 +61,6 @@ const MAX = 12;
 const PROFILE = /^[\w.-]{1,40}$/, JOB = /^[0-9a-f]{8}$/;
 const python = () => (fs.existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3');
 const claudeBin = () => [path.join(HOME, '.local', 'bin', 'claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude'].find((f) => fs.existsSync(f)) ?? 'claude';
-const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 const clamp = (n, lo, hi, d) => (Number.isInteger(n) ? Math.min(hi, Math.max(lo, n)) : d);
 
 /** `config()` is fleet.json as createFleet reads it: { self, machines: [{ name, ssh, user }] }. */
@@ -81,7 +82,7 @@ export function createTerms({ config }) {
     const dir = profile === 'default' ? '' : ` CLAUDE_CONFIG_DIR=$HOME/.claude-${profile}`;
     const inner = `export XDG_RUNTIME_DIR=/run/user/$(id -u) TERM=xterm-256color COLORTERM=truecolor COLORFGBG='15;0' LANG=C.UTF-8${dir}; exec claude attach ${job}`;
     const remote = m.user ? `sudo -n -u ${m.user} -H bash -lc ${shq(inner)}` : `bash -lc ${shq(inner)}`;
-    return { argv: ['ssh', '-tt', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=15', m.ssh, remote], env };
+    return { argv: ['ssh', '-tt', ...sshArgs(), m.ssh, remote], env };
   }
 
   /** Open one: streams the terminal's bytes on `res` until either side lets go. The term id is in the X-Term-Id header. */

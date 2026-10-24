@@ -37,6 +37,7 @@ button, select { cursor: pointer; }
 a { color: var(--blue); text-decoration: none; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 2px; }
 svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; }
+.p-more svg.i { stroke-width: 2.4; }
 
 /* top line */
 .top { display: flex; align-items: center; gap: 22px; margin-bottom: 36px; }
@@ -82,8 +83,9 @@ svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-widt
 .how .sp { flex: 1; }
 .fire { color: var(--blue); font-weight: 500; }
 .fire:disabled { color: var(--grey); cursor: default; }
-.said { font-size: 13px; margin-top: 8px; min-height: 1.7em; color: var(--grey); }
-.said.ok { color: var(--green); } .said.no { color: var(--red); }
+.fired { font-size: 13px; margin-top: 8px; min-height: 1.7em; color: var(--grey); }
+.fired.ok { color: var(--green); } .fired.no { color: var(--red); }
+.faint { color: var(--grey); }
 
 /* sessions: one grid for the column names and every row, dropping columns as the list narrows */
 .s, .c { display: grid; grid-template-columns: var(--cols); gap: 0 18px; align-items: baseline; }
@@ -94,13 +96,14 @@ svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-widt
 .s .stage, .s .at, .s .who, .s .eff, .s .ctx, .s .use, .s .what { font-size: 13px; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .s .ctx, .s .use { text-align: right; }
 .s .ctx .line { width: 44px; margin-right: 0; }
-.s .stage.testing, .s .ctx.mid, .s .use.mid { color: var(--orange); }
-.s .stage.promoting { color: var(--green); }
-.s .stage.deploying, .s .ctx.hi, .s .use.hi { color: var(--red); }
+.s .ctx.mid, .s .use.mid { color: var(--orange); }
+.s .ctx.hi, .s .use.hi { color: var(--red); }
+.s .why { grid-column: 2 / -1; font-size: 13px; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -2px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; position: relative; top: -1px; }
 .dot.working { background: var(--blue); }
 .dot.needs-you { background: var(--orange); }
 .dot.capped { background: var(--red); }
+.dot.capped.lifted { background: var(--orange); }
 .dot.ready { box-shadow: inset 0 0 0 1.5px var(--quiet); }
 .dot.closed { background: var(--quiet); opacity: .7; }
 
@@ -149,30 +152,36 @@ body.pane-min #pane > :not(#p-rail) { display: none; }
 body.pane-min #p-rail { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; height: 100%; padding: 22px 0; color: var(--grey); }
 #p-rail:hover { color: var(--ink); }
 #p-rail .v { writing-mode: vertical-rl; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-height: 70vh; }
-#p-term { flex: 1; min-height: 0; background: var(--term-bg); padding: 8px 2px 2px 12px; }
+#p-term { flex: 1; min-height: 0; background: var(--term-bg); padding: 6px 2px 2px 12px; }
 #p-term[hidden] { display: none; }
 #p-term .xterm { height: 100%; }
 #p-term .xterm-viewport { scrollbar-color: #3a3f43 transparent; }
-#p-head { padding: 22px 28px 14px; border-bottom: 1px solid var(--rule); }
-.p-top { display: flex; align-items: baseline; gap: 12px; }
-.p-title { font-size: 18px; font-weight: 500; flex: 1; line-height: 1.4; }
+#pane { --paper: var(--term-bg); --tint: #232729; --ink: #dcdfe1; --grey: #9ba2a7; --quiet: #6c7277; --rule: #2c3033;
+        --blue: #3fb6ee; --orange: #ef9a4c; --red: #ec7468; --green: #5fbd8b; color-scheme: dark; color: var(--ink); font-size: 13px; }
+#p-head { padding: 8px 12px 8px 14px; border-bottom: 1px solid var(--rule); }
+.p-top { display: flex; align-items: center; gap: 12px; min-height: 24px; }
+.p-title { font-size: 13px; font-weight: 500; flex: 1; line-height: 1.5; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.p-title:focus { white-space: normal; }
+.p-top .act { font-size: 13px; color: var(--grey); } .p-top .act:hover { color: var(--ink); } .p-top .act.test { color: var(--blue); } .p-top .act.armed { color: var(--red); }
+.p-err { color: var(--red); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.p-more { color: var(--grey); } .p-more:hover, .p-more.on { color: var(--ink); }
 .p-x, .p-fold { color: var(--grey); align-self: center; } .p-x:hover, .p-fold:hover { color: var(--ink); }
 .p-title[contenteditable]:hover, .p-title[contenteditable]:focus { outline: none; box-shadow: 0 1px 0 var(--quiet); }
 .p-group { color: var(--grey); border-bottom: 1px dotted var(--quiet); width: 16ch; }
 .p-group:hover, .p-group:focus { outline: none; color: var(--ink); border-bottom-color: var(--ink); }
-.p-meta { font-size: 13px; color: var(--grey); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 0 18px; }
+.p-meta { font-size: 13px; color: var(--grey); margin-top: 6px; display: flex; flex-wrap: wrap; gap: 0 18px; }
 .p-meta span { white-space: nowrap; }
 .p-acts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px; margin-top: 10px; font-size: 13px; }
 .p-acts .act { color: var(--grey); display: inline-flex; align-items: baseline; gap: 4px; } .p-acts .act:hover { color: var(--ink); }
 .p-acts .act.armed { color: var(--red); } .p-acts .act.test, .p-acts a.act { color: var(--blue); }
-#p-body { flex: 1; overflow-y: auto; padding: 16px 28px 28px; font-size: 15px; line-height: 1.65; }
-#p-body .it { margin: 6px 0; overflow-wrap: anywhere; max-width: 78ch; }
-#p-body .it.ask { color: var(--ink); margin-top: 22px; font-weight: 500; }
-#p-body .it.ask::before { content: '› '; color: var(--blue); }
+#p-body { flex: 1; overflow-y: auto; padding: 10px 14px 20px; font-size: 13px; line-height: 1.55; }
+#p-body .it { margin: 4px 0; overflow-wrap: anywhere; }
+#p-body .it.ask { position: relative; color: var(--ink); margin-top: 14px; padding: 2px 6px 2px calc(2ch + 6px); background: var(--tint); border-radius: 2px; }
+#p-body .it.ask::before { content: '❯'; color: var(--grey); position: absolute; left: 6px; top: 2px; }
 #p-body .it.ask.pending { color: var(--grey); }
-#p-body .it.said { color: var(--ink); opacity: .86; }
-#p-body .it.said.long { max-height: 15em; overflow: hidden; cursor: pointer; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
-#p-body .all { color: var(--blue); font-size: 13px; margin: 2px 0 8px; }
+#p-body .it.err { color: var(--red); }
+#p-body .it.said { position: relative; color: var(--ink); padding-left: 2ch; margin-top: 8px; }
+#p-body .it.said::before { content: '⏺'; position: absolute; left: 0; top: 0; }
 #p-body .it p { margin: 0 0 .6em; } #p-body .it p:last-child { margin-bottom: 0; }
 #p-body .it ul, #p-body .it ol { margin: 0 0 .6em; padding-left: 2.4ch; }
 #p-body .it li { margin: .15em 0; }
@@ -180,22 +189,26 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 #p-body .it code { background: var(--tint); border-radius: 3px; padding: 0 4px; font-size: 13px; }
 #p-body .it pre { margin: 0 0 .6em; padding: 8px 10px; background: var(--tint); border-radius: 4px; white-space: pre; overflow-x: auto; font-size: 13px; }
 #p-body .it .hd { font-weight: 500; }
-#p-body .it.step { color: var(--grey); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 2px 0; }
-#p-body .it.step::before { content: '· '; }
-#p-body .it.step .more { color: var(--grey); }
+#p-body .it.step { color: var(--grey); margin: 1px 0 1px 2ch; padding-left: 2ch; text-indent: -2ch; }
+#p-body .it.step::before { content: '⎿ '; }
 #p-body .empty { color: var(--grey); font-size: 13px; }
-#p-foot { border-top: 1px solid var(--rule); padding: 14px 28px 18px; }
-#p-reply { display: block; width: 100%; font-size: 15px; line-height: 1.5; resize: none; overflow-y: auto; caret-color: var(--blue); min-height: 1.5em; }
+#p-foot { border-top: 1px solid var(--rule); padding: 8px 14px 10px; display: grid; grid-template-columns: 2ch 1fr; }
+#p-foot::before { content: '❯'; color: var(--grey); line-height: 1.5; }
+#p-foot:has(#p-reply[hidden])::before { content: none; }
+#p-foot[hidden] { display: none; }
+#p-tools { grid-column: 1 / -1; }
+#p-reply { display: block; width: 100%; font-size: 13px; line-height: 1.5; resize: none; overflow-y: auto; caret-color: var(--blue); min-height: 1.5em; }
 #p-reply:focus { outline: none; } #p-reply::placeholder { color: var(--grey); }
 #p-reply[hidden] { display: none; }
 #p-tools { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; font-size: 13px; min-height: 1.4em; color: var(--grey); }
-#p-tools .sp { flex: 1; }
-#p-tools .no { color: var(--red); } #p-tools .ok { color: var(--green); }
+#p-tools:empty { display: none; }
+
 
 @media (max-width: 720px) {
   main { width: calc(100% - 32px); padding-top: 28px; }
   :root { --pane: 100vw; }
   body.has-pane main { display: none; }
+  body.has-pane.pane-min main { display: block; width: calc(100% - var(--rail) - 32px); margin-left: 16px; }
   .line { width: 36px; }
   .write textarea { font-size: 18px; }
   #p-head, #p-body, #p-foot { padding-left: 18px; padding-right: 18px; }
@@ -222,7 +235,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
         <option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
       <span class="sp"></span><button class="fire" id="fire" title="⌘↵">Fire</button>
     </div>
-    <div class="said" id="said"></div>
+    <div class="fired" id="said"></div>
   </div>
   <div id="machines"><div class="reading" aria-label="Reading the machines">…</div></div>
 </main>
@@ -252,7 +265,7 @@ function h(tag, attrs = {}, ...kids) {
   for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return e;
 }
-const ICONS = { ext: ['M6.5 3.5h-3v9h9v-3', 'M9 3h4v4', 'M13 3 7.5 8.5'], x: ['M4 4l8 8', 'M12 4l-8 8'],
+const ICONS = { more: ['M3.5 8h.01', 'M8 8h.01', 'M12.5 8h.01'], ext: ['M6.5 3.5h-3v9h9v-3', 'M9 3h4v4', 'M13 3 7.5 8.5'], x: ['M4 4l8 8', 'M12 4l-8 8'],
                 fold: ['M4 4l4 4-4 4', 'M9 4l4 4-4 4'], unfold: ['M12 4 8 8l4 4', 'M7 4 3 8l4 4'] };
 /** A drawn icon (stroke 1.5, currentColor). */
 function icon(name) {
@@ -273,7 +286,7 @@ const level = (p) => (p >= 90 ? 'hi' : p >= 70 ? 'mid' : '');
 const shortModel = (m) => (typeof m !== 'string' ? null : m.replace(/^claude-/, '').replace(/-(\d+)-(\d+)/, ' $1.$2').replace(/-(\d+)$/, ' $1').replace('[1m]', ' 1m'));
 const lastPart = (p) => (typeof p === 'string' ? p.split('/').filter(Boolean).at(-1) ?? p : null);
 const ORDER = { 'needs-you': 0, working: 1, capped: 2, ready: 3, closed: 4 };
-const WORD = { 'needs-you': 'needs you', working: 'working', capped: 'stopped at a limit', ready: 'open', closed: 'closed' };
+const WORD = { 'needs-you': 'needs you', working: 'working', capped: 'at its limit', ready: 'ready', closed: 'closed' };
 
 // ---------------------------------------------------------------- reading the snapshot
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -330,6 +343,13 @@ function accounts(s) {
     sub.capped = worst >= 100 || Boolean(hitNow) || Boolean(fleetCap);
     sub.score = sub.capped ? 999 : worst < 0 ? 500 : worst; // unknown sits between a known one with room and a capped one
   }
+  // Two accounts can't share a limit window: the same figures to the second mean one profile is signed in as the other.
+  const sig = (sub) => (sub.engine === 'claude' && sub.limits?.five_hour && sub.limits?.seven_day
+    ? ['five_hour', 'seven_day'].map((k) => `${sub.limits[k].used_percentage}@${sub.limits[k].resets_at}`).join(' ') : null);
+  for (const sub of subs.values()) {
+    const twin = [...subs.values()].find((o) => o !== sub && sig(o) && sig(o) === sig(sub));
+    sub.twin = twin ? twin.label : null;
+  }
   // Each session's share of its account's weekly figure, split by how much each used this week.
   for (const sub of subs.values()) {
     const week = sub.windows.find((w) => w.k === '7d')?.pct ?? null;
@@ -359,22 +379,24 @@ let snap = null, subs = [], pickKey = store.get('account'), pickMachine = store.
 const tally = (list) => h('span', { class: 'tally' }, ['needs-you', 'working', 'capped', 'ready'].map((st) => [st, list.filter((x) => x.live && x.state === st).length])
   .filter(([, n]) => n).map(([st, n]) => h('span', { title: WORD[st] }, h('span', { class: `dot ${st}` }), n)));
 function renderAccounts() {
-  $('accts').replaceChildren(...subs.map((sub) => {
+  $('accts').replaceChildren(...subs.filter((sub) => sub.places.some((p) => p.loggedIn)).map((sub) => {
     const room = sub.capped
-      ? h('span', { class: 'cap', text: sub.cappedUntil ? `capped ${until(sub.cappedUntil)}` : 'capped', title: sub.limitHit?.text ?? '' })
+      ? h('span', { class: 'cap', text: sub.cappedUntil ? `at its limit · back in ${until(sub.cappedUntil)}` : 'at its limit', title: sub.limitHit?.text ?? '' })
       : sub.windows.length
         ? sub.windows.map((w) => h('span', { title: w.resetsAt ? `resets in ${until(w.resetsAt)}` : '' },
             h('i', { text: w.k }), h('span', { class: 'line' }, h('b', { class: level(w.pct), style: `width:${Math.min(100, w.pct)}%` })), `${Math.round(w.pct)}%`))
         : h('span', { class: 'faint', text: '·', title: 'no reading yet' });
     const where = sub.places.map((p) => p.machine).join(', ');
+    const twin = sub.twin ? h('span', { class: 'cap', text: '?', title: `The same limits as ${sub.twin}, to the second: one of these profiles is signed in as the other account.` }) : null;
     return h('div', { class: `acct${sub.key === pickKey ? ' on' : ''}`, title: [sub.email, sub.plan, where].filter(Boolean).join('\n'), onclick: () => pick(sub.key) },
-      h('span', { class: 'name', text: sub.label }), h('span', { class: 'room' }, room), tally(sub.sessions));
+      h('span', { class: 'name', text: sub.label }), h('span', { class: 'room' }, room, twin), tally(sub.sessions));
   }));
 }
 function pick(key) { pickKey = key; store.set('account', key); renderHow(); $('prompt').focus(); }
 
 // ---------------------------------------------------------------- the prompt
 const isFleet = () => pickKey === 'fleet';
+let cwdFor = null; // the machine the folder box was filled for
 function renderHow() {
   if (!snap) return;
   const machines = snap.machines.filter((m) => m.ok !== false);
@@ -388,7 +410,7 @@ function renderHow() {
   $('mach').replaceChildren(...where.map((n) => h('option', { value: n, text: n, selected: n === pickMachine })));
   $('cwd').hidden = isFleet();
   $('model').hidden = $('effort').hidden = sub?.engine !== 'claude';
-  if (document.activeElement !== $('cwd')) $('cwd').value = store.get('cwd.' + pickMachine) ?? (machines.find((m) => m.name === pickMachine)?.local ? '~/projects' : '~/dev');
+  if (cwdFor !== pickMachine && document.activeElement !== $('cwd')) { cwdFor = pickMachine; $('cwd').value = store.get('cwd.' + pickMachine) ?? (machines.find((m) => m.name === pickMachine)?.local ? '~/projects' : '~/dev'); }
   $('cwd').style.width = `${Math.max(8, $('cwd').value.length + 1)}ch`;
   $('prompt').placeholder = isFleet() ? 'Issue number, or what it should do' : 'What should it do?';
   renderAccounts();
@@ -407,13 +429,13 @@ async function fire() {
   const sub = subs.find((s) => s.key === pickKey), place = sub?.places.find((p) => p.machine === pickMachine);
   const body = { machine: pickMachine, engine: isFleet() ? 'fleet' : sub.engine, profile: place?.profile ?? '', cwd: $('cwd').value, prompt,
                  model: sub?.engine === 'claude' ? $('model').value : '', effort: sub?.engine === 'claude' ? $('effort').value : '' };
-  said.className = 'said'; said.textContent = '…'; $('fire').disabled = true;
+  said.className = 'fired'; said.textContent = '…'; $('fire').disabled = true;
   store.set('machine', pickMachine); if (!isFleet()) store.set('cwd.' + pickMachine, body.cwd);
   try {
     const r = await api('/api/fleet/launch', body);
-    if (r.ok) { said.className = 'said ok'; said.textContent = `started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500); }
-    else { said.className = 'said no'; said.textContent = r.error ?? 'Did not start'; }
-  } catch (e) { said.className = 'said no'; said.textContent = String(e.message); }
+    if (r.ok) { said.className = 'fired ok'; said.textContent = `started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500); }
+    else { said.className = 'fired no'; said.textContent = r.error ?? 'Did not start'; }
+  } catch (e) { said.className = 'fired no'; said.textContent = String(e.message); }
   $('fire').disabled = false;
 }
 
@@ -473,17 +495,17 @@ function vitals(m) {
 }
 /** The command that opens a background Claude session where it runs. */
 function attachCommand(x) {
-  if (x.engine !== 'claude' || !/^[0-9a-f]{8}$/.test(x.id ?? '')) return null;
+  if (!attachable(x)) return null;
   const env = x.profile === 'default' ? '' : `CLAUDE_CONFIG_DIR=${String(x.dir).replace(/^~/, x.local || !x.user ? '~' : `/home/${x.user}`)} `;
   if (x.local) return `${env}claude attach ${x.id}`;
-  return `ssh -t ${x.ssh} "${x.user ? `sudo -u ${x.user} -H ` : ''}bash -lc '${env}claude attach ${x.id}'"`;
+  return `ssh -t ${x.ssh} "${x.user ? `sudo -u ${x.user} -H ` : ''}bash -lc 'export XDG_RUNTIME_DIR=/run/user/\\$(id -u); ${env}claude attach ${x.id}'"`;
 }
 const keyOf = (x) => `${x.machine}:${x.sessionId ?? x.id ?? x.pid}`;
 
 // ---------------------------------------------------------------- the session open on the right
 // One session at a time, full height on the right: its conversation scrolls, the message box stays at the bottom. The
 // panel's parts are built once and updated in place, so a refresh never takes the caret or a half-typed message.
-const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, view: null, wide: new Set(), timer: null };
+const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null };
 const drafts = new Map(); // what you had typed to each session, kept when you switch away
 let everything = [];
 const current = () => everything.find((x) => keyOf(x) === pane.key) ?? null;
@@ -492,6 +514,20 @@ const attachable = (x) => x?.engine === 'claude' && x.live && x.via === 'backgro
 /** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
 const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
 const termView = (x) => attachable(x) && pane.view !== 'log';
+// What each session last said, kept for when you come back to it or hover it first: the pane shows it at once and reads
+// again behind it.
+const seen = new Map();
+const remember = (key, items) => { seen.delete(key); seen.set(key, { items, at: Date.now() }); if (seen.size > 80) seen.delete(seen.keys().next().value); };
+let hoverTimer = null;
+function prefetch(x) {
+  clearTimeout(hoverTimer);
+  if (!x?.sessionId || attachable(x) || keyOf(x) === pane.key || Date.now() - (seen.get(keyOf(x))?.at ?? 0) < 15_000) return;
+  hoverTimer = setTimeout(async () => {
+    const r = await api('/api/fleet/peek', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => null);
+    if (r?.ok) remember(keyOf(x), r.items);
+  }, 120);
+}
+
 
 // The pane is as wide as you dragged it, or folded to a strip at the edge; both are remembered.
 const paneUi = { width: Number(store.get('pane.width')) || 460, min: store.get('pane.min') === '1' };
@@ -520,10 +556,10 @@ function select(x) {
   if (paneUi.min) fold(false);
   if (pane.key === key) return;
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
-  Object.assign(pane, { key, items: null, error: null, said: null, sending: false, arm: false, armMove: false, view: null, wide: new Set() });
+  Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null });
   $('p-reply').value = drafts.get(key) ?? '';
   clearInterval(pane.timer);
-  pane.timer = setInterval(() => { if (!document.hidden) peek(); }, 4000);
+  pane.timer = x.live ? setInterval(() => { if (!document.hidden) peek(); }, 2500) : null;
   document.body.classList.add('has-pane');
   renderMachines(); renderPane(true); peek();
 }
@@ -544,39 +580,25 @@ async function peek() {
     // Keep what you just sent on show until the transcript has it.
     const sent = (pane.items ?? []).filter((it) => it.pending && !(r.items ?? []).some((n) => n.kind === 'ask' && n.text.includes(it.text.slice(0, 80))));
     Object.assign(pane, r.ok ? { items: [...r.items, ...sent], error: null } : { error: r.error });
+    if (r.ok) remember(key, r.items);
   } catch (e) { if (pane.key === key) pane.error = String(e.message); }
   renderPane();
 }
-/** Its conversation as you'd read it: what you asked and what it said, set as text, with each run of steps in between
- *  folded to its last step and a count. */
+/** Its conversation the way its terminal prints it: what you asked, what it said, every step, nothing folded or cut. */
 function conversation(items) {
-  const out = [];
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (it.kind === 'step') {
-      let j = i;
-      while (j + 1 < items.length && items[j + 1].kind === 'step') j++;
-      const run = items.slice(i, j + 1);
-      out.push(h('div', { class: 'it step', title: run.map((r) => r.text).join('\n') }, run.at(-1).text, run.length > 1 ? h('span', { class: 'more', text: `  +${run.length - 1}` }) : null));
-      i = j;
-      continue;
-    }
-    const id = `${it.at}:${it.text.length}`, long = it.kind === 'said' && it.text.length > 900 && !pane.wide.has(id);
-    const open = () => { pane.wide.add(id); renderPane(); };
-    out.push(h('div', { class: `it ${it.kind}${long ? ' long' : ''}${it.pending ? ' pending' : ''}`, title: it.at ? new Date(it.at).toLocaleString() : '', onclick: long ? open : null }, md(it.text)));
-    if (long) out.push(h('button', { class: 'all', text: 'show all', onclick: open }));
-  }
-  return out;
+  return items.map((it) => (it.kind === 'step'
+    ? h('div', { class: 'it step', title: it.at ? new Date(it.at).toLocaleString() : '', text: it.text })
+    : h('div', { class: `it ${it.kind}${it.pending ? ' pending' : ''}`, title: it.at ? new Date(it.at).toLocaleString() : '' }, md(it.text))));
 }
 async function sendText(text) {
   const x = current();
   if (!x || !text.trim() || pane.sending) return;
-  pane.sending = true; pane.said = { cls: 'note', text: 'sending…' };
+  pane.sending = true; pane.said = null;
   pane.items = [...(pane.items ?? []), { kind: 'ask', text: text.trim(), at: Date.now(), pending: true }];
   renderPane(true);
   const r = await api('/api/fleet/send', { machine: x.machine, profile: x.profile, sessionId: x.sessionId, text: text.trim() }).catch((err) => ({ ok: false, error: String(err.message) }));
   pane.sending = false;
-  pane.said = r.ok ? (r.respawned ? { cls: 'ok', text: `restarted on ${r.respawned}, sent` } : null) : { cls: 'no', text: r.error };
+  pane.said = r.ok ? null : { cls: 'no', text: r.error };
   if (!r.ok) { pane.items = (pane.items ?? []).filter((it) => !it.pending); if (!$('p-reply').value) $('p-reply').value = text; }
   renderPane(true); peek();
 }
@@ -611,7 +633,7 @@ async function openTerm(x) {
   term.onResize(({ cols, rows }) => { if (tv.term === term && tv.id) api('/api/term/resize', { term: tv.id, cols, rows }).catch(() => {}); });
   tv.ro = new ResizeObserver(() => { if (el.clientWidth > 120 && el.clientHeight > 60) try { fit.fit(); } catch {} });
   tv.ro.observe(el);
-  term.focus();
+  if (x.state !== 'needs-you') term.focus();
   try {
     const r = await fetch('/api/term/open', { method: 'POST', signal: ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
       body: JSON.stringify({ machine: x.machine, profile: x.profile, id: x.id, cols: term.cols, rows: term.rows }) });
@@ -666,12 +688,15 @@ function groupField(x) {
   return h('input', { class: 'p-group', list: 'fleet-groups', value: x.epic ?? '', placeholder: 'group', 'aria-label': 'Group', title: 'Group · type a new one to make it',
     spellcheck: 'false', onchange: (e) => saveLabel(x, { group: e.target.value.trim() }), onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); } });
 }
+/** Restart it in the background here, conversation kept, and open its terminal. Only ever on your second click: a running
+ *  session is never moved by itself. */
 async function moveHere() {
   const x = current();
-  if (!x) return;
-  if (!pane.armMove) { pane.armMove = true; renderPane(); setTimeout(() => { if (pane.armMove) { pane.armMove = false; renderPane(); } }, 4000); return; }
-  pane.armMove = false; pane.said = { cls: 'note', text: 'moving…' }; renderPane();
+  if (!x || pane.moving) return;
+  if (!pane.armMove) { pane.armMove = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.armMove) { pane.armMove = false; renderPane(); } }, 4000); return; }
+  pane.armMove = false; pane.moving = true; pane.said = null; renderPane();
   const r = await api('/api/fleet/adopt', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
+  pane.moving = false;
   pane.said = r.ok ? null : { cls: 'no', text: r.error };
   pane.view = null;
   await load();
@@ -682,6 +707,7 @@ function renderPane(toEnd = false) {
   aside.hidden = !pane.key;
   applyPaneUi();
   if (!pane.key) return;
+  if (!x && tv.key === pane.key) return; // a read that missed it: its terminal stays as it is
   if (!x) {
     closeTerm();
     $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' }));
@@ -700,53 +726,61 @@ function renderPane(toEnd = false) {
   }
   if (tv.key) closeTerm();
   // The conversation: stay at the bottom if you were there; leave your place if you had scrolled up to read.
+  // Drawn again only when it changed, so what you selected stays selected.
   const body = $('p-body'), atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
   body.hidden = false;
-  body.replaceChildren(...(pane.error ? [h('div', { class: 'it said', text: pane.error })]
-    : pane.items ? (pane.items.length ? conversation(pane.items.slice(-60)) : [h('div', { class: 'empty', text: '—' })])
-    : x.sessionId ? [h('div', { class: 'empty', text: '…' })] : [h('div', { class: 'empty', text: x.doing ?? x.args ?? '' })]));
+  const last = pane.items?.at(-1);
+  const sig = `${pane.key}|${pane.error ?? ''}|${pane.items ? `${pane.items.length}:${last?.at}:${last?.text.length}:${last?.pending ?? ''}` : '-'}|${x.doing ?? ''}`;
+  if (body.dataset.sig !== sig) {
+    body.dataset.sig = sig;
+    body.replaceChildren(...(pane.error ? [h('div', { class: 'it err', text: pane.error })]
+      : pane.items ? (pane.items.length ? conversation(pane.items) : [h('div', { class: 'empty', text: '—' })])
+      : x.sessionId ? [h('div', { class: 'empty', text: '…' })] : [h('div', { class: 'empty', text: x.doing ?? x.args ?? '' })]));
+  }
   if (toEnd || atEnd) body.scrollTop = body.scrollHeight;
   // The message box: for a session that takes messages here; otherwise one line on how to make it. A background job gets
   // it as yours; a Remote Control session as another session's note, so /model and /effort are for its own screen.
-  const talk = x.live && (x.via === 'background' || x.via === 'remote');
-  $('p-foot').hidden = false;
+  const talk = x.live && (x.via === 'background' || x.via === 'remote' || (x.via === 'app' && Boolean(x.web)));
+  $('p-foot').hidden = !talk;
   $('p-reply').hidden = !talk;
   $('p-reply').disabled = pane.sending;
-  $('p-reply').placeholder = x.via === 'remote' ? 'Note to it' : 'Message it';
-  $('p-reply').title = x.via === 'remote' ? 'It reads this as a note from another session: use claude.ai or move it here for /model, /effort or a yes it needs from you' : '';
-  const how = !x.live ? null : !talk ? (x.via === 'app' || x.via === 'terminal' ? 'type /rc in it to message here' : null) : null;
-  $('p-tools').replaceChildren(...[pane.said ? h('span', { class: pane.said.cls, text: pane.said.text }) : null, how ? h('span', { class: 'note', text: how }) : null, h('span', { class: 'sp' })].filter(Boolean));
+  $('p-reply').placeholder = x.via === 'background' ? 'Message it' : 'Note to it';
+  $('p-reply').title = x.via !== 'background' ? 'It reads this as a note from another session: use claude.ai or move it here for /model, /effort or a yes it needs from you' : '';
+  $('p-tools').replaceChildren(...[pane.sending ? h('span', { text: '…' }) : null].filter(Boolean));
   growReply();
 }
 function renderHead(x, term) {
   const c = x.context, cmd = attachCommand(x);
   // One control: close an open session, archive a closed one. A second click does it.
-  const verb = x.live ? (x.via === 'app' || !x.sessionId ? null : 'close') : (x.sessionId || x.id ? 'archive' : null);
+  const verb = x.live ? (x.engine !== 'claude' || x.via === 'app' || !x.sessionId ? null : 'close') : (x.sessionId || x.id ? 'archive' : null);
   const act = verb && h('button', { class: `act${pane.arm ? ' armed' : ''}`, text: pane.arm ? `${verb}?` : verb,
     onclick: async () => {
-      if (!pane.arm) { pane.arm = true; renderPane(); setTimeout(() => { if (pane.arm) { pane.arm = false; renderPane(); } }, 4000); return; }
-      pane.arm = false; pane.said = { cls: 'note', text: '…' }; renderPane();
+      if (!pane.arm) { pane.arm = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.arm) { pane.arm = false; renderPane(); } }, 4000); return; }
+      pane.arm = false; renderPane();
       const r = await api(`/api/fleet/${verb}`, { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id }).catch((err) => ({ ok: false, error: String(err.message) }));
-      pane.said = r.ok ? { cls: 'ok', text: verb === 'archive' ? 'archived' : 'closed' } : { cls: 'no', text: r.error };
+      pane.said = r.ok ? null : { cls: 'no', text: r.error };
       renderPane(); await load();
       if (r.ok && verb === 'archive') deselect();
     } });
-  const move = movable(x) ? h('button', { class: `act${pane.armMove ? ' armed' : ''}`, text: pane.armMove ? 'move here?' : 'move here',
-    title: 'Restart it in the background, conversation kept, and open its terminal here', onclick: moveHere }) : null;
+  // In the bar: its name, what turns it into a terminal (or back), and an error if there is one. The rest is behind ⋯.
+  const move = movable(x) && !pane.moving ? h('button', { class: `act${pane.armMove ? ' armed' : ''}`, text: pane.armMove ? 'move here?' : 'move here', onclick: moveHere,
+    title: 'Restart it here in the background, conversation kept, and open its terminal' + (x.headless ? '' : '. The terminal window it is in now closes.') }) : null;
   const view = attachable(x) ? h('button', { class: 'act', text: term ? 'log' : 'terminal', onclick: () => { pane.view = term ? 'log' : null; renderPane(true); if (term) peek(); } }) : null;
+  const state = pane.moving ? h('span', { class: 'p-err', style: 'color:var(--grey)', text: '…' })
+    : pane.said?.cls === 'no' ? h('span', { class: 'p-err', text: pane.said.text, title: pane.said.text }) : null;
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
-  const said = term && pane.said ? h('span', { class: pane.said.cls === 'no' ? 'cap' : '', text: pane.said.text }) : null;
-  $('p-head').replaceChildren(
-    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}` }), titleField(x),
+  $('p-head').replaceChildren(...[
+    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, view,
+      h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),
-    h('div', { class: 'p-meta', title: [WORD[x.state], x.name, x.cwd, x.model].filter(Boolean).join('\n') },
-      [x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
-        .filter(Boolean).map((t) => h('span', { text: t }))),
-    h('div', { class: 'p-acts' }, groupField(x), act, move, view, test,
+    pane.more ? h('div', { class: 'p-meta', title: [x.name, x.cwd, x.model].filter(Boolean).join('\n') },
+      [WORD[x.state], x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
+        .filter(Boolean).map((t) => h('span', { text: t }))) : null,
+    pane.more ? h('div', { class: 'p-acts' }, groupField(x), act, test,
       x.web ? h('a', { class: 'act', href: x.web, target: '_blank', rel: 'noopener' }, 'claude.ai', icon('ext')) : null,
-      cmd ? h('button', { class: 'act', text: 'attach', title: `Copy: ${cmd}`, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null,
-      said));
+      cmd ? h('button', { class: 'act', text: 'attach', title: `Copy: ${cmd}`, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null) : null]
+    .filter(Boolean));
 }
 const growReply = () => { const t = $('p-reply'); t.style.height = 'auto'; t.style.height = `${Math.min(t.scrollHeight, 240)}px`; };
 $('p-reply').addEventListener('input', growReply);
@@ -764,10 +798,13 @@ document.addEventListener('keydown', (e) => {
 function row(x) {
   const c = x.context, on = pane.key === keyOf(x);
   const lifted = x.state === 'capped' && (resetOf(x.limitHit) ?? Infinity) < Date.now();
-  const what = x.state === 'working' || x.state === 'needs-you' ? (x.doing ?? x.said ?? '') : x.state === 'capped' ? (lifted ? 'its limit has lifted: tell it to go on' : x.limitHit?.text ?? '') : '';
+  // What it waits on, on a line of its own under a session that needs you: never cut by a narrow list.
+  const why = x.state === 'needs-you' ? [typeof x.waitingFor === 'string' ? x.waitingFor : null, x.doing ?? x.said].filter(Boolean).join(': ')
+    : x.state === 'capped' ? (lifted ? 'its limit has lifted: tell it to go on' : x.limitHit?.text ?? '') : '';
+  const what = x.state === 'working' ? (x.doing ?? x.said ?? '') : '';
   return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
-      onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); } },
-    h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }),
+      onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); }, onmouseenter: () => prefetch(x) },
+    h('span', { class: `dot ${x.state}${lifted ? ' lifted' : ''}`, title: lifted ? 'its limit has lifted' : WORD[x.state] ?? '' }),
     h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine }),
     h('span', { class: `stage ${x.stage ?? ''}`, text: x.stage ?? '' }),
     h('span', { class: 'at', text: x.machine }),
@@ -777,23 +814,25 @@ function row(x) {
       c ? h('span', { class: 'line' }, h('b', { class: level(c.pct), style: `width:${Math.min(100, c.pct)}%` })) : null),
     h('span', { class: `use ${x.shareWeek != null ? level(x.shareWeek * 3) : ''}`, text: x.shareWeek != null && x.shareWeek >= 0.5 ? `${Math.round(x.shareWeek)}%` : '',
       title: x.shareWeek != null ? `about ${Math.round(x.shareWeek)}% of ${x.sub}'s weekly limit` : '' }),
-    h('span', { class: 'what', text: what }));
+    h('span', { class: 'what', text: what }),
+    why ? h('span', { class: 'why', text: why, title: why }) : null);
 }
 /** A closed session, as one quiet line: what it was, where, whose, and when it last moved. */
 function gone(x) {
-  return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); } },
+  return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); }, onmouseenter: () => prefetch(x) },
     h('span', { class: 'dot closed' }), h('span', { text: x.title ?? x.name ?? x.id ?? x.engine }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
     h('span', { class: 'use' }), h('span', { class: 'what' }));
 }
-let armedEpic = null;
+let armedEpic = null, epicT = null;
 function renderMachines() {
   const all = subs.flatMap((s) => s.sessions);
   // Everything else running: fleet workers and headless runs no roster lists.
   const extra = snap.machines.flatMap((m) => [
     ...(m.workers ?? []).map((w) => ({ engine: 'fleet', state: 'working', live: true, title: `${w.engine} ${w.task ?? ''}`.trim(), sub: 'fleet', since: w.since, cwd: w.cwd, machine: m.name, pid: w.pid })),
     ...(m.fleet?.dispatches ?? []).filter((d) => d.alive && !(m.workers ?? []).some((w) => w.pid === d.pid)).map((d) => ({ engine: 'fleet', state: 'working', live: true, title: d.key, sub: 'fleet', since: d.logAt, machine: m.name, pid: d.pid, doing: d.last })),
-    ...(m.others ?? []).map((o) => ({ engine: o.engine, state: 'working', live: true, title: `${o.engine} ${o.kind}`, sub: o.profile ?? '', since: o.since, cwd: o.cwd, machine: m.name, pid: o.pid, doing: o.args })),
+    ...(m.others ?? []).map((o) => ({ engine: o.engine, state: 'working', live: true, title: `${o.engine} ${o.kind}`, since: o.since, cwd: o.cwd, machine: m.name, pid: o.pid, doing: o.args,
+      sub: subs.find((sub) => sub.places.some((pl) => pl.machine === m.name && pl.profile === o.profile))?.label ?? o.profile ?? '' })),
   ]);
   everything = [...all, ...extra];
   // One line per machine: how it is doing, and what runs on it.
@@ -822,10 +861,11 @@ function renderMachines() {
     const arm = armedEpic === name;
     const sweep = closed.length ? h('button', { class: arm ? 'armed' : '', text: arm ? `archive ${closed.length}?` : 'archive',
       onclick: async () => {
-        if (!arm) { armedEpic = name; renderMachines(); setTimeout(() => { if (armedEpic === name) { armedEpic = null; renderMachines(); } }, 4000); return; }
+        if (!arm) { armedEpic = name; renderMachines(); clearTimeout(epicT); epicT = setTimeout(() => { if (armedEpic === name) { armedEpic = null; renderMachines(); } }, 4000); return; }
         armedEpic = null;
-        await api('/api/fleet/archive-all', { sessions: closed.filter((x) => x.sessionId || x.id).map((x) => ({ machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id })) }).catch(() => {});
-        load();
+        const r = await api('/api/fleet/archive-all', { sessions: closed.filter((x) => x.sessionId || x.id).map((x) => ({ machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id })) }).catch((e) => ({ ok: false, kept: [String(e.message)] }));
+        await load();
+        if (r.kept?.length) { $('err').hidden = false; $('err').textContent = `${r.kept.length} not archived: ${r.kept[0]}`; }
       } }) : null;
     return h('section', { class: 'epic' },
       h('header', {}, h('h2', { text: name }), test ? h('a', { class: 'test', href: test, title: `Open ${test}`, onclick: (e) => { e.preventDefault(); openTest(test); } }, 'TEST', icon('ext')) : null, tally(shown)),
@@ -836,24 +876,27 @@ function renderMachines() {
 }
 
 // ---------------------------------------------------------------- load
-let loading = false;
+// A load asked for while one runs (after a close, an archive, a move or Fire) runs right after it, never dropped.
+let loading = false, again = false, loadedAt = 0;
 async function load() {
-  if (loading) return;
-  loading = true; $('refresh').classList.add('busy');
+  if (loading) { again = true; return; }
+  loading = true; loadedAt = Date.now(); $('refresh').classList.add('busy');
   try {
     snap = await api('/api/fleet');
     subs = accounts(snap);
-    const bad = snap.machines.filter((m) => m.ok === false);
+    const bad = snap.machines.filter((m) => m.ok === false || m.stale);
     $('err').hidden = !bad.length;
-    $('err').textContent = bad.map((m) => `${m.name}: ${m.error ?? 'no answer'}`).join('\n');
+    $('err').textContent = bad.map((m) => (m.stale ? `${m.name} didn't answer (${m.stale}): showing its last read` : `${m.name}: ${m.error ?? 'no answer'}`)).join('\n');
     renderHow(); renderMachines(); renderPane();
     $('refresh').title = `Read ${new Date(snap.at).toLocaleTimeString()}`;
   } catch (e) { if (e.message !== 'reloading') { $('err').hidden = false; $('err').textContent = String(e.message); } }
   loading = false; $('refresh').classList.remove('busy');
+  if (again) { again = false; load(); }
 }
 $('refresh').addEventListener('click', load);
 load();
-setInterval(() => { if (!document.hidden) load(); }, 20_000);
+// Every 20 seconds while you look; every minute in a background tab, so the Needs you count in its title stays true.
+setInterval(() => { if (!document.hidden || Date.now() - loadedAt > 60_000) load(); }, 20_000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 </script>
 </body>

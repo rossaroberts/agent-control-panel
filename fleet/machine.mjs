@@ -239,8 +239,8 @@ const remoteId = (v) => { const m = /^(?:session|cse)_(\w+)$/.exec(String(v ?? '
 function reachOf(r, rec) {
   const id = remoteId(rec?.bridgeSessionId);
   if (r.kind === 'background' || rec?.kind === 'bg') return { via: 'background', remote: id };
+  if (rec?.entrypoint === 'claude-desktop') return { via: 'app', remote: id };
   if (id) return { via: 'remote', remote: id };
-  if (rec?.entrypoint === 'claude-desktop') return { via: 'app', remote: null };
   return { via: r.pid ? 'terminal' : null, remote: null };
 }
 
@@ -278,7 +278,7 @@ export function sessionState(r, t, now = Date.now()) {
   if (t?.limitHit && t.limitHit.at >= (t.lastAt ?? 0) - 120_000) return { state: 'capped', live };
   const busy = r.status === 'busy' || r.state === 'working' || r.state === 'running';
   if (busy && !(t?.turnOver && now - (t.writtenAt ?? now) > 60_000)) return { state: 'working', live };
-  return { state: live ? 'ready' : 'closed', live };
+  return { state: 'ready', live };
 }
 
 async function claudeProfile(p, learned, usage) {
@@ -309,14 +309,17 @@ async function claudeProfile(p, learned, usage) {
     const size = w.size;
     const pct = fresh ? sl.context_window.used_percentage : t.contextTokens != null ? (100 * t.contextTokens) / size : null;
     const { state, live } = sessionState(r, t);
-    const { via, remote } = reachOf(r, sessionRecord(p, r.pid));
+    const rec = sessionRecord(p, r.pid);
+    const { via, remote } = reachOf(r, rec);
     const units = file && (t.writtenAt ?? 0) >= since ? usageSince(file, since, usage) : 0;
     return { engine: 'claude', id: r.id ?? null, sessionId: r.sessionId, name: r.name ?? null, kind: r.kind ?? null,
              state, live, rawState: r.state ?? r.status ?? null, waitingFor: r.waitingFor ?? null, pid: r.pid ?? null,
              cwd: tilde(r.cwd ?? null), startedAt: r.startedAt ?? null, lastAt: t.lastAt ?? null,
              model: t.model ?? null, context: pct == null ? null : { pct: Math.round(pct * 10) / 10, tokens: t.contextTokens ?? null, size, guessed: !fresh && w.guessed },
              doing: t.doing ?? null, said: t.said ?? null, limitHit: t.limitHit ?? null, firstAsk: t.firstAsk ?? null, lastAsk: t.lastAsk ?? null,
-             via, web: remote ? `https://claude.ai/code/${remote}` : null, effort: t.effort ?? null, unitsWeek: units };
+             via, web: remote ? `https://claude.ai/code/${remote}` : null, effort: t.effort ?? null, unitsWeek: units,
+             // No screen of its own: a Remote Control server spawned it for claude.ai. Nothing is lost moving it here.
+             headless: rec?.entrypoint === 'sdk-cli' };
   });
   // The newest limit stop any session met: the account-wide cap when its status line never reported.
   const limitHit = sessions.map((s) => s.limitHit).filter((h) => h?.at).sort((a, b) => b.at - a.at)[0] ?? null;
@@ -769,12 +772,12 @@ function findTranscript(profile, sessionId) {
 /** The end of a session's conversation as a list: what you asked, what it said, and each step it took, newest last. */
 export function peek(a) {
   const items = [];
-  const push = (kind, text, at) => { if (text) items.push({ kind, text: kind === 'step' ? oneLine(text, 200) : keepLines(text, 6000), at }); };
+  const push = (kind, text, at) => { if (text) items.push({ kind, text: kind === 'step' ? oneLine(text, 400) : keepLines(text, 40_000), at }); };
   if (a.engine === 'codex') {
     const home = codexHomes().find((h) => path.basename(h).slice(1) === a.profile) ?? codexHomes()[0];
     const f = home && recentRollouts(home, 30 * DAY).map((r) => r.f).find((f) => parse(head(f))?.payload?.id === a.sessionId);
     if (!f) return { ok: false, error: 'Its log is gone.' };
-    for (const l of tail(f, 512 * 1024)) {
+    for (const l of tail(f, 2048 * 1024)) {
       const d = parse(l), p = d?.payload ?? {}, at = Date.parse(d?.timestamp) || null;
       const ask = codexText(d, 'user'), said = codexText(d, 'assistant');
       // The same words can come twice, as an event and as a response item: keep one.
@@ -790,7 +793,7 @@ export function peek(a) {
   } else {
     const f = findTranscript(a.profile, a.sessionId);
     if (!f) return { ok: false, error: 'Its conversation is not saved here.' };
-    for (const l of tail(f, 768 * 1024)) {
+    for (const l of tail(f, 2048 * 1024)) {
       const d = parse(l);
       if (!d || d.isSidechain) continue;
       const at = Date.parse(d.timestamp) || null, ask = askOf(d);
@@ -802,7 +805,7 @@ export function peek(a) {
       }
     }
   }
-  return { ok: true, items: items.slice(-60) };
+  return { ok: true, items: items.slice(-400) };
 }
 
 const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
@@ -843,20 +846,10 @@ export async function send(a) {
   }
   if (/^[/!]/.test(text)) return { ok: false, error: 'Type a / or ! command in its terminal.' };
   // A job still running an older Claude Code than the one installed (it updates itself) never gets a message the new one
-  // hands it. `claude respawn` restarts it on the current one, conversation kept: done for an idle job, never mid-work.
+  // hands it, and restarting it to fix that is not a message's call: its terminal takes your typing either way.
   const now = /^([\d.]+)/.exec((await run(bin('claude'), ['--version'])).stdout.trim())?.[1];
   const its = await versionOf(row.pid);
-  let respawned = null;
-  if (now && its && its !== now) {
-    respawned = now;
-    if (row.status === 'busy' || row.state === 'working') return { ok: false, error: `It runs Claude Code ${its}, older than ${now}: it can take messages once it is idle and respawned.` };
-    const r = await run(bin('claude'), ['respawn', row.id], { env: profileEnv(p), timeout: 60_000 });
-    if (r.err) return { ok: false, error: `It runs Claude Code ${its}; respawning it on ${now} failed: ${oneLine(r.stderr || r.err.message, 200)}` };
-    for (let i = 0; i < 20; i++) {
-      await new Promise((ok) => setTimeout(ok, 500));
-      try { const again = JSON.parse((await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) })).stdout).find((x) => x.id === row.id); if (again?.pid && again.pid !== row.pid) { row = again; break; } } catch {}
-    }
-  }
+  if (now && its && its !== now) return { ok: false, error: `It runs Claude Code ${its}, older than ${now}: type in its terminal instead.` };
   const file = transcriptOf(p, row.sessionId, row.cwd);
   if (!file) return { ok: false, error: 'It has no saved conversation yet.' };
   const argv = [bin('claude'), '--resume', row.sessionId, '--', text];
@@ -879,7 +872,7 @@ export async function send(a) {
   }
   await new Promise((r) => setTimeout(r, seen ? 800 : 0));
   try { process.kill(-child.pid, 'SIGTERM'); } catch {}
-  if (seen) return { ok: true, ...(respawned && { respawned }) };
+  if (seen) return { ok: true };
   const said = out.replace(/\x1b\[[0-9;?<>]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0e-\x1f]/g, '').replace(/\s+/g, ' ').trim().slice(-200);
   return { ok: false, error: `It did not take the message.${said ? ` Claude Code said: ${said}` : ''}` };
 }
@@ -915,6 +908,10 @@ export async function close(a) {
 export async function archive(a) {
   const p = claudeProfiles().find((x) => x.id === a?.profile);
   if (!p || !/^[0-9a-f]{8}$/.test(a?.id ?? '')) return { ok: true };
+  // Read fresh: the page's list can be half a minute old, and a job resumed since must not lose its record.
+  let row = null;
+  try { row = JSON.parse((await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) })).stdout).find((r) => r.id === a.id); } catch {}
+  if (row && sessionState(row, null).live) return { ok: false, error: 'It is running again: close it first.' };
   const r = await run(bin('claude'), ['rm', a.id], { env: profileEnv(p) });
   return r.err && !/not found|no such/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true };
 }
