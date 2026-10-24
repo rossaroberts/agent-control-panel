@@ -6,6 +6,7 @@
 <title>Fleet</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/vendor/xterm.css">
 <style>
 /* After iA Writer: paper, ink, one typeface, one blue. Structure is whitespace and tone, never boxes; words only where a
    glyph can't say it. Every text colour clears 4.5:1 on paper and on the selection tint; --quiet is for drawn marks only. */
@@ -16,7 +17,7 @@
   --paper: #f6f7f7; --tint: #eceeef; --ink: #1e2124; --grey: #5f666b; --quiet: #858c91; --rule: #e2e5e7;
   --blue: #0a72a3; --orange: #a5560f; --red: #bf3f33; --green: #2b7d52;
   --font: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --pane: min(46vw, 820px);
+  --pane: var(--pane-w, 460px); --rail: 44px; --term-bg: #16181a;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -30,6 +31,7 @@ body { margin: 0; color: var(--ink); font: 15px/1.7 var(--font); font-variant-nu
 * { scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
 main { width: min(1500px, 100% - 64px); margin: 0 auto; padding: 44px 0 120px; container-type: inline-size; }
 body.has-pane main { width: calc(100% - var(--pane) - 64px); margin-left: 32px; }
+body.has-pane.pane-min main { width: calc(100% - var(--rail) - 64px); }
 button, input, select, textarea { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; }
 button, select { cursor: pointer; }
 a { color: var(--blue); text-decoration: none; }
@@ -110,6 +112,9 @@ main > #machines > .epic:first-child { margin-top: 0; }
 .epic header .test { font-size: 13px; display: inline-flex; align-items: baseline; gap: 4px; }
 .epic header .tally { margin-left: auto; }
 
+/* what needs you: above every group, oldest wait first */
+.epic.urgent h2 { color: var(--orange); }
+
 /* closed sessions: under their epic's open ones, smaller and closer */
 .shut { margin-top: 10px; }
 .shut .bar { display: flex; align-items: baseline; gap: 16px; font-size: 13px; color: var(--grey); padding: 6px 0 2px; border-top: 1px solid var(--rule); }
@@ -136,10 +141,25 @@ main > #machines > .epic:first-child { margin-top: 0; }
 /* the session open on the right: full height, its conversation scrolling, the message box at the bottom */
 #pane { position: fixed; top: 0; right: 0; bottom: 0; width: var(--pane); display: flex; flex-direction: column; background: var(--paper); border-left: 1px solid var(--rule); z-index: 5; }
 #pane[hidden] { display: none; }
+#p-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; touch-action: none; }
+#p-grip:hover, #p-grip.drag { background: linear-gradient(90deg, transparent 3px, var(--blue) 3px, var(--blue) 5px, transparent 5px); }
+#p-rail { display: none; }
+body.pane-min #pane { width: var(--rail); }
+body.pane-min #pane > :not(#p-rail) { display: none; }
+body.pane-min #p-rail { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; height: 100%; padding: 22px 0; color: var(--grey); }
+#p-rail:hover { color: var(--ink); }
+#p-rail .v { writing-mode: vertical-rl; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-height: 70vh; }
+#p-term { flex: 1; min-height: 0; background: var(--term-bg); padding: 8px 2px 2px 12px; }
+#p-term[hidden] { display: none; }
+#p-term .xterm { height: 100%; }
+#p-term .xterm-viewport { scrollbar-color: #3a3f43 transparent; }
 #p-head { padding: 22px 28px 14px; border-bottom: 1px solid var(--rule); }
 .p-top { display: flex; align-items: baseline; gap: 12px; }
 .p-title { font-size: 18px; font-weight: 500; flex: 1; line-height: 1.4; }
-.p-x { color: var(--grey); align-self: center; } .p-x:hover { color: var(--ink); }
+.p-x, .p-fold { color: var(--grey); align-self: center; } .p-x:hover, .p-fold:hover { color: var(--ink); }
+.p-title[contenteditable]:hover, .p-title[contenteditable]:focus { outline: none; box-shadow: 0 1px 0 var(--quiet); }
+.p-group { color: var(--grey); border-bottom: 1px dotted var(--quiet); width: 16ch; }
+.p-group:hover, .p-group:focus { outline: none; color: var(--ink); border-bottom-color: var(--ink); }
 .p-meta { font-size: 13px; color: var(--grey); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 0 18px; }
 .p-meta span { white-space: nowrap; }
 .p-acts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px; margin-top: 10px; font-size: 13px; }
@@ -171,8 +191,6 @@ main > #machines > .epic:first-child { margin-top: 0; }
 #p-tools { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; font-size: 13px; min-height: 1.4em; color: var(--grey); }
 #p-tools .sp { flex: 1; }
 #p-tools .no { color: var(--red); } #p-tools .ok { color: var(--green); }
-#p-tools select.effort { color: var(--grey); appearance: none; -webkit-appearance: none; border-bottom: 1px dotted var(--quiet); }
-#p-tools select.effort:hover { color: var(--ink); }
 
 @media (max-width: 720px) {
   main { width: calc(100% - 32px); padding-top: 28px; }
@@ -209,10 +227,16 @@ main > #machines > .epic:first-child { margin-top: 0; }
   <div id="machines"><div class="reading" aria-label="Reading the machines">…</div></div>
 </main>
 <aside id="pane" hidden aria-label="Session">
+  <div id="p-grip" title="Drag to widen · double-click for the usual width"></div>
+  <button id="p-rail" aria-label="Unfold"></button>
   <div id="p-head"></div>
   <div id="p-body"></div>
+  <div id="p-term" hidden></div>
   <div id="p-foot"><textarea id="p-reply" rows="1" placeholder="Message it" aria-label="Message"></textarea><div id="p-tools"></div></div>
 </aside>
+<datalist id="fleet-groups"></datalist>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
 <script>
 const TOKEN = '__ACP_TOKEN__';
 const $ = (id) => document.getElementById(id);
@@ -228,7 +252,8 @@ function h(tag, attrs = {}, ...kids) {
   for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return e;
 }
-const ICONS = { ext: ['M6.5 3.5h-3v9h9v-3', 'M9 3h4v4', 'M13 3 7.5 8.5'], x: ['M4 4l8 8', 'M12 4l-8 8'] };
+const ICONS = { ext: ['M6.5 3.5h-3v9h9v-3', 'M9 3h4v4', 'M13 3 7.5 8.5'], x: ['M4 4l8 8', 'M12 4l-8 8'],
+                fold: ['M4 4l4 4-4 4', 'M9 4l4 4-4 4'], unfold: ['M12 4 8 8l4 4', 'M7 4 3 8l4 4'] };
 /** A drawn icon (stroke 1.5, currentColor). */
 function icon(name) {
   const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
@@ -458,15 +483,44 @@ const keyOf = (x) => `${x.machine}:${x.sessionId ?? x.id ?? x.pid}`;
 // ---------------------------------------------------------------- the session open on the right
 // One session at a time, full height on the right: its conversation scrolls, the message box stays at the bottom. The
 // panel's parts are built once and updated in place, so a refresh never takes the caret or a half-typed message.
-const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, wide: new Set(), timer: null };
+const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, view: null, wide: new Set(), timer: null };
 const drafts = new Map(); // what you had typed to each session, kept when you switch away
 let everything = [];
 const current = () => everything.find((x) => keyOf(x) === pane.key) ?? null;
+/** A background session opens as its own terminal. */
+const attachable = (x) => x?.engine === 'claude' && x.live && x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '');
+/** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
+const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
+const termView = (x) => attachable(x) && pane.view !== 'log';
+
+// The pane is as wide as you dragged it, or folded to a strip at the edge; both are remembered.
+const paneUi = { width: Number(store.get('pane.width')) || 460, min: store.get('pane.min') === '1' };
+function applyPaneUi() {
+  document.documentElement.style.setProperty('--pane-w', `${paneUi.width}px`);
+  document.body.classList.toggle('pane-min', Boolean(pane.key) && paneUi.min);
+}
+function fold(min) {
+  paneUi.min = min; store.set('pane.min', min ? '1' : '');
+  applyPaneUi();
+  if (!min) requestAnimationFrame(() => { try { tv.fit?.fit(); } catch {} tv.term?.focus(); });
+}
+$('p-rail').addEventListener('click', () => fold(false));
+$('p-grip').addEventListener('pointerdown', (e) => {
+  const grip = $('p-grip');
+  e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('drag');
+  const move = (ev) => { paneUi.width = Math.round(Math.min(innerWidth * 0.8, Math.max(340, innerWidth - ev.clientX))); applyPaneUi(); };
+  grip.addEventListener('pointermove', move);
+  grip.addEventListener('pointerup', () => { grip.classList.remove('drag'); grip.removeEventListener('pointermove', move); store.set('pane.width', paneUi.width); }, { once: true });
+});
+$('p-grip').addEventListener('dblclick', () => { paneUi.width = 460; store.set('pane.width', 460); applyPaneUi(); });
+
 function select(x) {
   const key = keyOf(x);
-  if (pane.key === key) return deselect();
+  if (pane.key === key && !paneUi.min) return deselect();
+  if (paneUi.min) fold(false);
+  if (pane.key === key) return;
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
-  Object.assign(pane, { key, items: null, error: null, said: null, sending: false, arm: false, wide: new Set() });
+  Object.assign(pane, { key, items: null, error: null, said: null, sending: false, arm: false, armMove: false, view: null, wide: new Set() });
   $('p-reply').value = drafts.get(key) ?? '';
   clearInterval(pane.timer);
   pane.timer = setInterval(() => { if (!document.hidden) peek(); }, 4000);
@@ -476,13 +530,14 @@ function select(x) {
 function deselect() {
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
   clearInterval(pane.timer);
+  closeTerm();
   pane.key = null;
   document.body.classList.remove('has-pane');
   renderMachines(); renderPane();
 }
 async function peek() {
   const x = current(), key = pane.key;
-  if (!x?.sessionId) return renderPane();
+  if (!x?.sessionId || termView(x)) return renderPane();
   try {
     const r = await api('/api/fleet/peek', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId });
     if (pane.key !== key) return; // switched away while it read
@@ -525,11 +580,145 @@ async function sendText(text) {
   if (!r.ok) { pane.items = (pane.items ?? []).filter((it) => !it.pending); if (!$('p-reply').value) $('p-reply').value = text; }
   renderPane(true); peek();
 }
+
+// ---------------------------------------------------------------- the live terminal
+// A background session opens as its own Claude Code screen, attached where it runs: what you type reaches it as yours,
+// /model, /effort and its permission prompts included. Letting go (another session, closing the pane) detaches; the
+// session keeps running.
+const tv = { key: null, term: null, fit: null, ctl: null, id: null, queue: '', sending: false, ended: false, ro: null };
+const TERM_THEME = { background: '#16181a', foreground: '#dcdfe1', cursor: '#3fb6ee', cursorAccent: '#16181a', selectionBackground: 'rgba(63,182,238,.3)' };
+async function openTerm(x) {
+  closeTerm();
+  const key = keyOf(x), el = $('p-term');
+  el.hidden = false;
+  tv.key = key;
+  try { await document.fonts.load('13px "IBM Plex Mono"'); } catch {}
+  if (tv.key !== key) return;
+  if (typeof Terminal === 'undefined') { el.textContent = 'The terminal did not load.'; return; }
+  const term = new Terminal({ fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace', fontSize: 13, lineHeight: 1.2, cursorBlink: true,
+    scrollback: 5000, theme: TERM_THEME, macOptionIsMeta: true });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  try { fit.fit(); } catch {}
+  const ctl = new AbortController();
+  Object.assign(tv, { term, fit, ctl, id: null, queue: '', sending: false, ended: false });
+  term.onData((d) => {
+    if (tv.term !== term) return;
+    if (tv.ended) { if (d === '\r') { const y = current(); if (y && attachable(y)) openTerm(y); } return; }
+    tv.queue += d; flushTerm();
+  });
+  term.onResize(({ cols, rows }) => { if (tv.term === term && tv.id) api('/api/term/resize', { term: tv.id, cols, rows }).catch(() => {}); });
+  tv.ro = new ResizeObserver(() => { if (el.clientWidth > 120 && el.clientHeight > 60) try { fit.fit(); } catch {} });
+  tv.ro.observe(el);
+  term.focus();
+  try {
+    const r = await fetch('/api/term/open', { method: 'POST', signal: ctl.signal, headers: { 'content-type': 'application/json', 'x-acp-token': TOKEN },
+      body: JSON.stringify({ machine: x.machine, profile: x.profile, id: x.id, cols: term.cols, rows: term.rows }) });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${r.status}`); }
+    tv.id = r.headers.get('x-term-id');
+    flushTerm();
+    const reader = r.body.getReader();
+    for (;;) { const { value, done } = await reader.read(); if (done || tv.term !== term) break; term.write(value); }
+  } catch (e) {
+    if (e.name === 'AbortError' || tv.term !== term) return;
+    term.write(`\r\n\x1b[31m${e.message}\x1b[0m`);
+  }
+  if (tv.term !== term) return;
+  tv.ended = true; tv.id = null;
+  term.write('\r\n\x1b[2mdetached · enter to attach again\x1b[0m\r\n');
+}
+/** Keys go in order, one request at a time; whatever was typed meanwhile goes with the next. */
+async function flushTerm() {
+  if (tv.sending || !tv.id || !tv.queue) return;
+  tv.sending = true;
+  const id = tv.id, data = tv.queue;
+  tv.queue = '';
+  await api('/api/term/input', { term: id, data }).catch(() => {});
+  tv.sending = false;
+  flushTerm();
+}
+function closeTerm() {
+  tv.ctl?.abort(); tv.ro?.disconnect(); tv.term?.dispose();
+  Object.assign(tv, { key: null, term: null, fit: null, ctl: null, id: null, queue: '', sending: false, ended: false, ro: null });
+  $('p-term').hidden = true; $('p-term').replaceChildren();
+}
+
+// ---------------------------------------------------------------- your name and group for it
+async function saveLabel(x, change) {
+  const r = await api('/api/fleet/label', { machine: x.machine, sessionId: x.sessionId, ...change }).catch((e) => ({ ok: false, error: String(e.message) }));
+  if (!r.ok) pane.said = { cls: 'no', text: r.error };
+  await load();
+}
+function titleField(x) {
+  const text = x.title ?? x.name ?? x.id ?? x.engine;
+  if (!x.sessionId) return h('div', { class: 'p-title', text, title: x.name ?? '' });
+  return h('div', { class: 'p-title', contenteditable: 'plaintext-only', spellcheck: 'false', role: 'textbox', 'aria-label': 'Name', title: 'Rename · empty puts the written one back', text,
+    onfocus: (e) => { e.target.dataset.was = e.target.textContent; },
+    onkeydown: (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+      if (e.key === 'Escape') { e.stopPropagation(); e.target.textContent = e.target.dataset.was; e.target.blur(); }
+    },
+    onblur: (e) => { const t = e.target.textContent.trim(); if (t !== e.target.dataset.was) saveLabel(x, { title: t }); } });
+}
+function groupField(x) {
+  if (!x.sessionId) return null;
+  return h('input', { class: 'p-group', list: 'fleet-groups', value: x.epic ?? '', placeholder: 'group', 'aria-label': 'Group', title: 'Group · type a new one to make it',
+    spellcheck: 'false', onchange: (e) => saveLabel(x, { group: e.target.value.trim() }), onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); } });
+}
+async function moveHere() {
+  const x = current();
+  if (!x) return;
+  if (!pane.armMove) { pane.armMove = true; renderPane(); setTimeout(() => { if (pane.armMove) { pane.armMove = false; renderPane(); } }, 4000); return; }
+  pane.armMove = false; pane.said = { cls: 'note', text: 'moving…' }; renderPane();
+  const r = await api('/api/fleet/adopt', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
+  pane.said = r.ok ? null : { cls: 'no', text: r.error };
+  pane.view = null;
+  await load();
+}
+
 function renderPane(toEnd = false) {
   const aside = $('pane'), x = current();
   aside.hidden = !pane.key;
+  applyPaneUi();
   if (!pane.key) return;
-  if (!x) { $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' })); $('p-body').replaceChildren(); $('p-foot').hidden = true; return; }
+  if (!x) {
+    closeTerm();
+    $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' }));
+    $('p-body').hidden = false; $('p-body').replaceChildren(); $('p-foot').hidden = true;
+    return;
+  }
+  const term = termView(x);
+  $('p-rail').replaceChildren(icon('unfold'), h('span', { class: `dot ${x.state}` }), h('span', { class: 'v', text: x.title ?? x.name ?? x.engine }));
+  $('p-rail').title = 'Unfold (⌘\\)';
+  // Never rebuilt under your caret: a name or group being typed stays as it is.
+  if (!document.activeElement?.matches?.('.p-title, .p-group')) renderHead(x, term);
+  if (term) {
+    $('p-body').hidden = true; $('p-foot').hidden = true;
+    if (tv.key !== pane.key) openTerm(x);
+    return;
+  }
+  if (tv.key) closeTerm();
+  // The conversation: stay at the bottom if you were there; leave your place if you had scrolled up to read.
+  const body = $('p-body'), atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+  body.hidden = false;
+  body.replaceChildren(...(pane.error ? [h('div', { class: 'it said', text: pane.error })]
+    : pane.items ? (pane.items.length ? conversation(pane.items.slice(-60)) : [h('div', { class: 'empty', text: '—' })])
+    : x.sessionId ? [h('div', { class: 'empty', text: '…' })] : [h('div', { class: 'empty', text: x.doing ?? x.args ?? '' })]));
+  if (toEnd || atEnd) body.scrollTop = body.scrollHeight;
+  // The message box: for a session that takes messages here; otherwise one line on how to make it. A background job gets
+  // it as yours; a Remote Control session as another session's note, so /model and /effort are for its own screen.
+  const talk = x.live && (x.via === 'background' || x.via === 'remote');
+  $('p-foot').hidden = false;
+  $('p-reply').hidden = !talk;
+  $('p-reply').disabled = pane.sending;
+  $('p-reply').placeholder = x.via === 'remote' ? 'Note to it' : 'Message it';
+  $('p-reply').title = x.via === 'remote' ? 'It reads this as a note from another session: use claude.ai or move it here for /model, /effort or a yes it needs from you' : '';
+  const how = !x.live ? null : !talk ? (x.via === 'app' || x.via === 'terminal' ? 'type /rc in it to message here' : null) : null;
+  $('p-tools').replaceChildren(...[pane.said ? h('span', { class: pane.said.cls, text: pane.said.text }) : null, how ? h('span', { class: 'note', text: how }) : null, h('span', { class: 'sp' })].filter(Boolean));
+  growReply();
+}
+function renderHead(x, term) {
   const c = x.context, cmd = attachCommand(x);
   // One control: close an open session, archive a closed one. A second click does it.
   const verb = x.live ? (x.via === 'app' || !x.sessionId ? null : 'close') : (x.sessionId || x.id ? 'archive' : null);
@@ -542,34 +731,22 @@ function renderPane(toEnd = false) {
       renderPane(); await load();
       if (r.ok && verb === 'archive') deselect();
     } });
+  const move = movable(x) ? h('button', { class: `act${pane.armMove ? ' armed' : ''}`, text: pane.armMove ? 'move here?' : 'move here',
+    title: 'Restart it in the background, conversation kept, and open its terminal here', onclick: moveHere }) : null;
+  const view = attachable(x) ? h('button', { class: 'act', text: term ? 'log' : 'terminal', onclick: () => { pane.view = term ? 'log' : null; renderPane(true); if (term) peek(); } }) : null;
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
+  const said = term && pane.said ? h('span', { class: pane.said.cls === 'no' ? 'cap' : '', text: pane.said.text }) : null;
   $('p-head').replaceChildren(
-    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}` }), h('div', { class: 'p-title', text: x.title ?? x.name ?? x.engine, title: x.name ?? '' }),
+    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}` }), titleField(x),
+      h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),
     h('div', { class: 'p-meta', title: [WORD[x.state], x.name, x.cwd, x.model].filter(Boolean).join('\n') },
       [x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
         .filter(Boolean).map((t) => h('span', { text: t }))),
-    h('div', { class: 'p-acts' }, act, test,
+    h('div', { class: 'p-acts' }, groupField(x), act, move, view, test,
       x.web ? h('a', { class: 'act', href: x.web, target: '_blank', rel: 'noopener' }, 'claude.ai', icon('ext')) : null,
-      cmd ? h('button', { class: 'act', text: 'attach', title: `Copy: ${cmd}`, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null));
-  // The conversation: stay at the bottom if you were there; leave your place if you had scrolled up to read.
-  const body = $('p-body'), atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
-  body.replaceChildren(...(pane.error ? [h('div', { class: 'it said', text: pane.error })]
-    : pane.items ? (pane.items.length ? conversation(pane.items.slice(-60)) : [h('div', { class: 'empty', text: '—' })])
-    : x.sessionId ? [h('div', { class: 'empty', text: '…' })] : [h('div', { class: 'empty', text: x.doing ?? x.args ?? '' })]));
-  if (toEnd || atEnd) body.scrollTop = body.scrollHeight;
-  // The message box: for a session that takes messages here; otherwise one line on how to make it.
-  const talk = x.live && (x.via === 'background' || x.via === 'remote');
-  $('p-foot').hidden = false;
-  $('p-reply').hidden = !talk;
-  $('p-reply').disabled = pane.sending;
-  const effort = talk && x.engine === 'claude' && x.web
-    ? h('select', { class: 'effort', title: 'its effort, from its next reply', 'aria-label': 'Effort', onchange: (e) => sendText(`/effort ${e.target.value}`) },
-        ['low', 'medium', 'high', 'xhigh', 'max'].map((v) => h('option', { value: v, text: v, selected: v === x.effort })))
-    : null;
-  const how = !x.live ? null : !talk ? (x.via === 'app' || x.via === 'terminal' ? 'type /rc in it to message here' : null) : null;
-  $('p-tools').replaceChildren(...[pane.said ? h('span', { class: pane.said.cls, text: pane.said.text }) : null, how ? h('span', { class: 'note', text: how }) : null, h('span', { class: 'sp' }), effort].filter(Boolean));
-  growReply();
+      cmd ? h('button', { class: 'act', text: 'attach', title: `Copy: ${cmd}`, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null,
+      said));
 }
 const growReply = () => { const t = $('p-reply'); t.style.height = 'auto'; t.style.height = `${Math.min(t.scrollHeight, 240)}px`; };
 $('p-reply').addEventListener('input', growReply);
@@ -577,14 +754,17 @@ $('p-reply').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); const t = $('p-reply').value; $('p-reply').value = ''; growReply(); sendText(t); }
 });
 document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === '\\' && pane.key) { e.preventDefault(); fold(!paneUi.min); return; }
   if (e.key !== 'Escape' || !pane.key) return;
+  if ($('p-term').contains(document.activeElement)) return; // Esc is Claude Code's there
   if (document.activeElement === $('p-reply') && $('p-reply').value) { $('p-reply').blur(); return; }
   deselect();
 });
 
 function row(x) {
   const c = x.context, on = pane.key === keyOf(x);
-  const what = x.state === 'working' ? (x.doing ?? x.said ?? '') : x.state === 'needs-you' ? (x.doing ?? x.said ?? '') : '';
+  const lifted = x.state === 'capped' && (resetOf(x.limitHit) ?? Infinity) < Date.now();
+  const what = x.state === 'working' || x.state === 'needs-you' ? (x.doing ?? x.said ?? '') : x.state === 'capped' ? (lifted ? 'its limit has lifted: tell it to go on' : x.limitHit?.text ?? '') : '';
   return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
       onclick: () => select(x), onkeydown: (e) => { if (e.key === 'Enter') select(x); } },
     h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }),
@@ -623,11 +803,19 @@ function renderMachines() {
       h('span', { class: 'nm', text: m.name }), m.ok === false ? h('span', { class: 'vitals hi', text: m.error ?? 'no answer' }) : vitals(m),
       tally(everything.filter((x) => x.machine === m.name)));
   }));
-  // Sessions by epic, in the order fleet.json lists them; open ones first, then closed, newest first within each.
-  const names = [...(snap.epics ?? []).map((e) => e.name), 'Other'];
+  // What needs you comes first, above every group: a question or a permission it waits on, then a limit it stopped at,
+  // the longest wait first. The tab's title carries the count.
+  const urgent = everything.filter((x) => x.live && (x.state === 'needs-you' || x.state === 'capped'))
+    .sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || ((a.lastAt ?? a.since ?? 0) - (b.lastAt ?? b.since ?? 0)));
+  document.title = urgent.length ? `(${urgent.length}) Fleet` : 'Fleet';
+  const top = urgent.length ? h('section', { class: 'epic urgent' }, h('header', {}, h('h2', { text: 'Needs you' }), tally(urgent)), urgent.map(row)) : null;
+  // Then by group: the epics in the order fleet.json lists them, then the groups you made; open ones first, then closed,
+  // newest first within each.
+  const names = [...(snap.epics ?? []).map((e) => e.name), ...(snap.groups ?? []), 'Other'];
+  $('fleet-groups').replaceChildren(...names.filter((n) => n !== 'Other').map((n) => h('option', { value: n })));
   const epicOf = (x) => (names.includes(x.epic) ? x.epic : 'Other');
   const blocks = names.map((name) => {
-    const shown = everything.filter((x) => epicOf(x) === name).sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || ((b.lastAt ?? b.startedAt ?? b.since ?? 0) - (a.lastAt ?? a.startedAt ?? a.since ?? 0)));
+    const shown = everything.filter((x) => epicOf(x) === name && !urgent.includes(x)).sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || ((b.lastAt ?? b.startedAt ?? b.since ?? 0) - (a.lastAt ?? a.startedAt ?? a.since ?? 0)));
     if (!shown.length) return null;
     const test = (snap.epics ?? []).find((e) => e.name === name)?.test;
     const closed = shown.filter((x) => !x.live);
@@ -644,7 +832,7 @@ function renderMachines() {
       shown.filter((x) => x.live).map(row),
       closed.length ? h('div', { class: 'shut' }, h('div', { class: 'bar' }, h('span', { text: `${closed.length} closed` }), sweep), closed.map(gone)) : null);
   }).filter(Boolean);
-  $('machines').replaceChildren(...blocks);
+  $('machines').replaceChildren(...[top, ...blocks].filter(Boolean));
 }
 
 // ---------------------------------------------------------------- load

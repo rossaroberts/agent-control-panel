@@ -105,6 +105,10 @@ test('waiting on a permission, a question or a plan: needs you', () => {
   assert.deepEqual(sessionState({ pid: 42, kind: 'background', state: 'blocked' }, turn(false, 1000), NOW), { state: 'needs-you', live: true });
 });
 
+test('a background job idle with no prompt yet reads blocked: it is open, not waiting on you', () => {
+  assert.deepEqual(sessionState({ pid: 45, kind: 'background', state: 'blocked', status: 'idle' }, turn(true, 60_000), NOW), { state: 'ready', live: true });
+});
+
 test('a background job with no process is not running: blocked and stopped jobs keep their record, and are closed', () => {
   assert.deepEqual(sessionState({ kind: 'background', state: 'blocked' }, turn(false, 101 * 86400_000), NOW), { state: 'closed', live: false });
 });

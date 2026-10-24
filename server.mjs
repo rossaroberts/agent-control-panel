@@ -28,6 +28,7 @@ import { admit, takeBuild } from './web-orders.mjs';
 import { workerOf, markStarted, rolledBack, checkForUpdate, recordCheck, lastCheck } from './update.mjs';
 import { checkClone, updateClone, appFor } from './clone-update.mjs';
 import { createFleet } from './fleet/fleet.mjs';
+import { createTerms } from './fleet/term.mjs';
 
 // `node server.mjs <command>` runs the CLI (cli.mjs) and never starts the server.
 if (process.argv.length > 2) { const { main } = await import('./cli.mjs'); process.exit(await main(process.argv.slice(2))); }
@@ -102,6 +103,9 @@ const HOME = os.homedir();
 const PREFS = prefsPath();
 // Every machine's agents and accounts in one view (fleet/); its machines are listed in fleet.json beside prefs.json.
 const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
+const terms = createTerms({ config: () => fleet.config() });
+// The terminal in Fleet's page: xterm.js, kept here so the page needs no network for it.
+const VENDOR = { 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8' };
 const HOOK_URL = `127.0.0.1:${PORT}/hook/`;
 function listProfiles() {
   let names = [];
@@ -1712,6 +1716,12 @@ async function handle(req, res) {
     return send(res, 200, fleetPage().replace('__ACP_TOKEN__', TOKEN), 'text/html; charset=utf-8');
   }
 
+  if (req.method === 'GET' && url.pathname.startsWith('/vendor/') && Object.hasOwn(VENDOR, url.pathname.slice(8))) {
+    const f = url.pathname.slice(8);
+    res.writeHead(200, { 'content-type': VENDOR[f], 'cache-control': 'max-age=86400' });
+    return res.end(fs.readFileSync(new URL(`./public/vendor/${f}`, import.meta.url)));
+  }
+
   if (req.method === 'GET' && url.pathname === '/world.js') {
     return send(res, 200, fs.readFileSync(new URL('./public/world.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
   }
@@ -1752,6 +1762,7 @@ async function handle(req, res) {
       const r = await launch(body);
       return send(res, r.ok ? 200 : 422, r);
     }
+    if (url.pathname === '/api/term/open') return terms.open(body, res);
     if (url.pathname === '/api/interrupt') {
       const r = interrupt(body);
       return send(res, r.ok ? 200 : 422, r);
@@ -1768,7 +1779,9 @@ async function handle(req, res) {
                       '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),
                       '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/send': (b) => fleet.send(b),
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
-                      '/api/fleet/archive-all': (b) => fleet.archiveAll(b) };
+                      '/api/fleet/archive-all': (b) => fleet.archiveAll(b),
+                      '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b),
+                      '/api/term/input': (b) => terms.input(b), '/api/term/resize': (b) => terms.resize(b) };
     if (Object.hasOwn(ACTIONS, url.pathname)) {
       let r;
       try { r = await ACTIONS[url.pathname](body); } catch (err) { r = { ok: false, error: String(err?.message ?? err).slice(0, 300) }; }

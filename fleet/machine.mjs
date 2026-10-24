@@ -272,7 +272,9 @@ export function sessionState(r, t, now = Date.now()) {
   // done but whose process still runs waits for your next message.
   if (r.state === 'stopped' || r.state === 'failed' || !r.pid) return { state: 'closed', live: false };
   const live = true;
-  if (r.status === 'waiting' || r.waitingFor || r.state === 'blocked') return { state: 'needs-you', live };
+  // A background job reads `blocked` both on a question to you and when it sits idle with no prompt yet: only the first
+  // needs you.
+  if (r.status === 'waiting' || r.waitingFor || (r.state === 'blocked' && r.status !== 'idle')) return { state: 'needs-you', live };
   if (t?.limitHit && t.limitHit.at >= (t.lastAt ?? 0) - 120_000) return { state: 'capped', live };
   const busy = r.status === 'busy' || r.state === 'working' || r.state === 'running';
   if (busy && !(t?.turnOver && now - (t.writtenAt ?? now) > 60_000)) return { state: 'working', live };
@@ -829,31 +831,30 @@ export async function send(a) {
   const argsOf = process.platform === 'linux'
     ? (() => { try { return fs.readFileSync(`/proc/${row.pid}/cmdline`, 'utf8').split('\0'); } catch { return []; } })()
     : (await run('ps', ['-ww', '-o', 'args=', '-p', String(row.pid)])).stdout.split(' ');
+  // That way the session reads it as another Claude session's note, not yours: it acts on it, but won't take /model,
+  // /effort or anything that needs you. A background job takes it as yours (below), so only the others go this way.
   const cse = remoteId(sessionRecord(p, row.pid)?.bridgeSessionId)?.slice('session_'.length)
     ?? argsOf.map((v) => /\/v1\/code\/sessions\/cse_(\w+)/.exec(v)?.[1]).find(Boolean);
-  if (cse) {
+  if (row.kind !== 'background') {
+    if (!cse) return { ok: false, error: 'Type /rc in its terminal once, then it takes messages here.' };
     if (text.startsWith('-')) return { ok: false, error: 'Start it with a word, not a dash.' };
     const r = await run(bin('claude'), ['-p', '--cloud', `session_${cse}`, text], { env: profileEnv(p), cwd: row.cwd ?? HOME, timeout: 60_000 });
     return /Sent to cloud session/.test(r.stdout + r.stderr) ? { ok: true } : { ok: false, error: oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'It did not take the message.' };
   }
-  if (row.kind !== 'background') return { ok: false, error: 'Type /rc in its terminal once, then it takes messages here.' };
-  if (/^[/!]/.test(text)) return { ok: false, error: 'Start it with a word: a / or ! message is not sent this way.' };
+  if (/^[/!]/.test(text)) return { ok: false, error: 'Type a / or ! command in its terminal.' };
   // A job still running an older Claude Code than the one installed (it updates itself) never gets a message the new one
   // hands it. `claude respawn` restarts it on the current one, conversation kept: done for an idle job, never mid-work.
   const now = /^([\d.]+)/.exec((await run(bin('claude'), ['--version'])).stdout.trim())?.[1];
   const its = await versionOf(row.pid);
+  let respawned = null;
   if (now && its && its !== now) {
+    respawned = now;
     if (row.status === 'busy' || row.state === 'working') return { ok: false, error: `It runs Claude Code ${its}, older than ${now}: it can take messages once it is idle and respawned.` };
     const r = await run(bin('claude'), ['respawn', row.id], { env: profileEnv(p), timeout: 60_000 });
     if (r.err) return { ok: false, error: `It runs Claude Code ${its}; respawning it on ${now} failed: ${oneLine(r.stderr || r.err.message, 200)}` };
     for (let i = 0; i < 20; i++) {
       await new Promise((ok) => setTimeout(ok, 500));
       try { const again = JSON.parse((await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) })).stdout).find((x) => x.id === row.id); if (again?.pid && again.pid !== row.pid) { row = again; break; } } catch {}
-    }
-    const id = remoteId(sessionRecord(p, row.pid)?.bridgeSessionId);
-    if (id) {
-      const c = await run(bin('claude'), ['-p', '--cloud', id, text], { env: profileEnv(p), cwd: row.cwd ?? HOME, timeout: 60_000 });
-      if (/Sent to cloud session/.test(c.stdout + c.stderr)) return { ok: true, respawned: now };
     }
   }
   const file = transcriptOf(p, row.sessionId, row.cwd);
@@ -878,7 +879,7 @@ export async function send(a) {
   }
   await new Promise((r) => setTimeout(r, seen ? 800 : 0));
   try { process.kill(-child.pid, 'SIGTERM'); } catch {}
-  if (seen) return { ok: true };
+  if (seen) return { ok: true, ...(respawned && { respawned }) };
   const said = out.replace(/\x1b\[[0-9;?<>]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0e-\x1f]/g, '').replace(/\s+/g, ' ').trim().slice(-200);
   return { ok: false, error: `It did not take the message.${said ? ` Claude Code said: ${said}` : ''}` };
 }
@@ -918,12 +919,52 @@ export async function archive(a) {
   return r.err && !/not found|no such/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true };
 }
 
+const MODES = new Set(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan']);
+/** Move an idle session into the background, conversation kept, so it opens as a terminal here: its process is closed the
+ *  way close() does it, then `claude --bg --resume <id>` continues it under the same id, in its folder, on its model and
+ *  permission mode. Never while it works or waits on you, and never a desktop-app session. */
+export async function adopt(a) {
+  const p = claudeProfiles().find((x) => x.id === a?.profile);
+  if (!p) return { ok: false, error: 'There is no such account here.' };
+  const roster = await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) });
+  let row = null;
+  try { row = JSON.parse(roster.stdout).find((r) => r.sessionId === a.sessionId); } catch {}
+  if (!row) return { ok: false, error: 'It is not listed any more.' };
+  if (row.kind === 'background' && row.pid) return { ok: true, id: row.id };
+  if (!Number.isInteger(row.pid) || row.pid <= 1) return { ok: false, error: 'It is not running.' };
+  if (row.status === 'busy' || row.status === 'waiting' || row.waitingFor) return { ok: false, error: 'It is busy: move it once it is idle.' };
+  if (sessionRecord(p, row.pid)?.entrypoint === 'claude-desktop') return { ok: false, error: 'It runs in the Claude app.' };
+  const file = row.cwd && transcriptOf(p, row.sessionId, row.cwd);
+  if (!file) return { ok: false, error: 'It has no saved conversation to continue.' };
+  const t = readTranscript(file);
+  if (t.turnOver === false) return { ok: false, error: 'It is mid-turn: move it once it is idle.' };
+  const argv = process.platform === 'linux'
+    ? (() => { try { return fs.readFileSync(`/proc/${row.pid}/cmdline`, 'utf8').split('\0'); } catch { return []; } })()
+    : (await run('ps', ['-ww', '-o', 'args=', '-p', String(row.pid)])).stdout.trim().split(/\s+/);
+  const mode = argv.includes('--dangerously-skip-permissions') ? 'bypassPermissions' : argv[argv.indexOf('--permission-mode') + 1];
+  const closed = await close(a);
+  if (!closed.ok) return closed;
+  for (let i = 0; i < 40; i++) { try { process.kill(row.pid, 0); } catch { break; } await new Promise((r) => setTimeout(r, 250)); }
+  const args = ['--bg', '--resume', row.sessionId];
+  if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
+  if (MODES.has(mode)) args.push('--permission-mode', mode);
+  const r = await run(bin('claude'), args, { cwd: row.cwd, env: profileEnv(p), timeout: 30_000 });
+  const id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
+  // Claude Code makes a copy when it still sees the old process: take the copy away rather than leave two.
+  if (id && /started a copy/.test(r.stdout + r.stderr)) {
+    await run(bin('claude'), ['stop', id], { env: profileEnv(p) });
+    await run(bin('claude'), ['rm', id], { env: profileEnv(p) });
+    return { ok: false, error: 'It had not finished closing. Try again in a moment.' };
+  }
+  return id ? { ok: true, id } : { ok: false, error: `It was closed but did not start again: ${oneLine(r.stderr || r.stdout || r.err?.message, 240) || 'claude --bg --resume failed'}. Resume it with claude --resume ${row.sessionId}` };
+}
+
 // ---------------------------------------------------------------- run over SSH: `FLEET_DO=collect node --input-type=module -`
 
 if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
   const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
-                 close: () => close(args), archive: () => archive(args) }[process.env.FLEET_DO];
+                 close: () => close(args), archive: () => archive(args), adopt: () => adopt(args) }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };
   process.stdout.write(JSON.stringify(r));
 }

@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere } from './machine.mjs';
+import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 
 const SCRIPT = new URL('./machine.mjs', import.meta.url);
@@ -45,6 +45,10 @@ export function createFleet({ dir, quiet = () => {} }) {
   const archivedFile = path.join(dir, 'fleet-archived.json');
   let archived = {};
   try { archived = JSON.parse(fs.readFileSync(archivedFile, 'utf8')); } catch {}
+  // Your own name and group for a session, over Haiku's title and epic: `machine:sessionId` → { title, group }.
+  const labelsFile = path.join(dir, 'fleet-labels.json');
+  let labels = {};
+  try { labels = JSON.parse(fs.readFileSync(labelsFile, 'utf8')); } catch {}
   const host = os.hostname().replace(/\.local$/, '');
 
   function config() {
@@ -70,7 +74,7 @@ export function createFleet({ dir, quiet = () => {} }) {
       : `${env} node --input-type=module -`;
     return new Promise((resolve) => {
       const child = execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', m.ssh, cmd],
-        { timeout: todo === 'launch' ? 150_000 : SSH_MS, maxBuffer: 16_000_000 },
+        { timeout: todo === 'launch' || todo === 'adopt' ? 150_000 : SSH_MS, maxBuffer: 16_000_000 },
         (err, stdout, stderr) => {
           try { return resolve(JSON.parse(String(stdout))); } catch {}
           resolve({ ok: false, error: String(stderr || err?.message || 'no answer').trim().split('\n').at(-1).slice(0, 300) });
@@ -159,12 +163,14 @@ export function createFleet({ dir, quiet = () => {} }) {
         // An archived session that runs again (resumed) is back on the page.
         a.sessions = (a.sessions ?? []).filter((x) => x.live || !archived[`${m.name}:${x.sessionId ?? x.id}`]);
         for (const x of a.sessions) {
-          const t = titles[`${m.name}:${x.sessionId}`];
-          Object.assign(x, { title: t?.title ?? null, stage: t?.stage ?? null, epic: t?.epic ?? null });
+          const t = titles[`${m.name}:${x.sessionId}`], l = labels[`${m.name}:${x.sessionId}`];
+          Object.assign(x, { title: l?.title ?? t?.title ?? null, stage: t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
         }
       }
       writeTitles(reads);
-      const fresh = { ok: true, at: Date.now(), machines: reads, names, epics, configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
+      // Groups you made, after the epics in fleet.json.
+      const groups = [...new Set(Object.values(labels).map((l) => l.group).filter((g) => g && !epics.some((e) => e.name === g)))].sort();
+      const fresh = { ok: true, at: Date.now(), machines: reads, names, epics, groups, configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
       // A close, archive, message or launch that landed while this read ran makes it out of date: hand it back, keep none.
       if (gen === readGen) last = fresh;
       inflight = null;
@@ -242,6 +248,32 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true };
   }
 
+  /** Your name or group for a session; an empty one puts Haiku's back. */
+  function label(body) {
+    const machine = String(body?.machine ?? ''), sid = String(body?.sessionId ?? '');
+    if (!NAME.test(machine) || !/^[0-9a-f-]{36}$|^[\w-]{8,60}$/i.test(sid)) return { ok: false, error: 'Pick a session.' };
+    const key = `${machine}:${sid}`, l = { ...labels[key] };
+    if (typeof body.title === 'string') { const t = clean(body.title, 60); if (t) l.title = t; else delete l.title; }
+    if (typeof body.group === 'string') {
+      const g = clean(body.group, 40);
+      if (g && !NAME.test(g)) return { ok: false, error: 'A group name uses letters, digits, spaces, dots and dashes.' };
+      if (g) l.group = g; else delete l.group;
+    }
+    if (Object.keys(l).length) labels[key] = l; else delete labels[key];
+    try { fs.writeFileSync(labelsFile + '.tmp', JSON.stringify(labels)); fs.renameSync(labelsFile + '.tmp', labelsFile); } catch {}
+    changed();
+    return { ok: true };
+  }
+
+  /** Move an idle session into the background, conversation kept, so it opens as a terminal here. */
+  async function adopt(body) {
+    const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? '') };
+    if (!/^[\w.-]{1,40}$/.test(args.profile) || !/^[0-9a-f-]{36}$/.test(args.sessionId)) return { ok: false, error: 'Pick a session.' };
+    const r = await onMachine(String(body?.machine ?? ''), 'adopt', args, adoptHere);
+    changed();
+    return r;
+  }
+
   /** Archive several closed sessions at once (an epic's): each as archive() does; a job record that refuses stays. */
   async function archiveAll(body) {
     const list = Array.isArray(body?.sessions) ? body.sessions.slice(0, 300) : [];
@@ -251,5 +283,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, config };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, config };
 }
