@@ -156,9 +156,11 @@ what each one is working on, talk to it, and decide where the next one goes. The
   (`fleet-workers --dispatch`) on a machine with the fleet kit.
 - **Needs you**, above everything: every session waiting on a question or permission, then every one stopped at a limit,
   the longest wait first, each with what it waits on under it. The tab's title carries the count.
-- **Sessions**, grouped by epic (`epics` in `fleet.json`), then by the groups you make: each with a title of a few words
-  and a stage (planning, building, testing, promoting, deploying) that Sonnet writes from what you asked it last, what it
-  said last and its last steps (a continued session by its summary's request, not Claude Code's boilerplate), its machine,
+- **Sessions**, grouped by epic (`epics` in `fleet.json`), then by the groups you make: each under its own name (the
+  one it has in Claude Code: the app's, claude.ai's, `/rename`'s, or the one you give it in Fleet's launcher or pane);
+  only one whose Claude Code name is a placeholder (`chai-expense-tracker-54`) gets a title Sonnet writes from what it
+  was asked last, said last and did last. Sonnet also gives each a stage (planning, building, testing, promoting,
+  deploying) and an epic. Its machine,
   account, effort, how full its context is, and about how much of its account's weekly limit it used. Every session is
   listed: open ones first, then one "N closed" line that opens them. An epic's closed sessions archive in one go.
 - **Click a session** and it opens on the right, full height, as a terminal window: one line on top (its name, which is

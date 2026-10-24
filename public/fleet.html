@@ -78,6 +78,7 @@ svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-widt
 .write textarea::placeholder { color: var(--grey); }
 .how { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 22px; margin-top: 12px; font-size: 13px; }
 .how select, .how input { color: var(--grey); border-bottom: 1px dotted var(--quiet); padding-bottom: 1px; }
+#name { width: 14ch; }
 .how select { appearance: none; -webkit-appearance: none; }
 .how select:hover, .how input:hover, .how input:focus { color: var(--ink); border-bottom-color: var(--ink); outline: none; }
 .how .sp { flex: 1; }
@@ -233,6 +234,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
       <select id="acct" aria-label="Account" title="Account"></select>
       <select id="mach" aria-label="Machine" title="Machine"></select>
       <input id="cwd" list="cwds" spellcheck="false" aria-label="Folder" title="Folder"><datalist id="cwds"></datalist>
+      <input id="name" spellcheck="false" maxlength="60" placeholder="name" aria-label="Name" title="Its name (yours to give; Claude Code shows it too)">
       <select id="model" aria-label="Model" title="Model">
         <option value="">default</option><option value="opus">opus</option><option value="opus[1m]">opus 1m</option>
         <option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="fable">fable</option></select>
@@ -419,7 +421,7 @@ function renderHow() {
   if (!where.includes(pickMachine)) pickMachine = where[0];
   $('mach').replaceChildren(...where.map((n) => h('option', { value: n, text: n, selected: n === pickMachine })));
   $('cwd').hidden = isFleet();
-  $('model').hidden = $('effort').hidden = sub?.engine !== 'claude';
+  $('model').hidden = $('effort').hidden = $('name').hidden = sub?.engine !== 'claude';
   // The folders this account works in on this machine, the latest first: they are trusted, so a start there takes.
   const used = (sub?.sessions ?? []).filter((x) => x.machine === pickMachine && x.cwd).sort((a, b) => (b.lastAt ?? b.startedAt ?? 0) - (a.lastAt ?? a.startedAt ?? 0)).map((x) => x.cwd);
   const folders = [...new Set([store.get('folder.' + pickMachine), ...used].filter(Boolean))].slice(0, 12);
@@ -443,14 +445,17 @@ async function fire() {
   if (!prompt) { $('prompt').focus(); return; }
   const sub = subs.find((s) => s.key === pickKey), place = sub?.places.find((p) => p.machine === pickMachine);
   const body = { machine: pickMachine, engine: isFleet() ? 'fleet' : sub.engine, profile: place?.profile ?? '', cwd: $('cwd').value, prompt,
-                 model: sub?.engine === 'claude' ? $('model').value : '', effort: sub?.engine === 'claude' ? $('effort').value : '' };
+                 model: sub?.engine === 'claude' ? $('model').value : '', effort: sub?.engine === 'claude' ? $('effort').value : '',
+                 name: sub?.engine === 'claude' ? $('name').value.trim() : '' };
   said.className = 'fired'; said.textContent = '…'; $('fire').disabled = true;
   store.set('machine', pickMachine);
   try {
     const r = await api('/api/fleet/launch', body);
     if (r.ok) {
-      said.className = 'fired ok'; said.textContent = `started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; grow(); setTimeout(load, 1500);
+      said.className = 'fired ok'; said.textContent = `started${r.id ? ` ${r.id}` : ''}`; $('prompt').value = ''; $('name').value = ''; grow(); setTimeout(load, 1500);
       if (!isFleet()) store.set('folder.' + body.machine, r.cwd ?? body.cwd);
+      // The name you gave is its title here too, once it is listed (a few seconds).
+      if (body.name && r.id) (async () => { for (let i = 0; i < 12; i++) { await new Promise((ok) => setTimeout(ok, 2000)); const y = everything.find((s) => s.machine === body.machine && s.id === r.id); if (y?.sessionId) return saveLabel(y, { title: body.name }); } })();
     } else if (r.untrusted) {
       // Only you can trust a folder, at Claude Code's own prompt: open it in the pane, then Fire again.
       said.className = 'fired no';

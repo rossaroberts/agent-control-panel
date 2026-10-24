@@ -774,7 +774,7 @@ export async function launch(a) {
   const prompt = typeof a?.prompt === 'string' ? a.prompt.trim() : '';
   if (!prompt || prompt.length > 20_000) return { ok: false, error: 'Write a prompt (up to 20,000 characters).' };
   const name = String(a.name ?? '').trim();
-  if (name && !/^[\w .-]{1,60}$/.test(name)) return { ok: false, error: 'A name can use letters, digits, spaces, dots and dashes, 60 at most.' };
+  if (name && !/^[^\x00-\x1f\x7f]{1,60}$/.test(name)) return { ok: false, error: 'A name is one line, 60 characters at most.' };
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const logs = path.join(HOME, '.fleet-panel', 'logs');
 

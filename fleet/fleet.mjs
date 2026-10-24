@@ -35,6 +35,7 @@ const titleSchema = (epics) => ({ type: 'object', additionalProperties: false, r
 const TITLE_BATCH = 40;
 // A working session's stage moves on without a new ask (building, then testing, then promoting): ask again this often.
 const RESTAGE_MS = 10 * 60_000;
+const PLACEHOLDER = /^[\w.-]+-[0-9a-f]{2}$/; // the name Claude Code makes up for an unnamed session
 const clean = (v, n) => String(v ?? '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
 
 // The worker each machine keeps for the panel (see worker() below): it reads machine.mjs as base64 on its first line,
@@ -258,7 +259,11 @@ export function createFleet({ dir, quiet = () => {} }) {
         a.sessions = (a.sessions ?? []).filter((x) => x.live || !archived[`${m.name}:${x.sessionId ?? x.id}`]);
         for (const x of a.sessions) {
           const t = titles[`${m.name}:${x.sessionId}`], l = labels[`${m.name}:${x.sessionId}`];
-          Object.assign(x, { title: l?.title ?? t?.title ?? null, stage: t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
+          // Its name: yours, else the one it has in Claude Code (the app's, claude.ai's, /rename's), else a written one, but
+          // only where Claude Code's is a placeholder (its folder and two characters, "chai-expense-tracker-54").
+          // (A Codex session's "name" is only the app that ran it.)
+          const own = a.engine === 'claude' && typeof x.name === 'string' && x.name.trim() && !PLACEHOLDER.test(x.name.trim()) ? x.name.trim() : null;
+          Object.assign(x, { title: l?.title ?? own ?? t?.title ?? x.name ?? null, stage: t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
         }
       }
       writeTitles(reads);
