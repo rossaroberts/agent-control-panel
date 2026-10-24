@@ -206,7 +206,8 @@ export function createFleet({ dir, quiet = () => {} }) {
       if (Array.isArray(list)) {
         for (const t of list) {
           const b = batch[Number(t?.id)];
-          if (b && typeof t.title === 'string' && t.title.trim()) titles[b.key] = { h: b.h, title: clean(t.title, 40), stage: STAGES.includes(t.stage) ? t.stage : null,
+          // A title, once written, stays: only its stage and epic move on.
+          if (b && typeof t.title === 'string' && t.title.trim()) titles[b.key] = { h: b.h, title: titles[b.key]?.title ?? clean(t.title, 40), stage: STAGES.includes(t.stage) ? t.stage : null,
             epic: [...epics.map((e) => e.name), 'Other'].includes(t.epic) ? t.epic : 'Other', at: Date.now() };
         }
         // Keep a fortnight of them.

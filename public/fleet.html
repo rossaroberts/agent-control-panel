@@ -558,7 +558,7 @@ const remember = (key, items) => { seen.delete(key); seen.set(key, { items, at: 
 let hoverTimer = null;
 function prefetch(x) {
   clearTimeout(hoverTimer);
-  if (attachable(x)) { if (!terms.has(keyOf(x))) hoverTimer = setTimeout(() => attachTerm(x), 200); return; }
+  if (attachable(x)) { if (!terms.has(keyOf(x))) hoverTimer = setTimeout(() => attachTerm(x), 350); return; }
   if (!x?.sessionId || attachable(x) || keyOf(x) === pane.key || Date.now() - (seen.get(keyOf(x))?.at ?? 0) < 15_000) return;
   hoverTimer = setTimeout(async () => {
     const r = await api('/api/fleet/peek', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => null);
@@ -647,7 +647,7 @@ async function sendText(text) {
 // to one is instant, and hovering one attaches ahead of your click. Where a key takes long to come back (another machine,
 // a quarter of a second away), what you type shows at once over the cursor until its real screen catches up: an overlay,
 // so the terminal's own contents are never touched. /exit ends the session and closes the pane.
-const KEEP = 4;
+const KEEP = 3;
 const terms = new Map(); // key → one attached terminal
 let shown = null, lastSize = { cols: 100, rows: 30 };
 const TERM_THEME = { background: '#16181a', foreground: '#dcdfe1', cursor: '#3fb6ee', cursorAccent: '#16181a', selectionBackground: 'rgba(63,182,238,.3)' };
@@ -694,6 +694,9 @@ async function stream(T) {
       if (T.sentAt) { const took = Date.now() - T.sentAt; T.rtt = T.rtt ? T.rtt * 0.7 + took * 0.3 : took; T.sentAt = 0; }
       const now = Date.now();
       T.pend = T.pend.filter((p) => p.at > now - Math.max(40, T.rtt * 0.7)); // what has had time to come back has
+      // Out of sight it stays connected but draws nothing (a busy session redraws all the time): shown again, its
+      // screen is drawn afresh.
+      if (T.el.hidden) { T.stale = true; continue; }
       term.write(value, () => drawGhost(T));
     }
   } catch (e) {
@@ -750,10 +753,21 @@ function showTerm(x) {
   if (shown !== T.key) {
     for (const o of terms.values()) o.el.hidden = o !== T;
     shown = T.key;
+    if (T.stale) redraw(T);
     if (!T.gl && window.WebglAddon) { try { T.gl = new WebglAddon.WebglAddon(); T.gl.onContextLoss(() => { T.gl?.dispose(); T.gl = null; }); T.term.loadAddon(T.gl); } catch { T.gl = null; } }
     fitShown(x.state !== 'needs-you'); // a session waiting on you doesn't take the next Enter by accident
   }
   T.used = Date.now();
+}
+/** A terminal shown again after drawing nothing out of sight: start clean and have the program draw its screen again,
+ *  by changing its size and back (every full-screen program redraws on that). */
+function redraw(T) {
+  T.stale = false;
+  T.term.reset();
+  if (!T.id) return;
+  const { cols, rows } = T.term;
+  api('/api/term/resize', { term: T.id, cols: Math.max(20, cols - 1), rows }).catch(() => {})
+    .then(() => new Promise((ok) => setTimeout(ok, 60))).then(() => api('/api/term/resize', { term: T.id, cols, rows })).catch(() => {});
 }
 function fitShown(focus = false) {
   const T = terms.get(shown);
