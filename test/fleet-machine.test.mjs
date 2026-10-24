@@ -71,6 +71,20 @@ test('a Codex home: who it is, its limits, and a session with its context and la
   assert.ok(!JSON.stringify(r).includes('secret'), 'no token leaves the machine');
 });
 
+test('a Codex session whose newest call asks you something, unanswered: needs you, its question shown', () => {
+  const h = home(), d = new Date();
+  const day = path.join(h, '.codex', 'sessions', String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0'));
+  const t = (s) => new Date(Date.now() - 60_000 + s * 1000).toISOString();
+  fs.writeFileSync(path.join(day, 'rollout-s-2.jsonl'), [
+    { timestamp: t(0), type: 'session_meta', payload: { id: 's-2', cwd: path.join(h, 'repo'), timestamp: t(0), originator: 'Codex Desktop', source: 'vscode' } },
+    { timestamp: t(1), type: 'event_msg', payload: { type: 'task_started' } },
+    { timestamp: t(2), type: 'response_item', payload: { type: 'function_call', name: 'request_user_input_async', arguments: '{"question":"Which batch should I post?"}' } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const s = collect(h).accounts.find((x) => x.engine === 'codex').sessions.find((x) => x.sessionId === 's-2');
+  assert.equal(s.state, 'needs-you');
+  assert.equal(s.doing, 'Asks you: Which batch should I post?');
+});
+
 test('no fleet kit, no fleet', () => {
   assert.equal(collect(home()).fleet, null);
 });

@@ -524,6 +524,7 @@ function readRollout(f, m, open) {
   let firstAsk = null, lastAsk = null;
   for (const l of headLines(f)) if ((firstAsk = userText(parse(l)))) break;
   let tokens = null, limits = null, doing = null, said = null, done = null, lastAt = null, model = null, effort = null;
+  let asking = null; // its newest call is a question to you that nothing has answered yet
   const lines = tail(f);
   for (let i = lines.length - 1; i >= 0; i--) {
     const d = parse(lines[i]);
@@ -535,22 +536,25 @@ function readRollout(f, m, open) {
     if (p.type === 'token_count' && !tokens) { tokens = p.info ?? null; limits = p.rate_limits ?? null; }
     if (p.type === 'task_complete' && done === null) { done = true; said ??= oneLine(p.last_agent_message, 400); }
     if ((p.type === 'task_started' || p.type === 'user_message') && done === null) done = false;
+    if (asking === null && (p.type === 'function_call' || p.type === 'function_call_output')) asking = p.type === 'function_call' && /request_user_input|ask_user/i.test(p.name ?? '');
     if (p.type === 'function_call' && !doing) {
       let x = {};
       try { x = JSON.parse(p.arguments ?? '{}'); } catch {}
       const cmd = Array.isArray(x.command) ? x.command.join(' ') : x.cmd ?? x.command;
-      doing = oneLine(cmd ? `Run ${String(cmd).split('\n')[0]}` : p.name === 'apply_patch' ? 'Edit files' : p.name, 200);
+      const q = x.question ?? x.prompt ?? x.message ?? x.questions?.[0]?.question;
+      doing = oneLine(asking ? `Asks you${q ? `: ${q}` : ''}` : cmd ? `Run ${String(cmd).split('\n')[0]}` : p.name === 'apply_patch' ? 'Edit files' : p.name, 200);
     }
     if (!said) said = oneLine(codexText(d, 'assistant'), 400);
     if (tokens && done !== null && (doing || said) && model && lastAsk) break;
   }
   const size = tokens?.model_context_window ?? null, used = tokens?.last_token_usage?.input_tokens ?? null;
   // Open while a running Codex holds its log; without a process scan, while it was written in the last ten minutes.
-  const live = Boolean(open?.has(f)) || Date.now() - m < CODEX_LIVE_MS;
+  // A question to you stays up until it is answered (the Codex app keeps it open), up to three days.
+  const live = Boolean(open?.has(f)) || Date.now() - m < CODEX_LIVE_MS || (asking === true && Date.now() - m < 3 * DAY);
   return {
     session: { engine: 'codex', id: meta.id ?? path.basename(f, '.jsonl'), sessionId: meta.id ?? null,
                name: oneLine(meta.originator, 60), kind: meta.source ?? null, live,
-               state: !live ? 'closed' : done === false ? 'working' : 'ready',
+               state: !live ? 'closed' : asking ? 'needs-you' : done === false ? 'working' : 'ready',
                cwd: tilde(meta.cwd ?? null), startedAt: Date.parse(meta.timestamp) || null, lastAt: lastAt ?? m, model,
                context: size && used != null ? { pct: Math.round((1000 * used) / size) / 10, tokens: used, size } : null,
                doing, said, firstAsk, lastAsk: lastAsk ?? firstAsk, effort,
