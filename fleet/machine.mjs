@@ -294,9 +294,10 @@ function statusSnapshots(p, learned) {
  * session whose turn is over and whose transcript has been still for a minute reads ready.
  */
 export function sessionState(r, t, now = Date.now()) {
-  // Open means a process: a background job without one (blocked, stopped, or ended) only keeps its record. One whose turn is
-  // done but whose process still runs waits for your next message.
-  if (r.state === 'stopped' || r.state === 'failed' || !r.pid) return { state: 'closed', live: false };
+  // Open means a process, or a background job Claude Code still lists as active (one waiting at a startup question, trust
+  // or a project's MCP servers, has no process of its own yet). Any other job without one only keeps its record. One whose
+  // turn is done but whose process still runs waits for your next message.
+  if (r.state === 'stopped' || r.state === 'failed' || !(r.pid || r.active)) return { state: 'closed', live: false };
   const live = true;
   // A background job reads `blocked` both on a question to you and when it sits idle with no prompt yet: only the first
   // needs you.
@@ -309,10 +310,13 @@ export function sessionState(r, t, now = Date.now()) {
 
 async function claudeProfile(p, learned, usage) {
   const env = profileEnv(p), claude = bin('claude');
-  const [auth, roster] = await Promise.all([
+  const [auth, roster, active] = await Promise.all([
     run(claude, ['auth', 'status', '--json'], { env, timeout: 8000 }),
     run(claude, ['agents', '--json', '--all'], { env, timeout: 8000 }),
+    run(claude, ['agents', '--json'], { env, timeout: 8000 }), // without --all: only what is running
   ]);
+  let running = new Set();
+  try { running = new Set(JSON.parse(active.stdout).map((r) => r.sessionId ?? r.id)); } catch {}
   const cfg = readJson(p.config)?.oauthAccount ?? null;
   let a = null;
   try { a = JSON.parse(auth.stdout); } catch {}
@@ -328,6 +332,7 @@ async function claudeProfile(p, learned, usage) {
   else { try { list = JSON.parse(roster.stdout); } catch { error = 'claude agents --json returned non-JSON'; } }
   const settings = readJson(path.join(p.dir, 'settings.json')) ?? {};
   const sessions = list.filter((r) => r?.sessionId).map((r) => {
+    if (running.has(r.sessionId)) r.active = true;
     const file = transcriptOf(p, r.sessionId, r.cwd);
     const t = file ? readTranscript(file) : {};
     const sl = bySession.get(r.sessionId);
@@ -1001,7 +1006,9 @@ export async function fork(a) {
   if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
   const r = await run(bin('claude'), args, { cwd: row.cwd, env: profileEnv(p), timeout: 30_000 });
   const id = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
-  return id ? { ok: true, id } : { ok: false, error: oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg --resume --fork-session failed' };
+  if (id) return { ok: true, id };
+  const why = oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg --resume --fork-session failed';
+  return /^Workspace not trusted/.test(why) ? { ok: false, untrusted: true, cwd: tilde(row.cwd), error: why } : { ok: false, error: why };
 }
 
 // ---------------------------------------------------------------- run over SSH: `FLEET_DO=collect node --input-type=module -`

@@ -819,10 +819,16 @@ async function continueHere() {
   pane.armMove = false; pane.moving = true; pane.said = null; renderPane();
   const r = await api('/api/fleet/fork', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
   pane.moving = false;
+  if (r.untrusted) { openTrust({ machine: x.machine, profile: x.profile, cwd: r.cwd, sub: x.sub }); return; }
   if (!r.ok) { pane.said = { cls: 'no', text: r.error }; renderPane(); return; }
-  await load();
-  const y = everything.find((s) => s.machine === x.machine && s.id === r.id);
-  if (y) select(y);
+  // The copy takes a few seconds to be listed: open it as soon as it is (it may first ask you something at startup).
+  for (let i = 0; i < 12; i++) {
+    await load();
+    const y = everything.find((s) => s.machine === x.machine && s.id === r.id && s.live);
+    if (y) return select(y);
+    await new Promise((ok) => setTimeout(ok, 1500));
+  }
+  pane.said = { cls: 'no', text: `Its copy (${r.id}) started but isn't listed yet: look for it in a moment` }; renderPane();
 }
 function renderPane(toEnd = false) {
   const aside = $('pane'), x = current();
