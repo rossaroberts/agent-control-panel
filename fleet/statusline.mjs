@@ -32,6 +32,22 @@ if (id) {
   } catch {}
 }
 
+/** Its context against the point it compacts at, by this profile's settings (the same rule as fleet/machine.mjs's
+ *  compactAt), else against its window. */
+function contextPct(d) {
+  const cw = d.context_window, u = cw.current_usage, window = cw.context_window_size;
+  if (!u || !window) return cw.used_percentage;
+  const tokens = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+  let settings = {};
+  try { settings = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')); } catch {}
+  const id = String(d.model?.id ?? '').replace(/\[1m\]$/, '');
+  const per = settings?.modelSettings && typeof settings.modelSettings === 'object' ? settings.modelSettings : {};
+  const key = Object.keys(per).filter((k) => id === k || id.startsWith(`${k}-`)).sort((a, b) => b.length - a.length)[0];
+  const n = (key && per[key]?.autoCompactWindow) ?? settings?.autoCompactWindow;
+  const at = Number.isFinite(n) && n > 0 && n < window && tokens <= n * 1.02 ? n : window;
+  return (100 * tokens) / at;
+}
+
 const next = process.env.FLEET_STATUSLINE_NEXT;
 if (next) {
   const r = spawnSync('/bin/sh', ['-c', next], { input: raw, encoding: 'utf8', timeout: 4000 });
@@ -39,7 +55,7 @@ if (next) {
 } else {
   const pct = (v) => (typeof v === 'number' ? `${Math.round(v)}%` : '–');
   const parts = [];
-  if (d?.context_window) parts.push(`ctx ${pct(d.context_window.used_percentage)}`);
+  if (d?.context_window) parts.push(`ctx ${pct(contextPct(d))}`);
   if (d?.rate_limits?.five_hour) parts.push(`5h ${pct(d.rate_limits.five_hour.used_percentage)}`);
   if (d?.rate_limits?.seven_day) parts.push(`7d ${pct(d.rate_limits.seven_day.used_percentage)}`);
   process.stdout.write(parts.join(' · '));

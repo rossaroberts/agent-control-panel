@@ -19,7 +19,7 @@ import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 
 const SCRIPT = new URL('./machine.mjs', import.meta.url);
-const FRESH_MS = 8000;
+const FRESH_MS = 4000;
 const SSH_MS = 25_000;
 const HOST = /^[\w.@-]{1,100}$/, USER = /^[a-z_][\w-]{0,31}$/, NAME = /^[\w .-]{1,40}$/;
 const ENGINES = new Set(['claude', 'codex', 'muse', 'fleet']);

@@ -122,3 +122,34 @@ test('a background job whose turn is done but whose process runs is open: it tak
   assert.deepEqual(sessionState({ pid: 44, kind: 'background', state: 'done', status: 'idle' }, turn(true, 60_000), NOW), { state: 'ready', live: true });
   assert.deepEqual(sessionState({ pid: 43, kind: 'background', state: 'working' }, turn(false, 1000), NOW), { state: 'working', live: true });
 });
+
+// ---------------------------------------------------------------- how full a session's context is
+import { compactAt, contextOf } from '../fleet/machine.mjs';
+
+const SETTINGS = { modelSettings: { 'claude-fable-5': { effortLevel: 'xhigh' }, 'claude-fable-5-1': { autoCompactWindow: 400_000 } } };
+const usage = (n) => ({ input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: n });
+
+test('the compaction point: the most specific model entry that sets one, else the top level, else none', () => {
+  assert.equal(compactAt(SETTINGS, 'claude-fable-5-1'), 400_000);
+  assert.equal(compactAt(SETTINGS, 'claude-fable-5-1[1m]'), 400_000);
+  assert.equal(compactAt(SETTINGS, 'claude-fable-5'), null);
+  assert.equal(compactAt({ autoCompactWindow: 300_000 }, 'claude-opus-5-5'), 300_000);
+  assert.equal(compactAt({}, 'claude-opus-5-5'), null);
+});
+
+test('context against where it compacts: 333k of 400k is 83%, not 33% of the window', () => {
+  const sl = { at: 2000, context_window: { context_window_size: 1_000_000, used_percentage: 33, current_usage: usage(333_000) } };
+  assert.deepEqual(contextOf(sl, { model: 'claude-fable-5-1', lastAt: 1000, contextTokens: 300_000 }, 1_000_000, SETTINGS),
+    { pct: 83.3, tokens: 333_000, size: 1_000_000, compactAt: 400_000, fresh: true });
+});
+
+test('a session already past the setting started before it: its window counts', () => {
+  const c = contextOf(null, { model: 'claude-fable-5-1', lastAt: 1000, contextTokens: 932_000 }, 1_000_000, SETTINGS);
+  assert.deepEqual([c.pct, c.compactAt], [93.2, null]);
+});
+
+test('a status line that reads 0 right after a restart does not hide the context its transcript carries', () => {
+  const sl = { at: 9000, context_window: { context_window_size: 1_000_000, used_percentage: 0, current_usage: usage(0) } };
+  const c = contextOf(sl, { model: 'claude-opus-5-5', lastAt: 1000, contextTokens: 924_070 }, 1_000_000, {});
+  assert.deepEqual([c.tokens, c.pct, c.fresh], [924_070, 92.4, false]);
+});

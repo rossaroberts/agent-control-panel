@@ -144,6 +144,32 @@ function windowOf(model, tokens, learned) {
   return { size: 200_000, guessed: true };
 }
 
+/** Where a session on `model` compacts, by its profile's settings: `autoCompactWindow` under `modelSettings` (the most
+ *  specific name that matches first), else at the top level; null when neither sets one. (fleet/statusline.mjs has the same
+ *  rule, so a terminal's own line and the page agree.) */
+export function compactAt(settings, model) {
+  const id = String(model ?? '').replace(/\[1m\]$/, '');
+  const per = settings?.modelSettings && typeof settings.modelSettings === 'object' ? settings.modelSettings : {};
+  const key = Object.keys(per).filter((k) => id === k || id.startsWith(`${k}-`)).sort((a, b) => b.length - a.length)[0];
+  const n = (key && per[key]?.autoCompactWindow) ?? settings?.autoCompactWindow;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+/** How full a session's context is, against the point it compacts at (or its window): from its status line when that has
+ *  read a request since its last reply, else from the usage its transcript's last reply carried. A compaction point it
+ *  has already passed (it started before the setting) is not its own, so the window counts then. */
+export function contextOf(sl, t, window, settings) {
+  const cw = sl?.context_window, u = cw?.current_usage;
+  const slTokens = u ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+    : typeof cw?.used_percentage === 'number' ? Math.round((cw.used_percentage * window) / 100) : null;
+  // A status line right after a restart reads 0 until the next request: the transcript knows better then.
+  const fresh = slTokens != null && sl.at >= (t.lastAt ?? 0) - 60_000 && (slTokens > 0 || !(t.contextTokens > 0));
+  const tokens = fresh ? slTokens : t.contextTokens ?? null;
+  if (tokens == null) return null;
+  const limit = compactAt(settings, t.model ?? sl?.model?.id);
+  const at = limit && limit < window && tokens <= limit * 1.02 ? limit : null;
+  return { pct: Math.round((1000 * tokens) / (at ?? window)) / 10, tokens, size: window, compactAt: at, fresh };
+}
+
 /** From the end of a transcript: the context its last reply carried, its model, and what it last did or said. */
 function readTranscript(file) {
   const out = { model: null, contextTokens: null, lastAt: null, doing: null, said: null, limitHit: undefined, turnOver: null, writtenAt: mtime(file),
@@ -300,14 +326,13 @@ async function claudeProfile(p, learned, usage) {
   let list = [], error = null;
   if (roster.err) error = oneLine(roster.stderr || roster.err.message, 200);
   else { try { list = JSON.parse(roster.stdout); } catch { error = 'claude agents --json returned non-JSON'; } }
+  const settings = readJson(path.join(p.dir, 'settings.json')) ?? {};
   const sessions = list.filter((r) => r?.sessionId).map((r) => {
     const file = transcriptOf(p, r.sessionId, r.cwd);
     const t = file ? readTranscript(file) : {};
     const sl = bySession.get(r.sessionId);
-    const fresh = typeof sl?.context_window?.used_percentage === 'number' && sl.at >= (t.lastAt ?? 0) - 60_000;
     const w = sl?.context_window?.context_window_size ? { size: sl.context_window.context_window_size, guessed: false } : windowOf(t.model, t.contextTokens ?? 0, learned);
-    const size = w.size;
-    const pct = fresh ? sl.context_window.used_percentage : t.contextTokens != null ? (100 * t.contextTokens) / size : null;
+    const ctx = contextOf(sl, t, w.size, settings);
     const { state, live } = sessionState(r, t);
     const rec = sessionRecord(p, r.pid);
     const { via, remote } = reachOf(r, rec);
@@ -315,7 +340,7 @@ async function claudeProfile(p, learned, usage) {
     return { engine: 'claude', id: r.id ?? null, sessionId: r.sessionId, name: r.name ?? null, kind: r.kind ?? null,
              state, live, rawState: r.state ?? r.status ?? null, waitingFor: r.waitingFor ?? null, pid: r.pid ?? null,
              cwd: tilde(r.cwd ?? null), startedAt: r.startedAt ?? null, lastAt: t.lastAt ?? null,
-             model: t.model ?? null, context: pct == null ? null : { pct: Math.round(pct * 10) / 10, tokens: t.contextTokens ?? null, size, guessed: !fresh && w.guessed },
+             model: t.model ?? null, context: ctx && { pct: ctx.pct, tokens: ctx.tokens, size: ctx.size, compactAt: ctx.compactAt, guessed: !ctx.fresh && w.guessed },
              doing: t.doing ?? null, said: t.said ?? null, limitHit: t.limitHit ?? null, firstAsk: t.firstAsk ?? null, lastAsk: t.lastAsk ?? null,
              via, web: remote ? `https://claude.ai/code/${remote}` : null, effort: t.effort ?? null, unitsWeek: units,
              // No screen of its own: a Remote Control server spawned it for claude.ai. Nothing is lost moving it here.
