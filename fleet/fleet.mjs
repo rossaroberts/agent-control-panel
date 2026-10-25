@@ -57,6 +57,9 @@ export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED 
   + ".then((r) => process.stdout.write(JSON.stringify({ id: q.id, r }) + '\\n')); running.add(job); job.finally(() => running.delete(job)); }"
   + " await Promise.allSettled([...running]); process.exit(0);";
 
+/** How long an overloaded machine's last read stands, by its load per core: 0 (read every time) under 2×, 30 s to 4×, 60 s over. */
+export const easeMs = (ratio) => (ratio > 4 ? 60_000 : ratio > 2 ? 30_000 : 0);
+
 export function createFleet({ dir, quiet = () => {} }) {
   const file = path.join(dir, 'fleet.json');
   const titlesFile = path.join(dir, 'fleet-titles.json');
@@ -430,6 +433,15 @@ export function createFleet({ dir, quiet = () => {} }) {
     archived[`${machine}:${key}`] = Date.now();
     keep(archivedFile, archived);
   }
+  /** A machine that is overloaded is asked less often: a read costs it several Claude Code processes, which on a box at
+   *  twice its cores takes seconds and makes it worse. At over 2× its cores it is read every 30 s, at over 4× every 60 s;
+   *  in between, its last good read stands (its time shows on the page). Null means read it now. */
+  function eased(name, now = Date.now()) {
+    const was = good.get(name), st = was?.status;
+    if (!st || !(st.load > 0) || !(st.cpus > 0)) return null;
+    const every = easeMs(st.load / st.cpus);
+    return every && now - (was.at ?? 0) < every ? structuredClone(was) : null;
+  }
   /** One read of every machine; reads asked for while one runs share it. */
   async function read() {
     const gen = readGen;
@@ -438,8 +450,8 @@ export function createFleet({ dir, quiet = () => {} }) {
     const mine = (async () => {
       const { machines, names, self, epics, logins } = config();
       const reads = steady(await Promise.all([
-        collect().then((d) => ({ ...d, name: self, local: true })).catch((e) => ({ name: self, local: true, ok: false, error: String(e?.message ?? e) })),
-        ...machines.map((m) => overSsh(m, 'collect').then((d) => ({ ...d, name: m.name, ssh: m.ssh, user: m.user, local: false }))),
+        eased(self) ?? collect().then((d) => ({ ...d, name: self, local: true })).catch((e) => ({ name: self, local: true, ok: false, error: String(e?.message ?? e) })),
+        ...machines.map((m) => eased(m.name) ?? overSsh(m, 'collect').then((d) => ({ ...d, name: m.name, ssh: m.ssh, user: m.user, local: false }))),
       ]));
       for (const m of reads) for (const a of m.accounts ?? []) {
         const real = a.engine === 'claude' && logins[`${m.name}:${a.id}`];

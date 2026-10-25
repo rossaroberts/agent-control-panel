@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { atPrompt, jobFresh, sessionState } from '../fleet/machine.mjs';
+import { easeMs } from '../fleet/fleet.mjs';
 
 test('a permission prompt: the roster says so, or the last hook event was the request itself', () => {
   assert.equal(atPrompt({ waitingFor: 'permission prompt' }, null), true);
@@ -44,4 +45,12 @@ test('a background job idle at its prompt is waiting, whatever its job state say
   assert.deepEqual(sessionState({ pid: 50, kind: 'background', state: 'working', status: 'idle' }, t, null, NOW), { state: 'ready', live: true });
   assert.deepEqual(sessionState({ pid: 50, kind: 'background', state: 'working', status: 'busy' }, t, null, NOW), { state: 'working', live: true });
   assert.deepEqual(sessionState({ pid: 50, kind: 'background', state: 'working' }, t, null, NOW), { state: 'working', live: true }, 'no status: the state stands');
+});
+
+test('an overloaded machine is read less often: every 30 s past twice its cores, every 60 s past four times', () => {
+  assert.equal(easeMs(0.4), 0, 'a quiet machine is read every time');
+  assert.equal(easeMs(2), 0);
+  assert.equal(easeMs(2.1), 30_000);
+  assert.equal(easeMs(34.3 / 8), 60_000, 'redbat at load 34 on 8 cores');
+  assert.equal(easeMs(NaN), 0);
 });
