@@ -19,9 +19,9 @@
 /* After iA Writer: paper, ink, one typeface, one blue. Structure is whitespace and tone, never boxes; words only where a
    glyph can't say it. Every text colour clears 4.5:1 on paper and on the selection tint; --quiet is for drawn marks only. */
 :root {
-  --cols: 10px minmax(220px, 380px) 84px 70px 70px 72px 60px 64px 56px minmax(0, 1fr);
-  --cols-mid: 10px minmax(0, 1fr) 84px 70px 70px 72px 64px 56px;
-  --cols-narrow: 10px minmax(0, 1fr) 84px 64px;
+  --cols: 72px minmax(220px, 380px) 84px 70px 70px 72px 60px 64px 56px minmax(0, 1fr);
+  --cols-mid: 72px minmax(0, 1fr) 84px 70px 70px 72px 64px 56px;
+  --cols-narrow: 72px minmax(0, 1fr) 84px 64px;
   --paper: #f6f7f7; --tint: #eceeef; --ink: #1e2124; --grey: #5f666b; --quiet: #858c91; --rule: #e2e5e7;
   --blue: #0a72a3; --orange: #a5560f; --red: #bf3f33; --green: #2b7d52;
   --font: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -118,6 +118,15 @@ svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-widt
 .dot.capped.lifted { background: var(--orange); }
 .dot.ready { box-shadow: inset 0 0 0 1.5px var(--quiet); }
 .dot.closed { background: var(--quiet); opacity: .7; }
+/* what a session is doing, in a word: working · waiting · needs you · at limit · closed */
+.st { font-size: 12px; font-weight: 500; white-space: nowrap; letter-spacing: .01em; }
+.st.working { color: var(--blue); }
+.st.needs-you { color: var(--orange); }
+.st.capped { color: var(--red); }
+.st.capped.lifted { color: var(--orange); }
+.st.ready { color: var(--grey); font-weight: 400; }
+.st.closed { color: var(--quiet); font-weight: 400; }
+.tally .st { font-size: 13px; }
 
 /* epics */
 .epic { margin-top: 34px; }
@@ -191,7 +200,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 #finder { position: fixed; inset: 0; z-index: 20; background: color-mix(in srgb, var(--paper) 60%, transparent); }
 #finder input { display: block; width: min(640px, 100% - 32px); margin: 14vh auto 0; padding: 12px 16px; font-size: 16px; background: var(--paper); border: 1px solid var(--rule); border-bottom: 0; border-radius: 6px 6px 0 0; outline: none; caret-color: var(--blue); }
 #find-list { width: min(640px, 100% - 32px); margin: 0 auto; background: var(--paper); border: 1px solid var(--rule); border-radius: 0 0 6px 6px; max-height: 60vh; overflow-y: auto; }
-#find-list .f { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 7px 16px; font-size: 13px; cursor: pointer; }
+#find-list .f { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 7px 16px; font-size: 13px; cursor: pointer; }
 #find-list .f.on { background: var(--tint); }
 #find-list .ft { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #find-list .fm { color: var(--grey); white-space: nowrap; }
@@ -353,7 +362,11 @@ const kTok = (n) => (n >= 1e6 ? `${Math.round(n / 1e5) / 10}M` : `${Math.round(n
 const ctxWords = (c) => `${c.guessed ? 'about ' : ''}${c.tokens != null ? kTok(c.tokens) : `${Math.round(c.pct)}%`} of ${c.compactAt ? `${kTok(c.compactAt)}, where it compacts` : `its ${kTok(c.size)} window`}`;
 const lastPart = (p) => (typeof p === 'string' ? p.split('/').filter(Boolean).at(-1) ?? p : null);
 const ORDER = { 'needs-you': 0, working: 1, capped: 2, ready: 3, closed: 4 };
-const WORD = { 'needs-you': 'needs you', working: 'working', capped: 'at its limit', ready: 'ready', closed: 'closed' };
+const WORD = { 'needs-you': 'needs you', working: 'working', capped: 'at limit', ready: 'waiting', closed: 'closed' };
+/** Its state as a word on the page (the row, the pane, the tallies): never a dot to decode. */
+const word = (st, extra = '', title = null) => h('span', { class: `st ${st}${extra ? ' ' + extra : ''}`, text: WORD[st] ?? st, title: title ?? WORD[st] ?? st });
+/** Waiting for your yes before a tool runs: nothing lost by moving it here or answering in its terminal. */
+const atPrompt = (x) => x?.live && x.state === 'needs-you' && /permission/i.test(x.waitingFor ?? '');
 
 // ---------------------------------------------------------------- reading the snapshot
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -444,7 +457,7 @@ function windows(sub) {
 // ---------------------------------------------------------------- accounts
 let snap = null, subs = [], pickKey = store.get('account'), pickMachine = store.get('machine');
 const tally = (list) => h('span', { class: 'tally' }, ['needs-you', 'working', 'capped', 'ready'].map((st) => [st, list.filter((x) => x.live && x.state === st).length])
-  .filter(([, n]) => n).map(([st, n]) => h('span', { title: WORD[st] }, h('span', { class: `dot ${st}` }), n)));
+  .filter(([, n]) => n).map(([st, n]) => h('span', { class: `st ${st}`, text: `${n} ${WORD[st]}` })));
 function renderAccounts() {
   $('accts').replaceChildren(...subs.filter((sub) => sub.places.some((p) => p.loggedIn)).map((sub) => {
     const room = sub.capped
@@ -601,7 +614,7 @@ function openTrust({ machine, profile, cwd, sub }) {
 /** A background session opens as its own terminal. */
 const attachable = (x) => x?.engine === 'claude' && x.live && ((x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '')) || Boolean(x.tmux));
 /** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
-const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && !x.tmux && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped');
+const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && !x.tmux && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped' || atPrompt(x));
 // A Codex session opens as `codex resume` once you ask for it, and stays so: only one that is closed and whose last turn
 // finished. Resuming a thread that is live (open in the Codex app) or ended mid-turn takes it over and carries the work on.
 const codexTerm = (x) => x?.engine === 'codex' && /^[0-9a-f-]{36}$/.test(x.sessionId ?? '') && Boolean(x.cwd) && !x.live;
@@ -708,7 +721,7 @@ async function sendText(text) {
   pane.sending = false;
   pane.said = r.ok ? null : { cls: 'no', text: r.error };
   if (!r.ok) { pane.items = (pane.items ?? []).filter((it) => !it.pending); if (!$('p-reply').value) $('p-reply').value = text; }
-  if (r.ok && /^\/(exit|quit)$/i.test(text.trim())) load(); // it closed: the list says so
+  if (r.ok && /^\/(exit|quit)$/i.test(text.trim())) { deselect(); load(); return; } // it closed: its row leaves
   renderPane(true); peek();
 }
 
@@ -820,7 +833,9 @@ async function ended(T, error, note = null) {
   if (note) { T.term.write(`\r\n\x1b[2m${note}\x1b[0m\r\n`); return; }
   if (T.x.via === 'trust') return finish(T);
   await load();
-  const y = everything.find((s) => keyOf(s) === T.key);
+  let y = everything.find((s) => keyOf(s) === T.key);
+  // Right after /exit its process can still be on its way out: a few more reads before calling it detached.
+  for (let i = 0; T.exiting && y?.live && i < 4; i++) { await new Promise((ok) => setTimeout(ok, 1500)); await load(); y = everything.find((s) => keyOf(s) === T.key); }
   if (!y?.live) return finish(T);
   T.term.write('\r\n\x1b[2mdetached · enter to attach again\x1b[0m\r\n');
 }
@@ -831,7 +846,7 @@ function typed(T, d) {
   T.sentAt ||= Date.now();
   if (d === '\r') {
     const ask = T.line.trim(); T.line = ''; T.pend = [];
-    if (/^\/(exit|quit)$/.test(ask)) setTimeout(() => exitSession(T), 600);
+    if (/^\/(exit|quit)$/.test(ask)) { T.exiting = true; setTimeout(() => exitSession(T), 600); }
   } else if (d === '\x7f') { T.line = T.line.slice(0, -1); if (T.pend.length) T.pend.pop(); }
   else if (printable(d)) { T.line += d; if (T.rtt > 80) for (const ch of d) T.pend.push({ ch, at: Date.now() }); }
   else { T.pend = []; T.line = ''; } // an arrow, Esc, ^C, ^U or a paste: what is on its line is no longer what was typed
@@ -899,6 +914,8 @@ async function exitSession(T) {
   // but never while it works: then /exit only lets go of it, and it carries on.
   if (x.via === 'background' && x.sessionId && now?.state !== 'working') await api('/api/fleet/close', { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId }).catch(() => {});
   finish(T);
+  // Closed means gone from the page (conversation kept): started again later, it is back.
+  if (x.sessionId || x.id) await api('/api/fleet/hide', { machine: x.machine, sessionId: x.sessionId, id: x.id }).catch(() => {});
   load();
 }
 function finish(T) { dropTerm(T.key); if (pane.key === T.key) deselect(); }
@@ -971,7 +988,7 @@ function renderPane(toEnd = false) {
     return;
   }
   const term = termView(x);
-  $('p-rail').replaceChildren(icon('unfold'), h('span', { class: `dot ${x.state}` }), h('span', { class: 'v', text: x.title ?? x.name ?? x.engine }));
+  $('p-rail').replaceChildren(icon('unfold'), word(x.state, 'v'), h('span', { class: 'v', text: x.title ?? x.name ?? x.engine }));
   $('p-rail').title = 'Unfold (⌘\\)';
   // Never rebuilt under your caret: a name or group being typed stays as it is.
   if (!document.activeElement?.matches?.('.p-title, .p-group')) renderHead(x, term);
@@ -1010,20 +1027,26 @@ function renderPane(toEnd = false) {
 }
 function renderHead(x, term) {
   const c = x.context, cmd = attachCommand(x);
-  // One control: close an open session, archive a closed one. A second click does it.
-  const verb = x.live ? (x.engine !== 'claude' || x.via === 'app' || x.via === 'trust' || !x.sessionId ? null : 'close') : (x.sessionId || x.id ? 'archive' : null);
-  const act = verb && h('button', { class: `act${pane.arm ? ' armed' : ''}`, text: pane.arm ? `${verb}?` : verb,
+  // One control: close an open session (its row leaves, conversation kept), hide one that can't be closed from here (the
+  // app's), archive a closed one (its record goes). A second click does it.
+  const closable = x.live && x.engine === 'claude' && x.via !== 'app' && x.via !== 'trust' && Boolean(x.sessionId);
+  const verb = x.live ? (closable ? 'close' : x.via === 'trust' || !(x.sessionId || x.id) ? null : 'hide') : (x.sessionId || x.id ? 'archive' : null);
+  const verbTitle = { close: 'Close it: the row leaves; its conversation is kept', hide: 'Take its row off the page until it runs again or needs you', archive: 'Remove its record; its conversation is kept' }[verb];
+  const act = verb && h('button', { class: `act${pane.arm ? ' armed' : ''}`, text: pane.arm ? `${verb}?` : verb, title: verbTitle,
     onclick: async () => {
       if (!pane.arm) { pane.arm = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.arm) { pane.arm = false; renderPane(); } }, 4000); return; }
       pane.arm = false; renderPane();
       const r = await api(`/api/fleet/${verb}`, { machine: x.machine, engine: x.engine, profile: x.profile, sessionId: x.sessionId, id: x.id }).catch((err) => ({ ok: false, error: String(err.message) }));
       pane.said = r.ok ? null : { cls: 'no', text: r.error };
-      renderPane(); await load();
-      if (r.ok && verb === 'archive') deselect();
+      if (r.ok) deselect(); else renderPane();
+      await load();
     } });
+  // A closed session goes on where it ran, as a background job with its terminal here.
+  const cont = !x.live && x.engine === 'claude' && (x.sessionId || x.id) && !pane.moving
+    ? h('button', { class: 'act test', text: 'continue', title: 'Start it again in the background where it ran, conversation kept, and open its terminal', onclick: continueClosed }) : null;
   // In the bar: its name, what turns it into a terminal (or back), and an error if there is one. The rest is behind ⋯.
   const move = movable(x) && !pane.moving ? h('button', { class: `act${pane.armMove ? ' armed' : ''}`, text: pane.armMove ? 'move here?' : 'move here', onclick: moveHere,
-    title: 'Restart it here in the background, conversation kept, and open its terminal' + (x.headless ? '' : '. The terminal window it is in now closes.') }) : null;
+    title: 'Restart it here in the background, conversation kept, and open its terminal' + (atPrompt(x) ? '. It goes on from the step it waits at, every permission allowed.' : '') + (x.headless ? '' : '. The terminal window it is in now closes.') }) : null;
   // A desktop-app session can't be typed into from here: continue it as a copy in the background instead, the app's own
   // session untouched.
   const copy = x.engine === 'claude' && x.via === 'app' && x.live && x.sessionId && (x.state === 'ready' || x.state === 'capped') && !pane.moving
@@ -1043,16 +1066,19 @@ function renderHead(x, term) {
   const test = testOf(x) ? h('button', { class: 'act test', title: `Open ${testOf(x)}`, onclick: () => openTest(testOf(x)) }, 'TEST', icon('ext')) : null;
   // In the middle of a step: what it runs and since when, what of yours waits for it, and interject (its command stopped,
   // so it takes what you sent now). Only a command can be stopped.
+  // At a permission prompt the step has not begun: what it needs is your yes (in its terminal, or by moving it here).
   const run = x.live && x.running ? h('div', { class: 'p-run' },
-    h('span', { class: 'p-step', text: `${x.running.step} · ${ago(x.running.since)}`, title: `Running since ${new Date(x.running.since).toLocaleTimeString()}` }),
+    h('span', { class: 'p-step', text: `${atPrompt(x) ? 'needs your yes for: ' : ''}${x.running.step} · ${ago(x.running.since)}`,
+      title: `${atPrompt(x) ? 'Waiting for your yes since' : 'Running since'} ${new Date(x.running.since).toLocaleTimeString()}${x.running.cmd ? `\n${x.running.cmd}` : ''}` }),
     x.queued?.length ? h('span', { class: 'p-wait', text: `${x.queued.length} of yours waiting`, title: x.queued.join('\n') }) : null,
-    x.running.tool === 'Bash' ? h('button', { class: `act${pane.armStop ? ' armed' : ''}`, text: pane.armStop ? 'stop it and read?' : 'interject',
+    atPrompt(x) ? h('span', { class: 'p-wait', text: attachable(x) ? 'answer in its terminal' : movable(x) ? 'move it here and it goes on' : 'answer it on claude.ai' })
+      : x.running.tool === 'Bash' && x.state !== 'needs-you' ? h('button', { class: `act${pane.armStop ? ' armed' : ''}`, text: pane.armStop ? 'stop it and read?' : 'interject',
       title: 'Stop the command this step runs (only that: the session goes on), so it reads what you sent now (i)', onclick: interjectNow }) : null) : null;
   // The agents it has going, one line each: what it was asked, its last step, how long since it moved.
   const agents = x.live && x.agents?.length ? h('div', { class: 'p-agents' }, x.agents.map((a) => h('div', { class: 'ag', title: [a.type, a.model, a.since ? `started ${new Date(a.since).toLocaleTimeString()}` : null].filter(Boolean).join(' · ') },
     h('span', { class: 'dot working' }), h('b', { text: a.what ?? a.type ?? 'agent' }), h('span', { text: a.step ? `${a.step} · ${ago(a.lastAt)}` : ago(a.lastAt) })))) : null;
   const parts = [
-    h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, copy, codexOpen,
+    h('div', { class: 'p-top' }, word(x.state), titleField(x), state, cont, move, copy, codexOpen,
       h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),
@@ -1061,7 +1087,7 @@ function renderHead(x, term) {
       [WORD[x.state], x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx (${ctxWords(c)})`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
         .filter(Boolean).map((t) => h('span', { text: t }))) : null,
     pane.more ? h('div', { class: 'p-acts' }, groupField(x), act, test,
-      x.web ? h('a', { class: 'act', href: x.web, target: '_blank', rel: 'noopener' }, 'claude.ai', icon('ext')) : null,
+      x.web ? h('button', { class: 'act', title: `Open ${x.web}`, onclick: () => { const w = window.open(x.web, '_blank', 'noopener'); if (!w) navigator.clipboard?.writeText(x.web).catch(() => {}); } }, 'claude.ai', icon('ext')) : null,
       cmd ? h('button', { class: 'act', text: 'attach', title: `Copy: ${cmd}`, onclick: (e) => { navigator.clipboard?.writeText(cmd).catch(() => {}); e.target.textContent = 'copied'; } }) : null) : null]
     .filter(Boolean);
   const box = h('div', {}, ...parts), sig = `${pane.key}\n${box.innerHTML}`;
@@ -1070,6 +1096,24 @@ function renderHead(x, term) {
   $('p-head').replaceChildren(...box.childNodes);
 }
 let headSig = '';
+/** Continue a closed session where it ran: started again as a background job (its own record, else its conversation
+ *  under a new one); its row comes back and opens as a terminal here. */
+async function continueClosed() {
+  const x = current();
+  if (!x || x.live || pane.moving) return;
+  pane.moving = true; pane.said = null; renderPane();
+  const r = await api('/api/fleet/resume', { machine: x.machine, profile: x.profile, sessionId: x.sessionId, id: x.id }).catch((e) => ({ ok: false, error: String(e.message) }));
+  pane.moving = false;
+  if (r.untrusted) { openTrust({ machine: x.machine, profile: x.profile, cwd: r.cwd, sub: x.sub }); return; }
+  if (!r.ok) { pane.said = { cls: 'no', text: r.error }; renderPane(); return; }
+  for (let i = 0; i < 12; i++) {
+    await load();
+    const y = everything.find((s) => s.machine === x.machine && s.live && ((x.sessionId && s.sessionId === x.sessionId) || (r.id && s.id === r.id)));
+    if (y) { if (keyOf(y) === pane.key) renderPane(true); else { deselect(); select(y); } return; }
+    await new Promise((ok) => setTimeout(ok, 1500));
+  }
+  pane.said = { cls: 'no', text: `It started${r.id ? ` (${r.id})` : ''} but isn't listed yet: look for it in a moment` }; renderPane();
+}
 /** Interject: on the second click, its current command stopped so what you queued reaches it now. */
 async function interjectNow() {
   const x = current();
@@ -1189,7 +1233,7 @@ function drawFound() {
   found = everything.filter((y) => words.every((w) => hay(y).includes(w)))
     .sort((a, b) => Number(b.live) - Number(a.live) || (ORDER[a.state] - ORDER[b.state]) || ((b.lastAt ?? 0) - (a.lastAt ?? 0))).slice(0, 12);
   $('find-list').replaceChildren(...found.map((y, i) => h('div', { class: `f${i === foundAt ? ' on' : ''}`, onpointerdown: (e) => { e.preventDefault(); openFound(y); } },
-    h('span', { class: `dot ${y.live ? y.state : 'closed'}` }), h('span', { class: 'ft', text: y.title ?? y.name ?? y.id ?? y.engine }),
+    word(y.live ? y.state : 'closed'), h('span', { class: 'ft', text: y.title ?? y.name ?? y.id ?? y.engine }),
     h('span', { class: 'fm', text: [y.machine, y.sub, y.branch].filter(Boolean).join('  ') }))));
 }
 
@@ -1208,7 +1252,8 @@ function row(x) {
   const c = x.context, on = pane.key === keyOf(x);
   const lifted = x.state === 'capped' && (resetOf(x.limitHit) ?? Infinity) < Date.now();
   // What it waits on, on a line of its own under a session that needs you: never cut by a narrow list.
-  const why = x.state === 'needs-you' ? [typeof x.waitingFor === 'string' ? x.waitingFor : null, x.doing ?? x.said].filter(Boolean).join(': ')
+  const why = atPrompt(x) ? `needs your yes for: ${x.running?.step ?? x.doing ?? 'a step'}`
+    : x.state === 'needs-you' ? [typeof x.waitingFor === 'string' ? x.waitingFor : null, x.doing ?? x.said].filter(Boolean).join(': ')
     : x.state === 'capped' ? (lifted ? 'its limit has lifted: tell it to go on' : x.limitHit?.text ?? '') : '';
   const what = [x.state === 'working' ? (x.running ? `${x.running.step} · ${ago(x.running.since)}` : x.doing ?? x.said ?? '') : '',
     x.agents?.length ? `${x.agents.length} agent${x.agents.length > 1 ? 's' : ''}` : '',
@@ -1216,7 +1261,7 @@ function row(x) {
   const agentLines = (x.agents ?? []).map((a) => `  · ${a.what ?? a.type ?? 'agent'}`).join('\n');
   return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}${agentLines ? `\nagents:\n${agentLines}` : ''}`, tabindex: 0,
       ...rowActs(x) },
-    h('span', { class: `dot ${x.state}${lifted ? ' lifted' : ''}`, title: lifted ? 'its limit has lifted' : WORD[x.state] ?? '' }),
+    word(x.state, lifted ? 'lifted' : '', lifted ? 'its limit has lifted' : null),
     h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine }),
     h('span', { class: `stage ${x.stage ?? ''}`, text: x.stage ?? '' }),
     h('span', { class: 'at', text: x.machine }),
@@ -1233,7 +1278,7 @@ function row(x) {
 /** A closed session, as one quiet line: what it was, where, whose, and when it last moved. */
 function gone(x) {
   return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', ...rowActs(x) },
-    h('span', { class: 'dot closed' }), h('span', { text: x.title ?? x.name ?? x.id ?? x.engine }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
+    word('closed'), h('span', { text: x.title ?? x.name ?? x.id ?? x.engine }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }), startCell(x), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
     h('span', { class: 'use' }), h('span', { class: 'what' }));
 }

@@ -15,7 +15,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere,
-  interject as interjectHere, tokens as tokensHere, watchHooks, sessionState } from './machine.mjs';
+  interject as interjectHere, tokens as tokensHere, resume as resumeHere, revive as reviveHere, watchHooks, sessionState } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 
@@ -47,7 +47,7 @@ const clean = (v, n) => String(v ?? '').replace(/[<>\x00-\x08\x0b-\x1f\x7f]/g, '
 // then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. A read asked
 // for while one runs shares it (a slow machine never piles reads up). Between answers it says when a session's hook file
 // changes ({ event }). On end of input it finishes what it started, then exits.
-export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject','tokens']);"
+export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject','tokens','resume','revive']);"
   + " const running = new Set(); let m = null, reading = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
   + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n');"
   + " try { m.watchHooks?.((ev) => process.stdout.write(JSON.stringify({ event: ev }) + '\\n')); } catch {} continue; }"
@@ -143,7 +143,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   }
   /** Run machine.mjs's `todo` on a machine: through its worker, else (an action it never got) the one-shot way. */
   async function overSsh(m, todo, args = {}) {
-    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' || todo === 'tokens' ? 150_000 : todo === 'send' ? 90_000 : todo === 'collect' ? COLLECT_MS : SSH_MS;
+    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' || todo === 'tokens' || todo === 'resume' || todo === 'revive' ? 150_000 : todo === 'send' ? 90_000 : todo === 'collect' ? COLLECT_MS : SSH_MS;
     const w = worker(m);
     const up = await Promise.race([w.ready, new Promise((ok) => setTimeout(() => ok(false), ms).unref?.())]);
     if (up && !w.dead) {
@@ -417,6 +417,19 @@ export function createFleet({ dir, quiet = () => {} }) {
     if (seenDirty && Date.now() - seenWritten > 20_000) writeSeen();
   }
 
+  /** Whether a session hidden at `hid` (ms) is on the page: not hidden, or live and started since, or waiting on you. */
+  function showable(x, hid) {
+    if (!hid) return true;
+    if (!x.live) return false;
+    const started = Number(x.startedAt) || Date.parse(x.startedAt ?? '') || 0;
+    return started > hid || x.state === 'needs-you';
+  }
+  /** A session's row leaves the page (its record and conversation stay). Started again after this, it is back. */
+  function hide(machine, key) {
+    if (!key) return;
+    archived[`${machine}:${key}`] = Date.now();
+    keep(archivedFile, archived);
+  }
   /** One read of every machine; reads asked for while one runs share it. */
   async function read() {
     const gen = readGen;
@@ -431,8 +444,9 @@ export function createFleet({ dir, quiet = () => {} }) {
       for (const m of reads) for (const a of m.accounts ?? []) {
         const real = a.engine === 'claude' && logins[`${m.name}:${a.id}`];
         if (real && a.account) a.account = { ...a.account, email: real, says: a.account.email };
-        // An archived session that runs again (resumed) is back on the page.
-        a.sessions = (a.sessions ?? []).filter((x) => x.live || !archived[`${m.name}:${x.sessionId ?? x.id}`]);
+        // A closed session you closed or archived is off the page; a live one you hid stays off until it is started again
+        // after that (resumed: its process is newer than the mark) or needs you.
+        a.sessions = (a.sessions ?? []).filter((x) => showable(x, archived[`${m.name}:${x.sessionId ?? x.id}`]));
         for (const x of a.sessions) named(m.name, a.engine, x);
         // A hook that fired while this read ran is newer than what the machine read: it is laid over the fresh row.
         if (a.engine === 'claude') for (const x of a.sessions) { const h = hooked.get(`${m.name}:${x.sessionId}`); if (h && h.at >= startedAt && x.live) patch(x, h); }
@@ -495,6 +509,7 @@ export function createFleet({ dir, quiet = () => {} }) {
     const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? ''), text: String(body?.text ?? '') };
     if (!/^[\w.-]{1,40}$/.test(args.profile) || !/^[0-9a-f-]{36}$/.test(args.sessionId)) return { ok: false, error: 'Pick a session.' };
     const r = await onMachine(String(body?.machine ?? ''), 'send', args, sendHere);
+    if (r.ok && /^\/(exit|quit)$/i.test(args.text.trim())) hide(String(body?.machine ?? ''), args.sessionId);
     changed();
     return r;
   }
@@ -504,7 +519,32 @@ export function createFleet({ dir, quiet = () => {} }) {
     const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? '') };
     if (!/^[\w.-]{1,40}$/.test(args.profile) || !/^[0-9a-f-]{36}$/.test(args.sessionId)) return { ok: false, error: 'Pick a session.' };
     const r = await onMachine(String(body?.machine ?? ''), 'close', args, closeHere);
+    if (r.ok) hide(String(body?.machine ?? ''), args.sessionId); // closed means gone from the page, conversation kept
     changed();
+    return r;
+  }
+  /** A live session you can't close from here (the Claude app's, say) leaves the page until it runs again or needs you. */
+  function hideRow(body) {
+    const machine = String(body?.machine ?? ''), key = String(body?.sessionId ?? body?.id ?? '');
+    if (!/^[\w.-]{1,80}$/.test(key)) return { ok: false, error: 'Pick a session.' };
+    hide(machine, key);
+    changed();
+    return { ok: true };
+  }
+  /** Continue a closed session as a background job where it ran; its row comes back. */
+  async function resume(body) {
+    const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? ''), id: String(body?.id ?? '') };
+    if (!/^[\w.-]{1,40}$/.test(args.profile) || !(/^[0-9a-f-]{36}$/.test(args.sessionId) || /^[0-9a-f]{8}$/.test(args.id))) return { ok: false, error: 'Pick a session.' };
+    const machine = String(body?.machine ?? '');
+    const r = await onMachine(machine, 'resume', args, resumeHere);
+    if (r.ok) { for (const k of [args.sessionId, args.id, r.id]) if (k && archived[`${machine}:${k}`]) { delete archived[`${machine}:${k}`]; keep(archivedFile, archived); } }
+    changed();
+    return r;
+  }
+  /** Background jobs that died with this machine, started again (once, when the panel starts). */
+  async function revive() {
+    const r = await reviveHere().catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+    if (r.ok && r.revived.length) { for (const j of r.revived) console.log(`fleet: revived ${j.id} ${j.name ?? j.sessionId ?? ''}${j.ok ? '' : ` — ${j.error}`}`); changed(); }
     return r;
   }
   /** Archive a closed session: off the page, and a background job's record removed. */
@@ -588,5 +628,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, flush };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, hide: hideRow, resume, revive, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, flush };
 }

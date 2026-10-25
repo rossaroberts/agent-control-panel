@@ -85,10 +85,13 @@ function headLines(file, bytes = 256 * 1024) {
 }
 /** A tool call in plain words: its own description when it has one (Bash and Agent calls do), else what it does to what.
  *  Null for the bookkeeping calls nobody needs to see. */
-function stepOf(name, x = {}) {
+function stepOf(name, x = {}, brief = false) {
   const base = (f) => (typeof f === 'string' ? path.basename(f) : '');
   if (/^mcp__ccd_turn__|^ToolSearch$/.test(name)) return null;
   if (typeof x.description === 'string' && x.description.trim()) return oneLine(x.description, 200);
+  // On a row (brief) a command with no description is "Run a command": the command itself is never a row's text (it
+  // is in the step's cmd, for the tooltip and for interject).
+  if (brief && name === 'Bash') return 'Run a command';
   const mcp = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(name);
   const said = {
     Read: () => `Read ${base(x.file_path)}`, Edit: () => `Edit ${base(x.file_path)}`, MultiEdit: () => `Edit ${base(x.file_path)}`,
@@ -294,7 +297,7 @@ function readTranscript(file) {
       out.turnOver = d.type === 'assistant' && (['end_turn', 'stop_sequence'].includes(d.message.stop_reason) || d.message.model === '<synthetic>');
       // Its last word a tool call with no result yet: that step is running, since then.
       const use = d.type === 'assistant' && Array.isArray(d.message.content) ? d.message.content.findLast((c) => c.type === 'tool_use') : null;
-      out.running = use ? { step: stepOf(use.name, use.input ?? {}), since: Date.parse(d.timestamp) || null, tool: use.name,
+      out.running = use ? { step: stepOf(use.name, use.input ?? {}, true), since: Date.parse(d.timestamp) || null, tool: use.name,
         cmd: use.name === 'Bash' && typeof use.input?.command === 'string' ? use.input.command.slice(0, 2000) : null } : null;
     }
     if (d.type !== 'assistant' || !d.message) continue;
@@ -314,7 +317,7 @@ function readTranscript(file) {
       if (c.type === 'tool_use' && out.steps.length < 8) { const st = stepOf(c.name, c.input ?? {}); if (st) out.steps.push(st); }
       if (c.type === 'tool_use' && uses.length < 12) uses.push([c.name, c.input]);
       if (c.type === 'tool_use' && !out.workdir) out.workdir = whereOf(c.name, c.input ?? {});
-      if (!out.doing && c.type === 'tool_use') out.doing = stepOf(c.name, c.input ?? {});
+      if (!out.doing && c.type === 'tool_use') out.doing = stepOf(c.name, c.input ?? {}, true);
       if (!out.said && c.type === 'text' && c.text?.trim()) out.said = oneLine(c.text, 400);
     }
     if (out.contextTokens !== null && (out.doing || out.said) && out.lastAsk && out.steps.length >= 8 && uses.length >= 12) break;
@@ -476,6 +479,11 @@ export function watchHooks(on) {
  * is alive is open: working, needing you, stopped on a limit, or ready at its prompt. One with no process is closed. The roster's "busy" also covers a background task the session started (a dev server, a watch), so a busy
  * session whose turn is over and whose transcript has been still for a minute reads ready.
  */
+/** Whether a session waits at a permission prompt (a yes it needs from you before a tool runs): the roster says so, or
+ *  its last hook event was the request itself. Nothing has run yet, so closing it there loses nothing: adopt() may take it. */
+export function atPrompt(r, h) {
+  return /permission/i.test(r?.waitingFor ?? '') || h?.e === 'PermissionRequest' || (h?.e === 'Notification' && h?.n === 'permission_prompt');
+}
 export function sessionState(r, t, h = null, now = Date.now()) {
   // Open means a process, or a background job Claude Code still lists as active (one waiting at a startup question, trust
   // or a project's MCP servers, has no process of its own yet). Any other job without one only keeps its record. One whose
@@ -498,11 +506,23 @@ export function sessionState(r, t, h = null, now = Date.now()) {
     return { state: hs, live };
   }
   // Working is what Claude Code says: a turn that ended while its own background tasks run still carries on by itself.
-  if (r.status === 'busy' || r.state === 'working' || r.state === 'running') return { state: 'working', live };
+  // A background job's `state` says it is alive ("working" for a running job), its `status` what it does: idle at its prompt
+  // is waiting, whatever the state says (a job started again after a reboot sits idle with its last step unfinished).
+  if (r.status === 'busy' || (r.status == null && (r.state === 'working' || r.state === 'running'))) return { state: 'working', live };
   return { state: 'ready', live };
 }
 
 const runningWas = new Map(); // profile → the jobs it last said run
+/** A background job's record (<profile>/jobs/<id>/state.json), or null. */
+const jobRecord = (p, id) => (/^[0-9a-f]{8}$/.test(id ?? '') ? readJson(path.join(p.dir, 'jobs', id, 'state.json'), 1 << 20) : null);
+/** Whether a background job with no process of its own can still be starting (a startup question, trust, a project's MCP
+ *  servers): its record was written to in the last ten minutes. One written long ago and without a process died with its
+ *  machine (a reboot, a crash): Claude Code lists it as running all the same, so the list alone can't be believed. */
+export function jobFresh(p, id, now = Date.now()) {
+  const s = jobRecord(p, id);
+  const at = Date.parse(s?.updatedAt ?? s?.createdAt ?? '') || 0;
+  return at > 0 && now - at < 10 * 60_000;
+}
 /** Whether a background job is gone: Claude Code says "job not found" for it. A timeout or another failure proves nothing
  *  (and isn't kept); the answer is kept half a minute. */
 const gone = (p, env, id) => every(30_000, `logs:${p.dir}:${id}`, () => run(bin('claude'), ['logs', id], { env, timeout: 5000 })
@@ -525,7 +545,7 @@ async function claudeProfile(p, learned, usage) {
   let rows = [];
   try { rows = JSON.parse(roster.stdout); } catch {}
   await Promise.all(rows.filter((r) => r?.sessionId && !r.pid && running.has(r.sessionId) && /^[0-9a-f]{8}$/.test(r.id ?? ''))
-    .map(async (r) => { if (await gone(p, env, r.id)) running.delete(r.sessionId); }));
+    .map(async (r) => { if (!jobFresh(p, r.id) || await gone(p, env, r.id)) running.delete(r.sessionId); }));
   const cfg = readJson(p.config)?.oauthAccount ?? null;
   let a = null;
   try { a = JSON.parse(auth.stdout); } catch {}
@@ -553,14 +573,15 @@ async function claudeProfile(p, learned, usage) {
     const { via, remote } = reachOf(r, rec);
     const units = file && (t.writtenAt ?? 0) >= since ? usageSince(file, since, usage) : 0;
     return { engine: 'claude', id: r.id ?? null, sessionId: r.sessionId, name: r.name ?? null, kind: r.kind ?? null,
-             state, live, rawState: r.state ?? r.status ?? null, waitingFor: r.waitingFor ?? null, pid: r.pid ?? null,
+             state, live, rawState: r.state ?? r.status ?? null, waitingFor: r.waitingFor ?? (state === 'needs-you' && atPrompt(r, h) ? 'permission prompt' : null), pid: r.pid ?? null,
              cwd: tilde(r.cwd ?? null), startedAt: r.startedAt ?? null, lastAt: t.lastAt ?? null,
              model: t.model ?? null, context: ctx && { pct: ctx.pct, tokens: ctx.tokens, size: ctx.size, compactAt: ctx.compactAt, guessed: !ctx.fresh && w.guessed },
              doing: t.doing ?? null, said: t.said ?? null, limitHit: t.limitHit ?? null, firstAsk: t.firstAsk ?? null, lastAsk: t.lastAsk ?? null, steps: t.steps ?? [],
              via, web: remote ? `https://claude.ai/code/${remote}` : null, effort: t.effort ?? null, unitsWeek: units,
              // No screen of its own: a Remote Control server spawned it for claude.ai. Nothing is lost moving it here.
              headless: rec?.entrypoint === 'sdk-cli', stage: t.stage ?? null,
-             running: live ? t.running ?? null : null, queued: live && t.queued?.length ? t.queued.map((x) => oneLine(x.text, 300)) : null,
+             running: live && t.running && !(t.running.since && Number(r.startedAt) > t.running.since + 5000) ? t.running : null,
+             queued: live && t.queued?.length ? t.queued.map((x) => oneLine(x.text, 300)) : null,
              agents: live && file ? agentsOf(file, r.sessionId) : [],
              branch: branchOf(t.workdir ?? r.cwd) ?? branchOf(r.cwd), workdir: t.workdir ? tilde(t.workdir) : null,
              // What decides its state again when a hook event comes in between reads (fleet.mjs).
@@ -1124,14 +1145,14 @@ export async function send(a) {
   // /effort or anything that needs you. A background job takes it as yours (below), so only the others go this way.
   const cse = remoteId(sessionRecord(p, row.pid)?.bridgeSessionId)?.slice('session_'.length)
     ?? argsOf.map((v) => /\/v1\/code\/sessions\/cse_(\w+)/.exec(v)?.[1]).find(Boolean);
+  // /exit here means what it means in its terminal: a clean close, conversation kept (the close control, by another
+  // name). Not while it works: that would cut a step short.
+  if (/^\/(exit|quit)$/i.test(text)) {
+    const file = transcriptOf(p, row.sessionId, row.cwd);
+    if (sessionState(row, file ? readTranscript(file) : {}, readHook(p, row.sessionId)).state === 'working') return { ok: false, error: 'It is working: /exit when it is done, or interject first.' };
+    return close(a);
+  }
   if (row.kind !== 'background') {
-    // /exit here means what it means in its terminal: a clean close, conversation kept (the close control, by another
-    // name). Not while it works: that would cut a step short.
-    if (/^\/(exit|quit)$/i.test(text)) {
-      const file = transcriptOf(p, row.sessionId, row.cwd);
-      if (sessionState(row, file ? readTranscript(file) : {}, readHook(p, row.sessionId)).state === 'working') return { ok: false, error: 'It is working: /exit when it is done, or interject first.' };
-      return close(a);
-    }
     if (!cse) return { ok: false, error: 'Type /rc in its terminal once, then it takes messages here.' };
     if (text.startsWith('-')) return { ok: false, error: 'Start it with a word, not a dash.' };
     const r = await run(bin('claude'), ['-p', '--cloud', `session_${cse}`, text], { env: profileEnv(p), cwd: row.cwd ?? HOME, timeout: 60_000 });
@@ -1227,12 +1248,15 @@ export async function adopt(a) {
   if (!row) return { ok: false, error: 'It is not listed any more.' };
   if (row.kind === 'background' && row.pid) return { ok: true, id: row.id };
   if (!Number.isInteger(row.pid) || row.pid <= 1) return { ok: false, error: 'It is not running.' };
-  if (row.status === 'busy' || row.status === 'waiting' || row.waitingFor) return { ok: false, error: 'It is busy: move it once it is idle.' };
+  // At a permission prompt nothing has run yet: moved here (every permission allowed), it goes on with that step. Anything
+  // else busy or mid-turn waits until it is idle.
+  const prompt = atPrompt(row, readHook(p, row.sessionId));
+  if (!prompt && (row.status === 'busy' || row.status === 'waiting' || row.waitingFor)) return { ok: false, error: 'It is busy: move it once it is idle.' };
   if (sessionRecord(p, row.pid)?.entrypoint === 'claude-desktop') return { ok: false, error: 'It runs in the Claude app.' };
   const file = row.cwd && transcriptOf(p, row.sessionId, row.cwd);
   if (!file) return { ok: false, error: 'It has no saved conversation to continue.' };
   const t = readTranscript(file);
-  if (t.turnOver === false) return { ok: false, error: 'It is mid-turn: move it once it is idle.' };
+  if (!prompt && t.turnOver === false) return { ok: false, error: 'It is mid-turn: move it once it is idle.' };
   const closed = await close(a);
   if (!closed.ok) return closed;
   for (let i = 0; i < 40; i++) { try { process.kill(row.pid, 0); } catch { break; } await new Promise((r) => setTimeout(r, 250)); }
@@ -1250,6 +1274,65 @@ export async function adopt(a) {
     if (id && /started a copy/.test(r.stdout + r.stderr)) return { ok: true, id, copy: true, note: `It goes on as a copy (${id}), the whole conversation in it.` };
   }
   return id ? { ok: true, id } : { ok: false, error: `It was closed but did not start again: ${oneLine(r.stderr || r.stdout || r.err?.message, 240) || 'claude --bg --resume failed'}. Its conversation is kept: resume it with claude --resume ${row.sessionId}` };
+}
+
+/** Continue a closed session as a background job, conversation kept: a background job's record (`claude respawn <id>`,
+ *  under its own id and flags), else `claude --bg --resume <sessionId>` in its folder, on its model, every permission
+ *  allowed. One that runs is left as it is. */
+export async function resume(a) {
+  const p = claudeProfiles().find((x) => x.id === a?.profile);
+  if (!p) return { ok: false, error: 'There is no such account here.' };
+  const roster = await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) });
+  let rows = [];
+  try { rows = JSON.parse(roster.stdout); } catch {}
+  const row = rowOf(rows, a.sessionId) ?? (a.id ? rows.find((r) => r?.id === a.id) : null);
+  if (row?.pid) return { ok: true, id: row.id ?? null, running: true };
+  const id = /^[0-9a-f]{8}$/.test(row?.id ?? '') ? row.id : /^[0-9a-f]{8}$/.test(a?.id ?? '') ? a.id : null;
+  if (id && row?.kind === 'background') {
+    const r = await run(bin('claude'), ['respawn', id], { env: profileEnv(p), timeout: 30_000 });
+    if (!r.err) return { ok: true, id };
+    const why = oneLine(r.stderr || r.stdout || r.err.message, 240);
+    if (!row.sessionId) return { ok: false, error: why || 'claude respawn failed' };
+    // A record respawn won't take (its worktree gone, say): the conversation itself goes on under a new record.
+  }
+  const sid = row?.sessionId ?? a.sessionId;
+  if (!/^[0-9a-f-]{36}$/.test(sid ?? '')) return { ok: false, error: 'It has no saved conversation to continue.' };
+  const cwd = folder(row?.cwd ?? a.cwd) ?? HOME;
+  const file = transcriptOf(p, sid, cwd) ?? findTranscript(p.id, sid);
+  if (!file) return { ok: false, error: 'It has no saved conversation to continue.' };
+  const t = readTranscript(file);
+  const args = ['--bg', '--resume', sid, ...ALLOW_ALL];
+  if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
+  const r = await run(bin('claude'), args, { cwd, env: profileEnv(p), timeout: 30_000 });
+  const nid = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
+  if (nid) return { ok: true, id: nid };
+  const why = oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg --resume failed';
+  return /^Workspace not trusted/.test(why) ? { ok: false, untrusted: true, cwd: tilde(cwd), error: why } : { ok: false, error: why };
+}
+
+/** After a reboot (or a crash that took Claude Code's daemon with it) every background job is gone, and Claude Code still
+ *  lists each as running: here each one that was running when the machine went (its record says running and was written
+ *  to within two days, and no process) is started again, `claude respawn <id>`, under its own id. Jobs you stopped (their
+ *  record says so) stay stopped. Called once, when the panel starts. */
+export async function revive({ maxAgeMs = 2 * DAY } = {}) {
+  const out = [];
+  for (const p of claudeProfiles()) {
+    const env = profileEnv(p);
+    const roster = await run(bin('claude'), ['agents', '--json', '--all'], { env, timeout: 15_000 });
+    let rows = [];
+    try { rows = JSON.parse(roster.stdout); } catch { continue; }
+    for (const r of rows) {
+      if (r?.kind !== 'background' || r.pid || !/^[0-9a-f]{8}$/.test(r.id ?? '')) continue;
+      if (['stopped', 'failed', 'done'].includes(r.state)) continue;
+      const s = jobRecord(p, r.id);
+      if (s?.state !== 'running') continue;
+      const at = Date.parse(s.updatedAt ?? s.createdAt ?? '') || 0;
+      if (!at || Date.now() - at > maxAgeMs) continue;
+      const x = await run(bin('claude'), ['respawn', r.id], { env, timeout: 30_000 });
+      out.push({ profile: p.id, id: r.id, sessionId: r.sessionId ?? null, name: r.name ?? null, ok: !x.err, error: x.err ? oneLine(x.stderr || x.stdout || x.err.message, 200) : null });
+    }
+  }
+  return { ok: true, revived: out };
 }
 
 /** Continue a session as a copy in the background, so it opens as a terminal here while the original (a desktop-app
@@ -1418,7 +1501,7 @@ if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
   const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
                  close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args), interject: () => interject(args),
-                 tokens: () => tokens(args) }[process.env.FLEET_DO];
+                 tokens: () => tokens(args), resume: () => resume(args), revive: () => revive(args) }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };
   process.stdout.write(JSON.stringify(r));
 }

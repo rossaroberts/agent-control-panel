@@ -1836,7 +1836,7 @@ async function handle(req, res) {
                       '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),
                       '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/send': (b) => fleet.send(b),
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
-                      '/api/fleet/archive-all': (b) => fleet.archiveAll(b),
+                      '/api/fleet/archive-all': (b) => fleet.archiveAll(b), '/api/fleet/hide': (b) => fleet.hide(b), '/api/fleet/resume': (b) => fleet.resume(b),
                       '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b), '/api/fleet/fork': (b) => fleet.fork(b),
                       '/api/fleet/interject': (b) => fleet.interject(b), '/api/satellite': (b) => satellite.read(b) };
     if (Object.hasOwn(ACTIONS, url.pathname)) {
@@ -1951,6 +1951,8 @@ server.listen(PORT, '127.0.0.1', () => {
   setInterval(() => { if (looking()) checkVersions(); }, VERSIONS_MS);
   setInterval(() => { prune(); broadcast(); }, 10_000);
   setInterval(() => scanWorld(worldScans++ % 5 === 0), WORLD_MS);
+  // Background jobs that died with this machine (a reboot) come back by themselves, once the first read is in.
+  if (process.env.FLEET_REVIVE !== '0') setTimeout(() => fleet.revive().catch((e) => console.error('fleet revive:', e?.message ?? e)), 15_000).unref();
   // The order stream ends by itself when the hub says 401, and a `login` from a terminal never tells this process, so
   // look every minute: a stream that has ended is opened again, and one that is up still asks the hub for its pending
   // orders, in case the stream missed one (a Mac that slept through a drop can hold a stream that hears nothing).
