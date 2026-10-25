@@ -183,6 +183,9 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 #p-term .ghost { position: absolute; z-index: 10; pointer-events: none; white-space: pre; color: #8f979c; background: var(--term-bg);
                  font: 13px "IBM Plex Mono", ui-monospace, Menlo, monospace; }
 #p-term .ghost[hidden] { display: none; }
+#p-term .clipnote { position: absolute; z-index: 11; top: 8px; right: 12px; pointer-events: none; padding: 2px 8px; border-radius: 4px;
+  font: 12px/1.5 "IBM Plex Mono", ui-monospace, Menlo, monospace; color: #dcdfe1; background: rgba(63,182,238,.22); }
+#p-term .clipnote[hidden] { display: none; }
 #p-term .xterm-viewport { scrollbar-color: #3a3f43 transparent; }
 #pane { --paper: var(--term-bg); --tint: #232729; --ink: #dcdfe1; --grey: #9ba2a7; --quiet: #6c7277; --rule: #2c3033;
         --blue: #3fb6ee; --orange: #ef9a4c; --red: #ec7468; --green: #5fbd8b; color-scheme: dark; color: var(--ink); font-size: 13px; }
@@ -784,6 +787,60 @@ function pieces(d, n = 65536) {
   return out;
 }
 
+/** Copying out of a terminal. Claude Code's fullscreen screen takes the mouse: a drag there is its own selection, and it
+ *  copies what you selected by printing it as an OSC 52 escape, which a terminal in a page drops unless the page takes it.
+ *  Here it reaches your clipboard. Safari lets a page write the clipboard only while it handles a click or a key, so
+ *  letting go of a drag opens a write there and then that the escape fills when it comes (none within 3 s: nothing is
+ *  written); ⌘C writes the last one again. An escape with no drag, click or key of yours in that terminal just before
+ *  it is kept for ⌘C, never written by itself. A request to read the clipboard is never answered. Option-drag selects the
+ *  terminal's own text instead, as in any Mac terminal, and ⌘C copies that. */
+function osc52(data) {
+  const i = data.indexOf(';'), b64 = i < 0 ? '' : data.slice(i + 1);
+  if (!b64 || b64 === '?') return null;
+  try { const bin = atob(b64); return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0))); } catch { return null; }
+}
+const give = (text) => (navigator.clipboard?.writeText ? navigator.clipboard.writeText(text).then(() => true, () => false) : Promise.resolve(false));
+let pressed = null; // where a press in a terminal began: { T, x, y }
+function copyable(T) {
+  T.clip = null; T.wait = null; T.touched = 0;
+  T.term.parser.registerOscHandler(52, (data) => {
+    const text = osc52(data);
+    if (text == null) return true;
+    T.clip = text;
+    if (T.wait) { T.wait.ok(text); T.wait = null; }
+    else if (Date.now() - T.touched < 4000) give(text).then((ok) => { if (!ok) clipNote(T, '⌘C to copy'); });
+    return true;
+  });
+  T.el.addEventListener('mousedown', (e) => { pressed = { T, x: e.clientX, y: e.clientY }; T.clip = null; T.touched = Date.now(); }, true);
+}
+// Let go anywhere (a drag can end outside the pane): the terminal it began in opens its write.
+addEventListener('mouseup', (e) => {
+  const p = pressed; pressed = null;
+  if (!p || p.T.ended) return;
+  const { T } = p;
+  T.touched = Date.now();
+  const dragged = Math.hypot(e.clientX - p.x, e.clientY - p.y) > 3;
+  if (T.term.modes.mouseTrackingMode === 'none' || e.altKey || !(dragged || e.detail >= 2)) return;
+  if (!window.ClipboardItem || !navigator.clipboard?.write) return;
+  T.wait?.no(new Error('another selection'));
+  const filled = new Promise((ok, no) => { T.wait = { ok, no }; });
+  const w = T.wait;
+  setTimeout(() => { if (T.wait === w) { T.wait = null; w.no(new Error('nothing selected')); } }, 3000);
+  navigator.clipboard.write([new ClipboardItem({ 'text/plain': filled.then((t) => new Blob([t], { type: 'text/plain' })) })]).catch(() => {});
+}, true);
+/** ⌘C in a terminal: the terminal's own selection copies as usual; with none, the last thing the program copied. */
+function copyKey(T, e) {
+  if (e.type !== 'keydown' || !e.metaKey || e.ctrlKey || e.altKey || e.key.toLowerCase() !== 'c' || T.term.hasSelection() || !T.clip) return false;
+  e.preventDefault();
+  give(T.clip).then((ok) => clipNote(T, ok ? 'copied' : 'could not copy'));
+  return true;
+}
+function clipNote(T, text) {
+  T.note ||= T.el.appendChild(h('div', { class: 'clipnote', hidden: true }));
+  T.note.textContent = text; T.note.hidden = false;
+  clearTimeout(T.noteT); T.noteT = setTimeout(() => { T.note.hidden = true; }, 2200);
+}
+
 /** The terminal for a session, attached now if it isn't yet; out of sight unless `now` (it is about to be shown). */
 function attachTerm(x, now = false) {
   const key = keyOf(x);
@@ -796,7 +853,7 @@ function attachTerm(x, now = false) {
   el.append(ghost);
   $('p-term').append(el);
   const term = new Terminal({ fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace', fontSize: 13, lineHeight: 1.2, cursorBlink: true,
-    scrollback: 5000, theme: TERM_THEME, macOptionIsMeta: true, cols: lastSize.cols, rows: lastSize.rows });
+    scrollback: 5000, theme: TERM_THEME, macOptionIsMeta: true, macOptionClickForcesSelection: true, cols: lastSize.cols, rows: lastSize.rows });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
@@ -806,7 +863,8 @@ function attachTerm(x, now = false) {
   terms.set(key, T);
   wire.refs.set(T.ref, T);
   term.onData((d) => typed(T, d));
-  term.attachCustomKeyEventHandler((e) => !((e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key.toLowerCase() === 'k' || e.key === '\\')) || (e.ctrlKey && e.key === '`')));
+  term.attachCustomKeyEventHandler((e) => !(copyKey(T, e) || (e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key.toLowerCase() === 'k' || e.key === '\\')) || (e.ctrlKey && e.key === '`')));
+  copyable(T);
   // Its size goes once you stop dragging: every change makes the program draw its whole screen again.
   term.onResize(({ cols, rows }) => { clearTimeout(T.sizeT); T.sizeT = setTimeout(() => { if (!T.ended) tell(T, { op: 'size', cols, rows }); }, 80); });
   tell(T, { op: 'open', machine: x.machine, profile: x.profile, cols: term.cols, rows: term.rows,
@@ -841,6 +899,7 @@ async function ended(T, error, note = null) {
 }
 /** A key you typed: to the session in order; shown at once when it takes long to come back; /exit ends it. */
 function typed(T, d) {
+  T.touched = Date.now();
   if (T.ended) { if (d === '\r') { dropTerm(T.key); const y = current(); if (y && pane.key === T.key) showTerm(y); } return; }
   for (const part of pieces(d)) tell(T, { op: 'in', data: part });
   T.sentAt ||= Date.now();

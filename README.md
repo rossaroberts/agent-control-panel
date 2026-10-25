@@ -178,7 +178,11 @@ what each one is working on, talk to it, and decide where the next one goes. The
   is instant (about 40 ms) with its scrollback all there. Hovering a row attaches nothing (a terminal is a process where
   the session runs); a row opens as you press it. Where a key takes long to come back (redbat is a quarter of a second away),
   what you type shows at once over the cursor, an overlay only, until the real screen catches up. **/exit** ends the
-  session and closes the pane. xterm draws on the GPU (WebGL) where it can.
+  session and closes the pane. xterm draws on the GPU (WebGL) where it can. **Copying**: a drag in Claude Code's
+  fullscreen screen is its own selection, and what it copies (an OSC 52 escape) reaches your clipboard when you let go;
+  ⌘C copies it again. Option-drag selects the terminal's own text instead, and ⌘C copies that. Paste is ⌘V as anywhere.
+  The page writes the clipboard only right after a drag, click or key of yours in that terminal, and never tells a
+  program what is on it.
 - **An Astra (Codex) session** shows its conversation; one that is closed and finished its last turn has **terminal**,
   which opens it in Codex's own screen here (`codex resume <id>` in its folder, every permission allowed). Not a live one
   (open in the Codex app): resuming takes the thread over. One that stopped mid-turn asks first ("continue its turn?").
