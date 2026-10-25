@@ -19,8 +19,8 @@
 /* After iA Writer: paper, ink, one typeface, one blue. Structure is whitespace and tone, never boxes; words only where a
    glyph can't say it. Every text colour clears 4.5:1 on paper and on the selection tint; --quiet is for drawn marks only. */
 :root {
-  --cols: 10px minmax(220px, 380px) 84px 70px 70px 60px 64px 56px minmax(0, 1fr);
-  --cols-mid: 10px minmax(0, 1fr) 84px 70px 70px 64px 56px;
+  --cols: 10px minmax(220px, 380px) 84px 70px 70px 72px 60px 64px 56px minmax(0, 1fr);
+  --cols-mid: 10px minmax(0, 1fr) 84px 70px 70px 72px 64px 56px;
   --cols-narrow: 10px minmax(0, 1fr) 84px 64px;
   --paper: #f6f7f7; --tint: #eceeef; --ink: #1e2124; --grey: #5f666b; --quiet: #858c91; --rule: #e2e5e7;
   --blue: #0a72a3; --orange: #a5560f; --red: #bf3f33; --green: #2b7d52;
@@ -139,6 +139,7 @@ main > #machines > .epic:first-child { margin-top: 0; }
 .c.open { background: var(--tint); color: var(--ink); }
 .c span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .c .ctx { text-align: right; }
+.s .start, .c .start { color: var(--grey); }
 .reading { color: var(--grey); font-size: 13px; margin-top: 34px; }
 
 @container (max-width: 1080px) {
@@ -147,7 +148,7 @@ main > #machines > .epic:first-child { margin-top: 0; }
 }
 @container (max-width: 760px) {
   .s, .c { grid-template-columns: var(--cols-narrow); }
-  .at, .who, .use { display: none; }
+  .at, .who, .use, .start { display: none; }
   .s .ttl { white-space: normal; }
   .mline { grid-template-columns: 8ch 1fr; } .mline .tally, .acct .tally { display: none; }
   .acct { grid-template-columns: 8ch 1fr; }
@@ -197,6 +198,10 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 .p-run { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--grey); padding: 2px 0 0 18px; min-width: 0; }
 .p-run .p-step { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .p-run .p-wait { color: var(--orange); white-space: nowrap; }
+.p-agents { padding: 2px 0 0 18px; font-size: 13px; color: var(--grey); min-width: 0; }
+.p-agents .ag { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
+.p-agents .ag b { font-weight: 500; color: var(--ink); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.p-agents .ag span:not(.dot) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .p-more { color: var(--grey); } .p-more:hover, .p-more.on { color: var(--ink); }
 .p-x, .p-fold { color: var(--grey); align-self: center; } .p-x:hover, .p-fold:hover { color: var(--ink); }
 .p-title[contenteditable]:hover, .p-title[contenteditable]:focus { outline: none; box-shadow: 0 1px 0 var(--quiet); }
@@ -337,6 +342,9 @@ function reloadFresh() {
 }
 const when = (t) => { const a = ago(t); return !a ? '' : a === 'now' ? 'now' : `${a} ago`; };
 const ago = (t) => { if (!t) return ''; const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
+/** When something began, short: its time if today, else its day (the full date is in the tooltip). */
+const stamp = (t) => { if (!t) return ''; const d = new Date(t); return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { day: 'numeric', month: 'short' }); };
+const startCell = (x) => { const t = x.startedAt ?? x.since; return h('span', { class: 'start', text: stamp(t), title: t ? `started ${new Date(t).toLocaleString()}` : '' }); };
 const until = (t) => { const s = (t - Date.now()) / 1000; return s <= 0 ? 'now' : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.floor(s / 86400)}d ${Math.round((s % 86400) / 3600)}h`; };
 const level = (p) => (p >= 90 ? 'hi' : p >= 70 ? 'mid' : '');
 const shortModel = (m) => (typeof m !== 'string' ? null : m.replace(/^claude-/, '').replace(/-(\d+)-(\d+)/, ' $1.$2').replace(/-(\d+)$/, ' $1').replace('[1m]', ' 1m'));
@@ -700,6 +708,7 @@ async function sendText(text) {
   pane.sending = false;
   pane.said = r.ok ? null : { cls: 'no', text: r.error };
   if (!r.ok) { pane.items = (pane.items ?? []).filter((it) => !it.pending); if (!$('p-reply').value) $('p-reply').value = text; }
+  if (r.ok && /^\/(exit|quit)$/i.test(text.trim())) load(); // it closed: the list says so
   renderPane(true); peek();
 }
 
@@ -995,7 +1004,7 @@ function renderPane(toEnd = false) {
   $('p-reply').hidden = !talk;
   $('p-reply').readOnly = pane.sending; // not disabled: that would take the focus away
   $('p-reply').placeholder = x.via === 'background' ? 'Message it' : 'Note to it';
-  $('p-reply').title = x.via !== 'background' ? 'It reads this as a note from another session: use claude.ai or move it here for /model, /effort or a yes it needs from you' : '';
+  $('p-reply').title = x.via !== 'background' ? 'It reads this as a note from another session: use claude.ai or move it here for /model, /effort or a yes it needs from you. /exit closes it.' : '';
   $('p-tools').replaceChildren(...[pane.sending ? h('span', { text: '…' }) : null].filter(Boolean));
   growReply();
 }
@@ -1039,12 +1048,15 @@ function renderHead(x, term) {
     x.queued?.length ? h('span', { class: 'p-wait', text: `${x.queued.length} of yours waiting`, title: x.queued.join('\n') }) : null,
     x.running.tool === 'Bash' ? h('button', { class: `act${pane.armStop ? ' armed' : ''}`, text: pane.armStop ? 'stop it and read?' : 'interject',
       title: 'Stop the command this step runs (only that: the session goes on), so it reads what you sent now (i)', onclick: interjectNow }) : null) : null;
+  // The agents it has going, one line each: what it was asked, its last step, how long since it moved.
+  const agents = x.live && x.agents?.length ? h('div', { class: 'p-agents' }, x.agents.map((a) => h('div', { class: 'ag', title: [a.type, a.model, a.since ? `started ${new Date(a.since).toLocaleTimeString()}` : null].filter(Boolean).join(' · ') },
+    h('span', { class: 'dot working' }), h('b', { text: a.what ?? a.type ?? 'agent' }), h('span', { text: a.step ? `${a.step} · ${ago(a.lastAt)}` : ago(a.lastAt) })))) : null;
   const parts = [
     h('div', { class: 'p-top' }, h('span', { class: `dot ${x.state}`, title: WORD[x.state] ?? '' }), titleField(x), state, move, copy, codexOpen,
       h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),
-    run,
+    run, agents,
     pane.more ? h('div', { class: 'p-meta', title: [x.name, x.cwd, x.model].filter(Boolean).join('\n') },
       [WORD[x.state], x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx (${ctxWords(c)})`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
         .filter(Boolean).map((t) => h('span', { text: t }))) : null,
@@ -1199,14 +1211,17 @@ function row(x) {
   const why = x.state === 'needs-you' ? [typeof x.waitingFor === 'string' ? x.waitingFor : null, x.doing ?? x.said].filter(Boolean).join(': ')
     : x.state === 'capped' ? (lifted ? 'its limit has lifted: tell it to go on' : x.limitHit?.text ?? '') : '';
   const what = [x.state === 'working' ? (x.running ? `${x.running.step} · ${ago(x.running.since)}` : x.doing ?? x.said ?? '') : '',
+    x.agents?.length ? `${x.agents.length} agent${x.agents.length > 1 ? 's' : ''}` : '',
     x.queued?.length ? `${x.queued.length} of yours waiting` : ''].filter(Boolean).join(' · ');
-  return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}`, tabindex: 0,
+  const agentLines = (x.agents ?? []).map((a) => `  · ${a.what ?? a.type ?? 'agent'}`).join('\n');
+  return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}${agentLines ? `\nagents:\n${agentLines}` : ''}`, tabindex: 0,
       ...rowActs(x) },
     h('span', { class: `dot ${x.state}${lifted ? ' lifted' : ''}`, title: lifted ? 'its limit has lifted' : WORD[x.state] ?? '' }),
     h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine }),
     h('span', { class: `stage ${x.stage ?? ''}`, text: x.stage ?? '' }),
     h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }),
+    startCell(x),
     h('span', { class: 'eff', text: x.effort ?? '', title: 'effort' }),
     h('span', { class: 'ctx', title: c ? ctxWords(c) : '' },
       c ? h('span', { class: 'line' }, h('b', { class: level(c.pct), style: `width:${Math.min(100, c.pct)}%` })) : null),
@@ -1219,7 +1234,7 @@ function row(x) {
 function gone(x) {
   return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', ...rowActs(x) },
     h('span', { class: 'dot closed' }), h('span', { text: x.title ?? x.name ?? x.id ?? x.engine }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
-    h('span', { class: 'who', text: x.sub ?? '' }), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
+    h('span', { class: 'who', text: x.sub ?? '' }), startCell(x), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
     h('span', { class: 'use' }), h('span', { class: 'what' }));
 }
 let armedEpic = null, epicT = null;
@@ -1316,9 +1331,22 @@ async function reload() {
       const y = key && everything.find((x) => keyOf(x) === key);
       if (y && !pane.key) select(y);
     }
+    if (wanted) openWanted();
   } catch (e) { if (e.message !== 'reloading') { $('err').hidden = false; $('err').textContent = String(e.message); } }
 }
 $('refresh').addEventListener('click', load);
+// A link into one session (`/#<machine>:<sessionId>`, the way Satellite's agent cell points here): it opens once the list has it.
+let wanted = null;
+function openWanted() {
+  const key = wanted; wanted = null;
+  const y = everything.find((x) => keyOf(x) === key);
+  if (!y) { $('err').hidden = false; $('err').textContent = 'Fleet does not list that session any more.'; return; }
+  if (pane.key !== keyOf(y)) select(y);
+  document.querySelector(`#machines [data-key="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'center' });
+}
+const fromHash = () => { let k = ''; try { k = decodeURIComponent(location.hash.slice(1)); } catch {} if (!k) return; wanted = k; history.replaceState(null, '', location.pathname + location.search); if (snap) openWanted(); };
+addEventListener('hashchange', fromHash);
+fromHash();
 load();
 wired().catch(() => {}); // the panel tells this page when something changes, over the same socket the terminals use
 // Every 10 seconds while you look (the panel reads behind it as often, so each answers at once); every minute in a

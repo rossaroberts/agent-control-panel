@@ -95,6 +95,8 @@ td.ag { color: var(--ink); }
 td.ag .in { display: flex; align-items: baseline; min-width: 0; }
 td.ag .tx { font-size: 13px; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 td.ag .m, td.ag .more { color: var(--grey); margin-left: 8px; flex: none; }
+td .pg { font-size: 13px; line-height: 1.5; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+td .pg a { color: var(--blue); margin-right: 10px; }
 td a:hover { text-decoration: underline; text-underline-offset: 3px; }
 th a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .g { width: 15px; height: 15px; vertical-align: -3px; margin-right: 8px; flex: none; overflow: visible; }
@@ -235,7 +237,8 @@ function cellTitle(c, key) {
 function cell(key, c, row) {
   if (!c) return h('td', { class: key });
   if (key === 'agent') {
-    return h('td', { class: 'ag', title: cellTitle(c, 'agent') }, h('div', { class: 'in' }, dot(c.s), h('span', { class: 'tx', text: c.t }), c.sub ? h('span', { class: 'm', text: c.sub }) : null, c.more ? h('span', { class: 'more', text: `+${c.more}` }) : null));
+    return h('td', { class: 'ag', title: cellTitle(c, 'agent') }, h('div', { class: 'in' }, dot(c.s),
+      c.key ? h('a', { class: 'tx', href: `/#${encodeURIComponent(c.key)}`, title: 'Open it in Fleet', text: c.t }) : h('span', { class: 'tx', text: c.t }), c.sub ? h('span', { class: 'm', text: c.sub }) : null, c.more ? h('span', { class: 'more', text: `+${c.more}` }) : null));
   }
   if (key === 'pr') {
     const label = row.number != null ? `#${row.number}` : null;
@@ -254,7 +257,14 @@ function cell(key, c, row) {
   return h('td', { class: `${key} ${c.s === 'fail' ? 'fail' : ''}`, title: cellTitle(c, key) },
     c.href ? h('a', { href: c.href, target: '_blank', rel: 'noopener' }, inner) : inner,
     c.at && AGE_IN_ROW.has(key) ? h('span', { class: 'at', text: ago(c.at) }) : null,
-    c.since ? h('span', { class: `since${c.stuck ? ' stuck' : ''}`, text: ago(c.since), title: 'here since' }) : null);
+    c.since ? h('span', { class: `since${c.stuck ? ' stuck' : ''}`, text: ago(c.since), title: 'here since' }) : null,
+    key === 'test' && c.s === 'done' && data?.testUrl && row.pages?.length ? pagesLine(row.pages) : null);
+}
+/** The pages a change reaches, as links onto TEST: open one, signed in there, and try it. */
+function pagesLine(pages) {
+  const shown = pages.slice(0, 3), rest = pages.slice(3), base = data.testUrl.replace(/\/$/, '');
+  return h('div', { class: 'pg' }, ...shown.map((p) => h('a', { href: base + p, target: '_blank', rel: 'noopener', text: p, title: `Open ${p} on TEST` })),
+    rest.length ? h('span', { class: 'more', text: `+${rest.length}`, title: rest.join('\n') }) : null);
 }
 
 function groupRow(cls, label, count, extra) {

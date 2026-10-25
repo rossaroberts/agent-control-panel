@@ -325,6 +325,32 @@ function readTranscript(file) {
   return out;
 }
 
+/** The agents a session has going (`<transcripts>/<sessionId>/subagents/agent-<id>.jsonl` + `.meta.json`, as Claude Code
+ *  writes them): not finished, written to within the hour. Newest first; what each was asked, its model and its last step. */
+export function agentsOf(file, sessionId, now = Date.now()) {
+  if (!file || !/^[\w-]{8,80}$/.test(sessionId ?? '')) return [];
+  const dir = path.join(path.dirname(file), sessionId, 'subagents');
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => /^agent-[\w-]+\.jsonl$/.test(n)); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    const log = path.join(dir, n);
+    let st; try { st = fs.statSync(log); } catch { continue; }
+    if (now - st.mtimeMs > 3600_000) continue;
+    const meta = readJson(log.replace(/\.jsonl$/, '.meta.json'), 1 << 20) ?? {};
+    if (meta.finished === true) continue;
+    let step = null;
+    for (const l of tail(log, 64 * 1024).reverse()) {
+      const d = parse(l);
+      const use = d?.type === 'assistant' && Array.isArray(d.message?.content) ? d.message.content.findLast((c) => c.type === 'tool_use') : null;
+      if (use) { step = stepOf(use.name, use.input ?? {}); break; }
+    }
+    out.push({ id: n.slice('agent-'.length, -'.jsonl'.length), what: oneLine(meta.description, 200), type: typeof meta.agentType === 'string' ? meta.agentType : null,
+               model: typeof meta.model === 'string' ? meta.model : null, step, lastAt: st.mtimeMs, since: st.birthtimeMs > 0 ? st.birthtimeMs : null });
+  }
+  return out.sort((a, b) => b.lastAt - a.lastAt).slice(0, 12);
+}
+
 // ---------------------------------------------------------------- how much of the weekly limit a session used
 // Claude Code reports usage per account, not per session, so a session's share is estimated from its own transcript: each
 // reply's tokens since the account's weekly window began, weighted the way usage is priced (a cache read is cheap, output
@@ -535,6 +561,7 @@ async function claudeProfile(p, learned, usage) {
              // No screen of its own: a Remote Control server spawned it for claude.ai. Nothing is lost moving it here.
              headless: rec?.entrypoint === 'sdk-cli', stage: t.stage ?? null,
              running: live ? t.running ?? null : null, queued: live && t.queued?.length ? t.queued.map((x) => oneLine(x.text, 300)) : null,
+             agents: live && file ? agentsOf(file, r.sessionId) : [],
              branch: branchOf(t.workdir ?? r.cwd) ?? branchOf(r.cwd), workdir: t.workdir ? tilde(t.workdir) : null,
              // What decides its state again when a hook event comes in between reads (fleet.mjs).
              rs: { state: r.state ?? null, status: r.status ?? null, active: Boolean(r.active) }, writtenAt: t.writtenAt ?? null, hookAt: h?.at ?? null };
@@ -1077,7 +1104,7 @@ async function versionOf(pid) {
 }
 /** Your next message to a running session: a Remote Control session through its claude.ai session, a background job the way
  *  agent view's reply does (`claude --resume <id> -- <text>` in a terminal of its own, until the message is in its
- *  transcript). A plain terminal session or a desktop-app one takes input only where it runs. */
+ *  transcript). A plain terminal session or a desktop-app one takes input only where it runs. `/exit` closes it (close, below). */
 export async function send(a) {
   const text = typeof a?.text === 'string' ? a.text.trim() : '';
   if (!text || text.length > 20_000) return { ok: false, error: 'Write a message (up to 20,000 characters).' };
@@ -1098,6 +1125,13 @@ export async function send(a) {
   const cse = remoteId(sessionRecord(p, row.pid)?.bridgeSessionId)?.slice('session_'.length)
     ?? argsOf.map((v) => /\/v1\/code\/sessions\/cse_(\w+)/.exec(v)?.[1]).find(Boolean);
   if (row.kind !== 'background') {
+    // /exit here means what it means in its terminal: a clean close, conversation kept (the close control, by another
+    // name). Not while it works: that would cut a step short.
+    if (/^\/(exit|quit)$/i.test(text)) {
+      const file = transcriptOf(p, row.sessionId, row.cwd);
+      if (sessionState(row, file ? readTranscript(file) : {}, readHook(p, row.sessionId)).state === 'working') return { ok: false, error: 'It is working: /exit when it is done, or interject first.' };
+      return close(a);
+    }
     if (!cse) return { ok: false, error: 'Type /rc in its terminal once, then it takes messages here.' };
     if (text.startsWith('-')) return { ok: false, error: 'Start it with a word, not a dash.' };
     const r = await run(bin('claude'), ['-p', '--cloud', `session_${cse}`, text], { env: profileEnv(p), cwd: row.cwd ?? HOME, timeout: 60_000 });

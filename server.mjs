@@ -125,7 +125,7 @@ const KEY = pairKey(PREFS);
 // Every machine's agents and accounts in one view (fleet/); its machines are listed in fleet.json beside prefs.json.
 const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
 // Satellite: the delivery pipeline on GitHub, every PR from agent to production (fleet/satellite.mjs), read-only.
-const satellite = createSatellite({ snapshot: () => fleet.snapshot() });
+const satellite = createSatellite({ snapshot: () => fleet.snapshot(), testUrl: () => (fleet.config().epics ?? []).find((e) => e.test)?.test ?? null });
 const terms = createTerms({ config: () => fleet.config(), codexBusy: (machine, sessionId) => fleet.codexBusy(machine, sessionId) });
 // The terminal in Fleet's page: xterm.js, kept here so the page needs no network for it.
 const VENDOR = { 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',

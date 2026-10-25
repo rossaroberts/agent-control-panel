@@ -278,3 +278,29 @@ test('pickStep: the step\'s own process group under the session, by when it bega
   assert.deepEqual(pickStep(rows, { pid: 41, since, want: '', self: [], now }), []);
   assert.deepEqual(pickStep([row(1, 41, 1, '01:05', 'bash -c npm test -- --watch')], { pid: 41, since, want, now }), [], 'never init');
 });
+
+import { agentsOf } from '../fleet/machine.mjs';
+test('the agents a session has going: not finished and written to within the hour, newest first, each with what it was asked and its last step', () => {
+  const h = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-agents-'));
+  const sid = 'cccccccc-3333-4444-5555-666666666666';
+  const file = path.join(h, `${sid}.jsonl`);
+  fs.writeFileSync(file, '');
+  const dir = path.join(h, sid, 'subagents');
+  fs.mkdirSync(dir, { recursive: true });
+  const line = (name, input) => JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'tool_use', name, input }] } }) + '\n';
+  fs.writeFileSync(path.join(dir, 'agent-a1.jsonl'), line('Read', { file_path: '/x/a.ts' }) + line('Bash', { command: 'npm test', description: 'Run the tests' }));
+  fs.writeFileSync(path.join(dir, 'agent-a1.meta.json'), JSON.stringify({ agentType: 'general-purpose', description: 'Review the diff', model: 'sonnet', finished: false }));
+  fs.writeFileSync(path.join(dir, 'agent-a2.jsonl'), line('Read', { file_path: '/x/b.ts' }));
+  fs.writeFileSync(path.join(dir, 'agent-a2.meta.json'), JSON.stringify({ agentType: 'Explore', description: 'Find the callers', finished: true }));
+  fs.writeFileSync(path.join(dir, 'agent-a3.jsonl'), line('Grep', { pattern: 'foo' }));
+  fs.writeFileSync(path.join(dir, 'agent-a3.meta.json'), JSON.stringify({ description: 'An old one' }));
+  const old = (Date.now() - 2 * 3600_000) / 1000;
+  fs.utimesSync(path.join(dir, 'agent-a3.jsonl'), old, old);
+  fs.writeFileSync(path.join(dir, 'agent-a4.jsonl'), line('Glob', { pattern: '*.ts' })); // no meta file yet: live by its clock
+  const got = agentsOf(file, sid);
+  assert.deepEqual(got.map((a) => [a.id, a.what, a.type, a.model, a.step]).sort(), [['a1', 'Review the diff', 'general-purpose', 'sonnet', 'Run the tests'], ['a4', null, null, null, 'Find *.ts']]);
+  assert.ok(got.every((a) => a.lastAt > 0));
+  assert.deepEqual(agentsOf(file, 'dddddddd-0000'), [], 'a session with no agents folder');
+  assert.deepEqual(agentsOf(null, sid), []);
+  fs.rmSync(h, { recursive: true, force: true });
+});

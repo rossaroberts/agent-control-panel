@@ -38,6 +38,37 @@ const MERGED_FIELDS = 'number,title,headRefName,headRefOid,baseRefName,createdAt
 const QUEUE_QUERY = 'query($o:String!,$r:String!){repository(owner:$o,name:$r){s:mergeQueue(branch:"staging"){entries(first:50){nodes{position state pullRequest{number}}}} m:mergeQueue(branch:"main"){entries(first:50){nodes{position state pullRequest{number}}}}}}';
 
 const short = (sha) => String(sha ?? '').slice(0, 7);
+
+/** The app's routes as docs/generated/routes.md lists them (`- \`/path\``), in order. */
+export function routesIn(md) {
+  return [...String(md ?? '').matchAll(/^- `(\/[^`\s]*)`/gm)].map((m) => m[1]);
+}
+/** The pages a change reaches, as routes of the app, for a link onto TEST: a page file is its route (`app/finance/vat/page.tsx`
+ *  → `/finance/vat`; a `(group)` folder is dropped, a `[dynamic]` segment and what follows cut, then the nearest route the app
+ *  lists); a feature slice (`features/<slice>/…`) is the shortest listed routes with a segment of that name. Shortest first. */
+export function pagesOf(files, routes) {
+  const known = new Set(routes ?? []), out = new Set();
+  const nearest = (segs) => {
+    for (let i = segs.length; i >= 1; i--) { const r = '/' + segs.slice(0, i).join('/'); if (known.has(r)) return r; }
+    return !segs.length && known.has('/') ? '/' : null;
+  };
+  for (const f of files ?? []) {
+    const page = /^app\/(?:(.*)\/)?page\.tsx$/.exec(f);
+    if (page) {
+      const segs = (page[1] ?? '').split('/').filter((s) => s && !/^\(.*\)$/.test(s));
+      const cut = segs.findIndex((s) => s.startsWith('['));
+      const r = nearest(cut >= 0 ? segs.slice(0, cut) : segs);
+      if (r) out.add(r);
+      continue;
+    }
+    const slice = /^features\/([^/]+)\//.exec(f)?.[1];
+    if (!slice) continue;
+    const hits = [...known].filter((r) => !r.includes('[') && r.split('/').slice(1).some((s) => s === slice || s === `${slice}s` || s.startsWith(`${slice}-`)));
+    const depth = Math.min(...hits.map((r) => r.split('/').length));
+    for (const r of hits) if (r.split('/').length === depth) out.add(r);
+  }
+  return [...out].sort((a, b) => a.length - b.length || a.localeCompare(b));
+}
 const MIN = 60_000, HOUR = 3_600_000;
 /** The stations of the flow, in order, and the one a row is at: a branch an agent works on with no PR yet is building or
  *  testing it (as its session's tools say); a draft is at PR; an open PR at Checks until they pass, then at Land; then
@@ -381,7 +412,7 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
   const agentCell = (list) => {
     if (!list?.length) return null;
     const a = list[0];
-    return { s: AGENT_CELL[a.state] ?? 'wait', t: a.title || 'agent', sub: a.shared ? `${a.machine} · shared` : a.machine, more: list.length - 1, stage: a.stage ?? null,
+    return { s: AGENT_CELL[a.state] ?? 'wait', t: a.title || 'agent', key: a.sessionId ? `${a.machine}:${a.sessionId}` : null, sub: a.shared ? `${a.machine} · shared` : a.machine, more: list.length - 1, stage: a.stage ?? null,
       tip: list.map((x) => `${x.machine}${x.account ? ' · ' + x.account : ''}: ${x.title ?? 'agent'} (${x.state})${x.shared ? ', in the shared checkout' : ''}${x.inferred ? ', its own words name this branch' : ''}`).join('\n') };
   };
   const checksCell = (sum) => {
@@ -503,6 +534,7 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
     rows.push(settle({
       key: `pr:${pr.number}`, kind: 'pr', state: 'merged', number: pr.number, title: pr.title, branch: pr.headRefName, base: pr.baseRefName, url: pr.url,
       author: pr.author?.login ?? null, bot: Boolean(pr.author?.is_bot), promo: promoPr, labels: [], at: Math.max(mergedAt ?? 0, ...ags.map((a) => a.lastAt ?? 0)),
+      pages: promoPr ? [] : pagesOf(raw.files?.[pr.number], raw.routes),
       cells: { agent: agentCell(ags), pr: { s: 'done', t: 'merged', at: mergedAt }, checks: { s: 'done', t: '' },
         land: { s: 'done', t: viaStaging ? 'staging' : stacked ? `into ${pr.baseRefName}` : 'main', at: mergedAt }, promotion, test, prod },
     }, sat, why));
@@ -571,7 +603,7 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
 
 // ------------------------------------------------------------------------------------------------ the GitHub reads
 
-export function createSatellite({ repo = REPO, snapshot = async () => null, days = DAYS, stagingBranch = 'staging', exec = execGh, now = Date.now } = {}) {
+export function createSatellite({ repo = REPO, snapshot = async () => null, days = DAYS, stagingBranch = 'staging', exec = execGh, now = Date.now, testUrl = null } = {}) {
   const [owner, name] = repo.split('/');
   // These never change once known, so they are kept for the life of the panel.
   const jobsCache = new Map(); // finished run id → its jobs
@@ -580,6 +612,11 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
   let wfMeta = null;           // the workflow files and their ids: read at most hourly
   const wfExtra = new Map();   // workflow id → its last run, for the ones too quiet to be in the newest runs (ten minutes)
   const branchCache = new Map(); // branch → { at, info }: does GitHub have it, and where is its tip (a minute)
+  const filesCache = new Map(); // `<pr>:<merge sha>` → the files a merged PR changed (a promise of them): they never change
+  let routes = null, routesAt = 0; // the app's routes (docs/generated/routes.md on staging): read hourly
+  // A few `gh` processes at a time for the per-PR reads; the rest wait their turn.
+  let inPool = 0; const queueOfPool = [];
+  const pooled = (fn) => new Promise((ok, no) => { const go = () => { inPool++; fn().then(ok, no).finally(() => { inPool--; queueOfPool.shift()?.(); }); }; if (inPool < 6) go(); else queueOfPool.push(go); });
   let raw = null, rawAt = 0, inflight = null, failure = null, lastTry = 0, me = null;
 
   /** One full read of GitHub. The calls it made are counted, and the guard sees every one. */
@@ -699,6 +736,28 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
 
     // Merged PRs whose commit is not on staging's line (fixes straight into main): one compare per deploy, kept for good.
     const work = mergedAll.filter((pr) => Date.parse(pr.mergedAt) >= started - days * 86_400_000);
+    // The pages each merged PR touched, for the links onto TEST: its files (asked once per PR, ever; a few at a time, and
+    // this read waits only so long for them — the rest come with the next) against the app's routes (hourly).
+    const routesPromise = soft((async () => {
+      if (routes && now() - routesAt < 3600_000) return routes;
+      const b64 = await call(['api', `repos/${repo}/contents/docs/generated/routes.md?ref=${stagingBranch}`, '--jq', '.content']); // --jq prints the string raw
+      routes = routesIn(Buffer.from(String(b64).replace(/\s/g, ''), 'base64').toString('utf8')); routesAt = now();
+      return routes;
+    })(), routes ?? [], 'routes');
+    const fileKey = (pr) => `${pr.number}:${pr.mergeCommit?.oid ?? ''}`;
+    const filesOf = (pr) => {
+      const k = fileKey(pr);
+      if (!filesCache.has(k)) {
+        const p = pooled(() => soft(json(['api', `repos/${repo}/pulls/${pr.number}/files?per_page=100`, '--jq', '[.[].filename]']), null, `files of #${pr.number}`));
+        filesCache.set(k, p);
+        p.then((v) => { if (!Array.isArray(v)) filesCache.delete(k); }); // a read that failed is asked again next time
+      }
+      return filesCache.get(k);
+    };
+    const paged = work.filter((pr) => !isPromotion(pr)).sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt)).slice(0, 60);
+    const deadline = new Promise((ok) => setTimeout(() => ok(undefined), 12_000).unref?.());
+    const filesStarted = paged.map((pr) => [pr.number, filesOf(pr)]); // started now, gathered at the end: the other reads go on meanwhile
+    for (const k of [...filesCache.keys()]) if (!paged.some((pr) => fileKey(pr) === k)) filesCache.delete(k);
     const off = work.filter((pr) => !isPromotion(pr) && ['staging', 'main'].includes(pr.baseRefName)).map((pr) => pr.mergeCommit?.oid).filter((sha) => sha && !onLine.has(sha));
     await Promise.all(off.flatMap((x) => [...new Set(deploySha)].map(async (t) => {
       const k = `${x}>${t}`;
@@ -707,6 +766,8 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
       if (status) pairCache.set(k, ['ahead', 'identical'].includes(String(status).trim()));
     })));
 
+    const files = Object.fromEntries((await Promise.all(filesStarted.map(async ([n, p]) => [n, await Promise.race([p, deadline])]))).filter(([, v]) => Array.isArray(v)));
+    const routeList = await routesPromise;
     // Whose GitHub this is (gh's own login): asked once.
     me ??= await soft(call(['api', 'user', '--jq', '.login']).then((v) => String(v).trim() || null), null, 'who you are');
     return {
@@ -714,6 +775,7 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
       open,
       merged: work,
       promos, line, deploys, queue, workflows, proof,
+      files, routes: routeList,
       rep: Object.fromEntries(repCache), pairs: Object.fromEntries(pairCache),
     };
   }
@@ -774,6 +836,7 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
         new Promise((ok) => setTimeout(ok, SNAP_MS + 1_000).unref?.())]);
     }
     const out = compose(raw, agents, t);
+    out.testUrl = (typeof testUrl === 'function' ? testUrl() : testUrl) || null;
     if (failure) out.stale = failure;
     if (inflight) out.refreshing = true;
     return out;

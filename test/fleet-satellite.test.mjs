@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkState, summarizeChecks, isPromotion, pickDeploys, pickWorkflows, runCell, containedIn, compose, orderRows, placeAgents, guard, createSatellite, span, STALL, stagingProof } from '../fleet/satellite.mjs';
+import { checkState, summarizeChecks, isPromotion, pickDeploys, pickWorkflows, runCell, containedIn, compose, orderRows, placeAgents, guard, createSatellite, span, STALL, stagingProof, pagesOf, routesIn } from '../fleet/satellite.mjs';
 
 const REPO = 'Clinton-Health-Access-Initiative/chai-expense-tracker';
 const T0 = Date.parse('2026-10-24T12:00:00Z');
@@ -298,6 +298,7 @@ test('agents: on their PR, or on a row of their own where the branch has none; c
   const r20 = rowOf(out, 20);
   assert.equal(r20.cells.agent.s, 'run');
   assert.equal(r20.cells.agent.t, 'a title');
+  assert.equal(r20.cells.agent.key, 'Mac:s1', 'the way back into Fleet: its machine and session');
   assert.equal(r20.cells.agent.more, 1, 'a second agent is counted, the busier one is shown');
   assert.equal(rowOf(out, 8).cells.agent.t, 'finished the work');
   const branch = out.rows.find((r) => r.kind === 'branch');
@@ -733,6 +734,9 @@ test('gh is only ever asked to read', () => {
 // ---------------------------------------------------------------------------------------------- the reads, with a made-up gh
 
 const wfRun = (workflowId, branch, conclusion, min) => ({ id: workflowId * 100 + min, status: 'completed', conclusion, head_branch: branch, event: 'workflow_dispatch', workflow_id: workflowId, created_at: iso(min), updated_at: iso(min + 1), run_started_at: iso(min), html_url: `https://x/runs/${workflowId}` });
+// What two merged PRs changed, and the routes staging lists: the TEST links are made from these.
+const FILES = { 10: ['app/(app)/finance/vat/page.tsx', 'features/ap/server/x.ts', 'lib/y.ts'], 8: ['app/travel/[id]/edit/page.tsx', 'app/travel/layout.tsx'] };
+const ROUTES_MD = '# Routes\n\n- `/`\n- `/approvals`\n- `/finance/vat`\n- `/finance/ap-inbox`\n- `/travel`\n- `/travel/[id]`\n';
 function fakeGh(state = {}, now = Date.now) {
   const log = [];
   const exec = async (args) => {
@@ -757,6 +761,9 @@ function fakeGh(state = {}, now = Date.now) {
     if (a.includes('/actions/workflows/3/runs')) return JSON.stringify([wfRun(3, 'staging', 'success', 5)]);
     if (a.includes('/commits?')) return JSON.stringify(LINE);
     if (a.includes('/compare/m1...staging')) return 'c3\n';
+    if (a.includes('/contents/docs/generated/routes.md')) return Buffer.from(ROUTES_MD).toString('base64').replace(/(.{60})/g, '$1\n') + '\n'; // raw, as --jq prints a string
+    const files = /\/pulls\/(\d+)\/files/.exec(a);
+    if (files) return JSON.stringify(FILES[files[1]] ?? []);
     throw new Error(`unexpected gh call: ${a}`);
   };
   return { exec, log };
@@ -768,7 +775,7 @@ test('one read of GitHub: a handful of calls, the right rows, and a second read 
   const out = await sat.read();
   assert.ok(out.ok, out.error);
   assert.equal(out.calls, gh.log.length);
-  assert.ok(out.calls <= 14, `${out.calls} calls`);
+  assert.ok(out.calls <= 17, `${out.calls} calls`); // 14, plus the routes once and each merged PR's files once
   assert.deepEqual(out.rows.map((r) => r.number).sort((a, b) => a - b), [8, 10, 20, 101], 'every PR is a row, the promotion PR too');
   assert.ok(rowOf(out, 101).promo);
   assert.deepEqual(out.workflows.map((w) => [w.label, w.s]), [['gate main', 'done'], ['gate staging', 'fail'], ['release', 'done'], ['nightly-canary', 'done']], 'a workflow whose file is gone is not listed; a quiet one is asked for by itself');
@@ -963,4 +970,32 @@ test('gh is only ever asked to read: every spelling of a method, a body or a fie
   assert.doesNotThrow(() => guard(['api', 'graphql', '-fquery=query{x}']));
   assert.throws(() => guard(['api', 'graphql', '-fquery=mutation{x}']), /never a mutation/);
   assert.doesNotThrow(() => guard(['api', 'repos/x/y/pulls?per_page=1', '--jq', '.[]']));
+});
+
+test('pagesOf: a page file is its route ((group) dropped, [dynamic] cut to the page above); a feature slice is the shortest routes named for it; the unknown is nothing', () => {
+  const routes = routesIn(ROUTES_MD).concat(['/contracts', '/contracts/new']);
+  assert.deepEqual(routesIn('# Routes\n\n- `/a` — words\n- `/b/[id]`\nnot a route\n'), ['/a', '/b/[id]']);
+  assert.deepEqual(pagesOf(['app/(app)/finance/vat/page.tsx', 'app/travel/[id]/edit/page.tsx', 'app/nowhere/page.tsx', 'app/finance/vat/layout.tsx'], routes), ['/travel', '/finance/vat']);
+  assert.deepEqual(pagesOf(['features/ap/server/x.ts', 'features/contract/ui/y.tsx', 'features/zzz/z.ts'], routes), ['/contracts', '/finance/ap-inbox']);
+  assert.deepEqual(pagesOf(['app/page.tsx'], routes), ['/']);
+  assert.deepEqual(pagesOf(['app/nowhere/deep/page.tsx'], routes), [], 'never falls back to the home page');
+  assert.deepEqual(pagesOf(undefined, undefined), []);
+});
+
+test('TEST links: a merged PR\'s files name the pages it reaches, against the routes staging lists (each asked once); the TEST address rides along', async () => {
+  const gh = fakeGh();
+  const sat = createSatellite({ repo: REPO, exec: gh.exec, snapshot: async () => null, testUrl: () => 'https://test.example.org' });
+  const out = await sat.read();
+  assert.ok(out.ok, out.error);
+  assert.equal(out.testUrl, 'https://test.example.org');
+  assert.deepEqual(rowOf(out, 10).pages, ['/finance/vat', '/finance/ap-inbox']);
+  assert.deepEqual(rowOf(out, 8).pages, ['/travel'], 'a page under a dynamic segment links to the page above it');
+  assert.deepEqual(rowOf(out, 101).pages, [], 'a promotion carries others\' pages, none of its own');
+  const asked = (re) => gh.log.filter((a) => re.test(a.join(' '))).length;
+  assert.equal(asked(/\/pulls\/\d+\/files/), 2, 'the two merged PRs, never the promotion');
+  await sat.gather();
+  assert.equal(asked(/\/pulls\/\d+\/files/), 2, 'each merged PR\'s files once, ever');
+  assert.equal(asked(/routes\.md/), 1, 'the routes once an hour');
+  const plain = await createSatellite({ repo: REPO, exec: fakeGh().exec, snapshot: async () => null }).read();
+  assert.equal(plain.testUrl, null, 'no TEST address configured: none sent');
 });
