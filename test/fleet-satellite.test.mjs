@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkState, summarizeChecks, isPromotion, pickDeploys, pickWorkflows, runCell, containedIn, compose, orderRows, placeAgents, guard, createSatellite, span, STALL } from '../fleet/satellite.mjs';
+import { checkState, summarizeChecks, isPromotion, pickDeploys, pickWorkflows, runCell, containedIn, compose, orderRows, placeAgents, guard, createSatellite, span, STALL, stagingProof } from '../fleet/satellite.mjs';
 
 const REPO = 'Clinton-Health-Access-Initiative/chai-expense-tracker';
 const T0 = Date.parse('2026-10-24T12:00:00Z');
@@ -458,13 +458,13 @@ test('an open PR that is green and has not landed in half an hour is stuck; one 
   assert.ok(rowOf(out, 15).attention && !rowOf(out, 15).stuck, 'a conflict is blocked, not stuck');
 });
 
-test('merged into staging and in no promotion for three hours is stuck, and says for how long', () => {
-  const w = empty({ line: ['c3', 'c2', 'c1', 'c0'], merged: [mergedPr(1, 'c3', 0, { mergedAt: ago(2 * H) }), mergedPr(2, 'c2', 0, { mergedAt: ago(3 * H + 10 * M) }), mergedPr(3, 'c1', 0, { mergedAt: ago(2 * 24 * H) })] });
+test('merged into staging and in no promotion for eight hours is stuck, and says for how long', () => {
+  const w = empty({ line: ['c3', 'c2', 'c1', 'c0'], merged: [mergedPr(1, 'c3', 0, { mergedAt: ago(2 * H) }), mergedPr(2, 'c2', 0, { mergedAt: ago(8 * H + 10 * M) }), mergedPr(3, 'c1', 0, { mergedAt: ago(2 * 24 * H) })] });
   const out = compose(w, undefined, NOW);
-  assert.equal(stuckOf(out, 1), null, 'two hours is not long');
+  assert.equal(stuckOf(out, 1), null, 'two hours is not long: promotions come a few times a day');
   assert.equal(rowOf(out, 1).sat.stage, 'on staging');
   assert.equal(rowOf(out, 1).cells.promotion.since, NOW - 2 * H);
-  assert.equal(stuckOf(out, 2), 'on staging 3h, not in a promotion');
+  assert.equal(stuckOf(out, 2), 'on staging 8h, not in a promotion');
   assert.equal(stuckOf(out, 3), 'on staging 2d, not in a promotion');
   assert.ok(rowOf(out, 3).cells.promotion.stuck);
 });
@@ -604,9 +604,10 @@ test('a session in the shared checkout whose own words name one open PR\'s branc
 });
 
 test('read(): the budget session on redbat, on a branch the folder does not name, ends up in the stuck band with its agent', async () => {
-  const gh = fakeGh();
+  const at = T0 + 9 * H + 30 * M;                    // the fixture's red gate run on staging started at iso(30): nine hours before this read
+  const gh = fakeGh({}, () => at);
   const inner = gh.exec;
-  const hours = (n) => Date.now() - n * 3_600_000;
+  const hours = (n) => at - n * H;
   const exec = async (args) => {
     const a = args.join(' ');
     if (a.includes('--state open')) { gh.log.push(args); return JSON.stringify([openPr(5872, redAt(3 * H, 'lint', 'quality'), { isDraft: true, headRefName: 'feat/budgets', updatedAt: new Date(hours(1)).toISOString() })]); }
@@ -620,7 +621,7 @@ test('read(): the budget session on redbat, on a branch the folder does not name
     sess('Upload helper', 'feat/uploads', '~/dev/chai-uploads'),
     sess('Somebody else\'s repo', 'feat/gone', '~/dev/other-thing'),
   ] }] }] };
-  const sat = createSatellite({ repo: REPO, exec, snapshot: async () => snap });
+  const sat = createSatellite({ repo: REPO, exec, snapshot: async () => snap, now: () => at });
   const out = await sat.read();
   assert.ok(out.ok, out.error);
   const budget = out.rows.find((r) => r.number === 5872);
@@ -632,7 +633,9 @@ test('read(): the budget session on redbat, on a branch the folder does not name
   assert.match(up.stuck.why, /agent idle 3h, commits on the branch, no PR/);
   assert.ok(!out.rows.some((r) => r.branch === 'feat/gone'), 'a branch GitHub has never heard of, from a folder that does not name the repo, is not ours');
   assert.deepEqual(out.rows.slice(0, 2).map((r) => r.key).sort(), ['br:feat/uploads', 'pr:5872']);
-  assert.equal(out.counts.stuck, 2);
+  // The fake GitHub's gate run on staging is red: #10, merged since and in no promotion, is behind that red proof.
+  assert.equal(out.counts.stuck, 3);
+  assert.equal(stuckOf(out, 10), 'staging proof red ×1, 9h');
   // asking again within the minute does not ask GitHub about the branches again
   const asked = gh.log.length;
   await sat.read();
@@ -730,7 +733,7 @@ test('gh is only ever asked to read', () => {
 // ---------------------------------------------------------------------------------------------- the reads, with a made-up gh
 
 const wfRun = (workflowId, branch, conclusion, min) => ({ id: workflowId * 100 + min, status: 'completed', conclusion, head_branch: branch, event: 'workflow_dispatch', workflow_id: workflowId, created_at: iso(min), updated_at: iso(min + 1), run_started_at: iso(min), html_url: `https://x/runs/${workflowId}` });
-function fakeGh(state = {}) {
+function fakeGh(state = {}, now = Date.now) {
   const log = [];
   const exec = async (args) => {
     log.push(args);
@@ -738,8 +741,8 @@ function fakeGh(state = {}) {
     if (state.fail) throw new Error('gh: not logged in');
     if (a.includes('--state open')) return JSON.stringify([openPr(20, green())]);
     if (a.includes('--state merged')) return JSON.stringify([
-      mergedPr(10, 'c9', 100, { mergedAt: new Date(Date.now() - (state.recent ? 30_000 : 3600_000)).toISOString() }), mergedPr(8, 'c6', 80, { mergedAt: new Date(Date.now() - 7200_000).toISOString() }),
-      { number: 101, title: 'promote: staging → main', headRefName: 'release/x', baseRefName: 'main', headRefOid: 'c6', mergeCommit: { oid: 'm2' }, mergedAt: new Date(Date.now() - 7000_000).toISOString(), url: 'u101', labels: [] },
+      mergedPr(10, 'c9', 100, { mergedAt: new Date(now() - (state.recent ? 30_000 : 3600_000)).toISOString() }), mergedPr(8, 'c6', 80, { mergedAt: new Date(now() - 7200_000).toISOString() }),
+      { number: 101, title: 'promote: staging → main', headRefName: 'release/x', baseRefName: 'main', headRefOid: 'c6', mergeCommit: { oid: 'm2' }, mergedAt: new Date(now() - 7000_000).toISOString(), url: 'u101', labels: [] },
     ]);
     if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { s: { entries: { nodes: [{ position: 1, state: 'QUEUED', pullRequest: { number: 20 } }] } }, m: null } } });
     if (a.includes('workflows/release.yml/runs')) return JSON.stringify([{ id: 2, status: 'completed', head_sha: 'm2' }, { id: 1, status: 'completed', head_sha: 'm1' }]);
@@ -810,8 +813,9 @@ test('a minute on, the next read refreshes behind the answer; one that fails kee
   const first = await sat.read();
   const calls = () => gh.log.length;
   const c0 = calls();
-  t += 20_000; await sat.read({ fresh: true }); await settle();
-  assert.ok(calls() > c0, 'a page that asks for a fresh read gets one (behind its answer)');
+  t += 20_000; const pressed = await sat.read({ fresh: true }); await settle();
+  assert.ok(calls() > c0, 'a page that asks for a fresh read gets one');
+  assert.equal(pressed.at, t, 'and its answer is that read, not the old one');
   const c1 = calls();
   t += 3_000; await sat.read({ fresh: true }); await settle();
   assert.equal(calls(), c1, 'but not again within a few seconds');
@@ -872,4 +876,91 @@ test('stations: each piece of work at the one it is at, in order from an agent a
   assert.equal(stationOf({ sat: { stage: 'deploying' }, cells: { test: { s: 'run' } } }), 'test');
   assert.equal(stationOf({ sat: { stage: 'deploying' }, cells: { prod: { s: 'run' } } }), 'prod');
   assert.equal(stationOf({ sat: { stage: 'in prod' }, cells: {} }), 'prod');
+});
+
+// ---------------------------------------------------------------------------------------------- the review of 2026-10-24
+
+test('a new run of the gate supersedes its last one: an old job that finished late never speaks for a job the new run has not reached', () => {
+  const inRun = (c, id) => ({ ...c, detailsUrl: `https://github.com/x/y/actions/runs/${id}/job/${id}${c.name.length}` });
+  // PR #5874 at 19:55Z: the old run's `static` failed after the new run began; the new run's `quality` was in progress.
+  const s = summarizeChecks([inRun(run('static', 'COMPLETED', 'FAILURE', 7), 100), inRun(run('quality', 'IN_PROGRESS', '', 5), 101), inRun(ok('lint', 6), 101)]);
+  assert.equal(s.state, 'running');
+  assert.deepEqual(s.failing, []);
+  assert.equal(s.by.static, undefined, 'the old run is not read at all');
+  // The same checks with no run named (a commit status) are read as before: the newest of a name wins.
+  assert.equal(summarizeChecks([run('static', 'COMPLETED', 'FAILURE', 7), ok('static', 9)]).by.static, 'passed');
+  // Two workflows each keep their own newest run.
+  const two = summarizeChecks([inRun({ ...ok('static', 1), workflowName: 'gate' }, 50), inRun({ ...run('canary', 'COMPLETED', 'FAILURE', 2), workflowName: 'nightly' }, 40)]);
+  assert.equal(two.by.static, 'passed');
+  assert.equal(two.by.canary, 'failed');
+});
+
+test('a gate that has not reported all four contexts yet is running, not "passed 0 of 4"', () => {
+  const early = summarizeChecks([ok('scope', 1), ok('lint', 1), ok('types', 2), ok('build', 2)]);
+  assert.equal(early.state, 'running');
+  assert.equal(early.passed, 0);
+  const half = summarizeChecks([ok('migrations-append-only', 1), ok('definer-redefine-guard', 1), ok('lint', 1)]);
+  assert.equal(half.state, 'running');
+  assert.equal(half.passed, 2);
+  assert.equal(summarizeChecks(green()).state, 'passed');
+});
+
+test('the staging proof: gate on staging itself, the newest green, the reds since it, one still running', () => {
+  const r = (min, conclusion, status = 'completed') => ({ ...wfRun(1, 'staging', conclusion, min), status, head_sha: `s${min}` });
+  const p = stagingProof([r(10, 'failure'), r(30, 'failure'), r(20, 'success'), r(5, 'success'), r(40, null, 'in_progress')]);
+  assert.equal(p.green.sha, 's20');
+  assert.equal(p.reds, 1, 'the red before the green is history');
+  assert.equal(p.red.sha, 's30', 'the newest red, to open');
+  assert.equal(p.redSince, Date.parse(iso(30)));
+  assert.equal(p.running.sha, 's40');
+  assert.equal(p.total, 5);
+  assert.deepEqual(stagingProof([]), { green: null, reds: 0, red: null, redSince: null, running: null, total: 0 });
+  const none = stagingProof([r(1, 'failure'), r(2, 'failure')]);
+  assert.equal(none.green, null);
+  assert.equal(none.reds, 2);
+});
+
+test('merged into staging behind a red staging proof is stuck for that reason; proven commits and promoted ones are not', () => {
+  const proof = { green: { sha: 'c1', at: NOW - 4 * H, url: 'u' }, reds: 3, redSince: NOW - 3 * H, running: null, total: 6 };
+  const w = empty({ line: ['c3', 'c2', 'c1', 'c0'], proof, merged: [mergedPr(1, 'c3', 0, { mergedAt: ago(1 * H) }), mergedPr(2, 'c1', 0, { mergedAt: ago(2 * H) })] });
+  const out = compose(w, undefined, NOW);
+  assert.equal(stuckOf(out, 1), 'staging proof red ×3, 3h');
+  assert.equal(stuckOf(out, 2), null, 'c1 is the head the proof found green');
+  assert.equal(out.proof, proof, 'the page gets the proof to show');
+  // In an open promotion: the promotion carries it, whatever staging's proof says now.
+  const op = { number: 9, url: 'u9', head: 'c3', createdAt: ago(10 * M), statusCheckRollup: green() };
+  assert.equal(stuckOf(compose(empty({ line: ['c3', 'c2', 'c1'], proof, merged: [mergedPr(1, 'c3', 0, { mergedAt: ago(1 * H) })], promos: { open: op, merged: [] } }), undefined, NOW), 1), null);
+});
+
+test('a land job that failed is a failure in the Land cell, with its run to open', () => {
+  const landFail = { ...run('land on green (single pipeline — #3084)', 'COMPLETED', 'FAILURE', 3), detailsUrl: 'https://x/runs/9/job/1' };
+  const out = compose(empty({ open: [openPr(1, [...green(), landFail])] }), undefined, NOW);
+  const land = rowOf(out, 1).cells.land;
+  assert.deepEqual([land.s, land.t, land.href], ['fail', 'land failed', 'https://x/runs/9/job/1']);
+  assert.match(land.tip, /land job failed/);
+  assert.ok(rowOf(out, 1).attention);
+});
+
+test('an agent is placed by the folder its tools work in, not the one it was started in', () => {
+  const root = checkouts();
+  // Started in the shared checkout, working in a worktree of its own: the worktree's branch, and not shared.
+  const wt = sess(path.join(root, 'tracker'), { workdir: path.join(root, 'wt') });
+  assert.deepEqual(placeAgents(snapOf([wt]), { repo: REPO }).placed.map((a) => [a.branch, a.shared]), [['ops/image-pins', false]]);
+  // Started in the checkout, working in another repository: not this repository's agent at all.
+  const away = sess(path.join(root, 'tracker'), { workdir: path.join(root, 'other') });
+  assert.equal(placeAgents(snapOf([away]), { repo: REPO }).placed.length, 0);
+  // Elsewhere the working folder's path says what a cwd would have.
+  const far = sess('~/dev/chai-expense-tracker', { workdir: '~/dev/chai-expense-tracker/.claude/worktrees/memo', branch: 'feat/memo' });
+  assert.deepEqual(placeAgents(snapOf([], [far]), { repo: REPO }).placed.map((a) => [a.branch, a.shared]), [['feat/memo', false]]);
+});
+
+test('gh is only ever asked to read: every spelling of a method, a body or a field', () => {
+  for (const args of [['api', 'x', '-XPOST'], ['api', 'x', '-X=POST'], ['api', 'x', '--method=POST'], ['api', 'x', '--input=file'], ['api', 'x', '--input', 'f'],
+    ['api', 'x', '-fk=v'], ['api', 'x', '--field=k=v'], ['api', 'x', '-F', 'k=v'], ['api', 'x', '-H', 'X-HTTP-Method-Override: DELETE'], ['api', 'x', '-X', 'POST']]) {
+    assert.throws(() => guard(args), /only reads GitHub/, args.join(' '));
+  }
+  assert.doesNotThrow(() => guard(['api', 'graphql', '-f', 'query=query($o:String!){x}', '-f', 'o=a']));
+  assert.doesNotThrow(() => guard(['api', 'graphql', '-fquery=query{x}']));
+  assert.throws(() => guard(['api', 'graphql', '-fquery=mutation{x}']), /never a mutation/);
+  assert.doesNotThrow(() => guard(['api', 'repos/x/y/pulls?per_page=1', '--jq', '.[]']));
 });

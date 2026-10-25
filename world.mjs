@@ -652,11 +652,35 @@ const real = (p) => { try { return fs.realpathSync.native(p); } catch { return p
  *  folder → git checkout lookup. */
 export function createWorld({ file, configDirs, gitPlace, run, now = Date.now }) {
   let st = null, memo = null, building = false, probing = false, toolsMissing = false; // toolsMissing is the last scan's finding, never saved
-  try {
-    const loaded = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (valid(loaded)) st = loaded;
-    else fs.renameSync(file, `${file}.bad-${now()}`); // kept for a look, never overwritten
-  } catch {}
+  // A file that is not a World (cut short by a power cut, a hand edit gone wrong) is set aside, never overwritten, and the
+  // copy save() keeps of the last good one stands in for it.
+  const load = (f) => { const loaded = JSON.parse(fs.readFileSync(f, 'utf8')); return valid(loaded) ? loaded : null; };
+  if (fs.existsSync(file)) {
+    let why = null;
+    try { st = load(file); if (!st) why = 'is not a World'; } catch { why = 'could not be read as JSON'; }
+    if (!st) {
+      try { fs.renameSync(file, `${file}.bad-${now()}`); console.error(`world: ${file} ${why}: set aside as ${path.basename(file)}.bad-${now()}`); } catch {}
+      try { st = load(`${file}.bak`); if (st) console.error(`world: ${file}.bak, the last good save, stands in`); } catch {}
+    }
+  }
+  // One process writes a World. A second panel on the same prefs folder (another ACP_PORT) reads it and never saves, or
+  // the two would overwrite each other's purchases; the lock names the owner's pid, and a dead owner's lock is taken over.
+  const lock = `${file}.lock`;
+  let owner = null, warned = false;
+  function takeLock() {
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch {}
+    for (let i = 0; i < 2; i++) {
+      try { fs.writeFileSync(lock, String(process.pid), { flag: 'wx' }); return true; } catch {}
+      let pid = 0;
+      try { pid = Number(fs.readFileSync(lock, 'utf8')); } catch {}
+      if (pid === process.pid) return true;
+      let alive = false;
+      if (pid > 1) { try { process.kill(pid, 0); alive = true; } catch (e) { alive = e?.code === 'EPERM'; } }
+      if (alive) return false;
+      try { fs.unlinkSync(lock); } catch {}
+    }
+    return false;
+  }
   if (st) { // a World that found one repository under two spellings counted it twice: keep it once, at its most
     const lines = {};
     for (const [repo, perDay] of Object.entries(st.lines)) {
@@ -669,9 +693,18 @@ export function createWorld({ file, configDirs, gitPlace, run, now = Date.now })
   }
 
   function save() {
+    owner ??= takeLock();
+    if (!owner) {
+      if (!warned) { warned = true; console.error(`world: another panel (the pid in ${lock}) owns ${file}: this one reads it and never writes`); }
+      memo = null;
+      return;
+    }
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    // Written whole to a file beside it, flushed to disk, then swapped in; the file it replaces is kept as .bak first.
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(st));
+    const fd = fs.openSync(tmp, 'w');
+    try { fs.writeSync(fd, JSON.stringify(st)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    try { fs.copyFileSync(file, `${file}.bak`); } catch {}
     fs.renameSync(tmp, file);
     memo = null;
   }
@@ -857,7 +890,7 @@ export function createWorld({ file, configDirs, gitPlace, run, now = Date.now })
         const progress = Math.min(1, Math.max(0, (peak - p.earnedAt) / (p.travel ?? OLD_THRESHOLD)));
         return { id: `q${i}`, ang: p.ang, by: p.by, to: p.to, progress, arrived: progress >= 1 };
       }),
-      noEmail: st.noEmail ?? [], gitFailed: st.gitFailed ?? [], toolsMissing };
+      noEmail: st.noEmail ?? [], gitFailed: st.gitFailed ?? [], toolsMissing, readOnly: owner === false };
     memo = { today, summary: s };
     return s;
   }

@@ -65,7 +65,8 @@ svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-widt
 .wf .g { margin-right: 6px; }
 
 /* the table: one column per stage, left to right is the way work travels */
-.wrap { margin: 0 -10px; overflow-x: auto; }
+.wrap { margin: 0 -10px; }
+@media (max-width: 1180px) { .wrap { overflow-x: auto; } } /* only when it must: a scrolling box pins the sticky header to itself */
 table { width: 100%; min-width: 1120px; border-collapse: collapse; table-layout: fixed; }
 col.c-agent { width: 232px; } col.c-checks { width: 140px; } col.c-land { width: 142px; } col.c-promotion { width: 150px; } col.c-test { width: 140px; } col.c-prod { width: 140px; }
 th { text-align: left; font-weight: 400; vertical-align: top; padding: 0 10px 12px; position: sticky; top: 0; z-index: 2; background: var(--paper); box-shadow: 0 1px 0 var(--rule); }
@@ -261,13 +262,26 @@ function groupRow(cls, label, count, extra) {
 }
 
 const STALE_MS = 14 * 86_400_000;
-function renderWorkflows(list) {
+function renderWorkflows(list, proof) {
   const items = (list ?? []).filter((w) => !w.none), box = $('wf');
-  box.hidden = !items.length;
-  box.replaceChildren(h('span', { class: 'k', text: 'workflows' }), ...items.map((w) => h(w.href ? 'a' : 'span',
+  box.hidden = !items.length && !proof?.total;
+  box.replaceChildren(h('span', { class: 'k', text: 'workflows' }), ...(proof?.total ? [proofItem(proof)] : []), ...items.map((w) => h(w.href ? 'a' : 'span',
     { class: `w ${w.s}${w.at && Date.now() - w.at > STALE_MS ? ' old' : ''}`, href: w.href, target: w.href ? '_blank' : null, rel: w.href ? 'noopener' : null,
       title: [`${w.name}${w.branch ? ` on ${w.branch}` : ''}${w.event ? `, ${w.event}` : ''}`, w.t || null, w.at ? `${when(w.at)}` : null].filter(Boolean).join('\n') },
     glyph(w.s), w.label, w.s === 'wait' && w.t ? h('span', { class: 'at', text: w.t }) : null, h('span', { class: 'at', text: ago(w.at) }))));
+}
+/** Staging's own proof: the gate run on staging after each landing (staging runs no suite before a merge). Green: the
+ *  head it proved. Red: how many landings since the last green went red, and since when; what landed behind it is stuck. */
+function proofItem(p) {
+  const red = p.reds > 0, sha = (c) => c?.sha?.slice(0, 7) ?? '';
+  const s = red ? 'fail' : p.green ? 'done' : p.running ? 'run' : 'wait';
+  const label = red ? `staging proof red ×${p.reds}` : p.green ? `staging proof ${sha(p.green)}` : p.running ? 'staging proof running' : 'staging proof';
+  const href = red ? p.red?.url : (p.green ?? p.running)?.url, at = red ? p.redSince : (p.green ?? p.running)?.at;
+  const title = [red ? `the gate on staging has been red since ${when(p.redSince)}` + (p.green ? `; its last green head is ${sha(p.green)}, ${when(p.green.at)}` : '; no green run in the window')
+    : p.green ? `the gate on staging is green on ${sha(p.green)}, ${when(p.green.at)}` : 'the gate on staging: no finished run in the window',
+    p.running ? `a run is going on ${sha(p.running)}` : null].filter(Boolean).join('\n');
+  return h(href ? 'a' : 'span', { class: `w ${s}`, href, target: href ? '_blank' : null, rel: href ? 'noopener' : null, title },
+    glyph(s), label, red && p.running ? h('span', { class: 'at', text: 'running' }) : null, h('span', { class: 'at', text: ago(at) }));
 }
 
 // The flow: one station after another; at each, the work there now, yours first and stuck first; shipped is a count. Click
@@ -296,7 +310,7 @@ function renderFlow(d) {
 function render() {
   const d = data;
   if (!d) return;
-  renderWorkflows(d.workflows);
+  renderWorkflows(d.workflows, d.proof);
   renderFlow(d);
   $('reading').hidden = true;
   $('table').hidden = false;
@@ -305,7 +319,9 @@ function render() {
   const body = $('body');
   const hide = store.get('hideShipped') === '1';
   const line = (r) => {
-    const tr = h('tr', { class: 'row', onclick: (e) => { if (!e.target.closest('a') && r.url) window.open(r.url, '_blank', 'noopener'); } });
+    // A row opens its PR or branch: on a click that is not on a link and not the end of selecting text, or on Enter.
+    const go = (e) => { if (!e.target.closest('a') && r.url && !getSelection().toString()) window.open(r.url, '_blank', 'noopener'); };
+    const tr = h('tr', { class: 'row', tabindex: 0, onclick: go, onkeydown: (e) => { if (e.key === 'Enter') go(e); } });
     for (const k of STAGES) tr.append(cell(k, r.cells[k], r));
     return tr;
   };
@@ -335,7 +351,8 @@ function render() {
   const warn = [...(d.warnings ?? [])];
   $('note').hidden = !warn.length;
   $('note').textContent = warn.join('\n');
-  $('foot').textContent = `${d.repo} · the last ${d.days} days · ${d.calls} GitHub reads in ${(d.took / 1000).toFixed(1)}s`;
+  $('foot').replaceChildren(`${d.repo} · the last ${d.days} days · ${d.calls} GitHub reads in ${(d.took / 1000).toFixed(1)}s`,
+    ...['done', 'run', 'fail', 'wait'].flatMap((s) => [' · ', glyph(s), WORD[s]]));
   showRead();
 }
 

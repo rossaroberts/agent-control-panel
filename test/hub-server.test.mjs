@@ -11,9 +11,15 @@ import { loadConfig } from '../hub/config.mjs';
 const SERVER = new URL('../server.mjs', import.meta.url).pathname;
 const freePort = () => new Promise((r) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => r(port)); }); });
 const until = async (check, ms = 15_000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = await check(); if (v) return v; await new Promise((r) => setTimeout(r, 150)); } return null; };
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'acp-hub-'));
+const made = [];
+const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-hub-')); made.push(d); return d; };
+// Every panel spawned here gets a home of its own: the real one's Claude Code profiles would be read, and titled at a cost.
+const HOME = tmp();
+const ENV = { ...process.env, HOME };
 
 let hub, hubUrl, panel, panelPort, prefs, cookie;
+/** The pairing cookie a browser holds once `node server.mjs open` has run: the panel's pages, API and streams answer it alone. */
+const pairing = (dir) => { try { return { cookie: `acp_k=${fs.readFileSync(path.join(dir, 'key'), 'utf8').trim()}` }; } catch { return {}; } }; // no key yet: the panel is still booting
 const ORIGIN = 'http://127.0.0.1';
 /** One call to the hub as alice in a browser (her cookie and the Origin). */
 const hubCall = (method, p, body) => fetch(hubUrl + p, {
@@ -32,13 +38,14 @@ before(async () => {
   prefs = tmp();
   fs.writeFileSync(path.join(prefs, 'hub.json'), JSON.stringify({ v: 1, url: hubUrl, device: 'test-mac', token, account: { id: account.id, handle: 'alice', x: account.x, y: account.y } }), { mode: 0o600 });
   panelPort = await freePort();
-  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, ACP_PORT: String(panelPort), ACP_PREFS: path.join(prefs, 'prefs.json'), ACP_DAEMON: '1', ACP_HUB: hubUrl }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [SERVER], { env: { ...ENV, ACP_PORT: String(panelPort), ACP_PREFS: path.join(prefs, 'prefs.json'), ACP_DAEMON: '1', ACP_HUB: hubUrl }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; child.stdout.on('data', (d) => { out += d; }); child.stderr.on('data', (d) => { out += d; });
   panel = { child, log: () => out };
 });
 after(async () => {
   if (panel && panel.child.exitCode === null && panel.child.signalCode === null) await new Promise((r) => { panel.child.once('exit', r); panel.child.kill(); });
   await hub?.close();
+  for (const d of made) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 });
 
 test('the panel opens World at boot and the hub shows the system', async () => {
@@ -56,15 +63,36 @@ test('an order placed on the hub is run by the Mac and answered in its own words
 });
 
 test('/world is the same page opened on the world, /board opens the board, and / is Fleet', async () => {
-  const world = await fetch(`http://127.0.0.1:${panelPort}/world`);
+  const headers = pairing(prefs);
+  const world = await fetch(`http://127.0.0.1:${panelPort}/world`, { headers });
   assert.equal(world.status, 200);
   const html = await world.text();
   assert.match(html, /ACP_VIEW = 'world'/);
   assert.doesNotMatch(html, /__ACP_(VIEW|TOKEN)__/);
-  assert.match(await fetch(`http://127.0.0.1:${panelPort}/board`).then((r) => r.text()), /ACP_VIEW = 'board'/);
-  const home = await fetch(`http://127.0.0.1:${panelPort}/`).then((r) => r.text());
+  assert.match(await fetch(`http://127.0.0.1:${panelPort}/board`, { headers }).then((r) => r.text()), /ACP_VIEW = 'board'/);
+  const home = await fetch(`http://127.0.0.1:${panelPort}/`, { headers }).then((r) => r.text());
   assert.match(home, /<title>Fleet<\/title>/);
   assert.doesNotMatch(home, /__ACP_TOKEN__/);
+});
+
+test('a browser that has not been paired gets the pairing page and no token; the key in the URL pairs it, once', async () => {
+  const base = `http://127.0.0.1:${panelPort}`;
+  const plain = await fetch(base + '/');
+  assert.equal(plain.status, 200);
+  const html = await plain.text();
+  assert.match(html, /node server\.mjs open/);
+  assert.doesNotMatch(html, /[0-9a-f]{48}/, 'no token, no key');
+  assert.equal((await fetch(base + '/events?t=anything')).status, 403);
+  assert.equal((await fetch(base + '/api/hub/status', { method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: '{}' })).status, 403);
+  assert.equal((await fetch(base + '/?k=' + 'f'.repeat(48), { redirect: 'manual' })).status, 403, 'a wrong key is refused');
+  const key = fs.readFileSync(path.join(prefs, 'key'), 'utf8').trim();
+  assert.equal((fs.statSync(path.join(prefs, 'key')).mode & 0o777), 0o600);
+  const paired = await fetch(`${base}/satellite?k=${key}`, { redirect: 'manual' });
+  assert.equal(paired.status, 303);
+  assert.equal(paired.headers.get('location'), '/satellite', 'back to the page, the key out of the address');
+  assert.match(paired.headers.get('set-cookie'), new RegExp(`^acp_k=${key}; Path=/; HttpOnly; SameSite=Strict`));
+  const page = await fetch(base + '/', { headers: { cookie: paired.headers.get('set-cookie').split(';')[0] } }).then((r) => r.text());
+  assert.match(page, /const TOKEN = '[0-9a-f]{48}'/, 'paired, the page carries its token');
 });
 
 /** Runs `node server.mjs <args>` against this hub with a prefs folder of its own; `open` is a stand-in that opens nothing. */
@@ -72,7 +100,7 @@ function cli(args, dir, onLine) {
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(bin, 'open'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-  const child = spawn(process.execPath, [SERVER, ...args], { env: { ...process.env, PATH: bin, ACP_PREFS: path.join(dir, 'prefs.json'), ACP_HUB: hubUrl, ACP_PORT: String(panelPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [SERVER, ...args], { env: { ...ENV, PATH: bin, ACP_PREFS: path.join(dir, 'prefs.json'), ACP_HUB: hubUrl, ACP_PORT: String(panelPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (d) => { out += d; onLine?.(out); }); child.stderr.on('data', (d) => { out += d; });
   const done = new Promise((r) => child.on('exit', (code) => r({ code, out })));
@@ -109,12 +137,12 @@ test('a command the CLI does not know prints the usage and exits 2', async () =>
 
 test('signing in from the page of a panel finishes by itself, and signing out ends it', async (t) => {
   const dir = tmp(), port = await freePort();
-  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, ACP_PORT: String(port), ACP_PREFS: path.join(dir, 'prefs.json'), ACP_DAEMON: '1', ACP_HUB: hubUrl }, stdio: 'ignore' });
+  const child = spawn(process.execPath, [SERVER], { env: { ...ENV, ACP_PORT: String(port), ACP_PREFS: path.join(dir, 'prefs.json'), ACP_DAEMON: '1', ACP_HUB: hubUrl }, stdio: 'ignore' });
   t.after(() => child.kill());
   const base = `http://127.0.0.1:${port}`;
-  const token = await until(async () => /const TOKEN = '([^']+)'/.exec(await fetch(base + '/').then((r) => r.text(), () => ''))?.[1]);
+  const token = await until(async () => /const TOKEN = '([^']+)'/.exec(await fetch(base + '/', { headers: pairing(dir) }).then((r) => r.text(), () => ''))?.[1]);
   assert.ok(token, 'the panel did not answer');
-  const api = (p) => fetch(base + p, { method: 'POST', headers: { origin: base, 'x-acp-token': token, 'content-type': 'application/json' }, body: '{}' }).then((r) => r.json());
+  const api = (p) => fetch(base + p, { method: 'POST', headers: { origin: base, 'x-acp-token': token, 'content-type': 'application/json', ...pairing(dir) }, body: '{}' }).then((r) => r.json());
   const start = await api('/api/hub/login/start');
   assert.equal(start.ok, true);
   assert.equal((await api('/api/hub/login/start')).userCode, start.userCode, 'a second start returns the code already shown');
@@ -136,7 +164,7 @@ async function pendingFile(dir, url) {
 }
 const tokenIn = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'hub.json'), 'utf8')).token ?? null; } catch { return null; } };
 const spawnPanel = async (t, dir, hub) => {
-  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, ACP_PORT: String(await freePort()), ACP_PREFS: path.join(dir, 'prefs.json'), ACP_DAEMON: '1', ACP_HUB: hub }, stdio: 'ignore' });
+  const child = spawn(process.execPath, [SERVER], { env: { ...ENV, ACP_PORT: String(await freePort()), ACP_PREFS: path.join(dir, 'prefs.json'), ACP_DAEMON: '1', ACP_HUB: hub }, stdio: 'ignore' });
   t.after(() => child.kill());
 };
 

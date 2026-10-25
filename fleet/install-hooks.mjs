@@ -10,19 +10,23 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied',
   'Notification', 'Elicitation', 'ElicitationResult', 'Stop', 'StopFailure', 'PreCompact', 'PostCompact', 'SessionEnd'];
-const OURS = (h) => typeof h?.command === 'string' && /fleet-panel\/hook\.sh|fleet\/hook\.sh/.test(h.command);
+// Ours: `sh '<path>'` where the path ends in fleet-panel/hook.sh or fleet/hook.sh (someone else's hook.sh under another name is theirs).
+const OURS = (h) => typeof h?.command === 'string' && /^sh '[^']*\/\.?(fleet-panel|fleet)\/hook\.sh'$/.test(h.command);
 
 /** The settings with Fleet's hook in (or out): a new object, and what changed. Pure, for the tests. */
 export function withHook(settings, hookPath, { capHttp = false, remove = false } = {}) {
   const s = structuredClone(settings ?? {});
   if (s.hooks != null && (typeof s.hooks !== 'object' || Array.isArray(s.hooks))) throw new Error('its "hooks" setting is not an object');
   s.hooks ??= {};
+  if (!remove && /'/.test(hookPath)) throw new Error('the hook path holds a quote, which sh would read as the end of the command');
   const changes = [];
   for (const event of EVENTS) {
-    const list = Array.isArray(s.hooks[event]) ? s.hooks[event] : null;
+    if (s.hooks[event] != null && !Array.isArray(s.hooks[event])) throw new Error(`its hooks.${event} is not a list`);
+    const list = Array.isArray(s.hooks[event]) ? s.hooks[event].filter((m) => m && typeof m === 'object') : null;
     const has = (list ?? []).some((m) => (m?.hooks ?? []).some(OURS));
     if (remove) {
       if (!has) continue;
@@ -50,18 +54,22 @@ function install(dir, hookPath, opts) {
   if (opts.dryRun) return `${file}: would change\n  ${changes.join('\n  ')}`;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.before-fleet-hooks-${stamp}`);
-  const tmp = `${file}.fleet-tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n', { mode: fs.existsSync(file) ? fs.statSync(file).mode & 0o777 : 0o644 });
+  // A settings.json that is a link (dotfiles kept elsewhere) stays one: the file it points to is the one swapped.
+  const target = fs.existsSync(file) ? fs.realpathSync(file) : file;
+  const tmp = `${target}.fleet-tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n', { mode: fs.existsSync(target) ? fs.statSync(target).mode & 0o777 : 0o644 });
   JSON.parse(fs.readFileSync(tmp, 'utf8'));
-  fs.renameSync(tmp, file);
+  fs.renameSync(tmp, target);
   JSON.parse(fs.readFileSync(file, 'utf8'));
   return `${file}: changed (copy kept: settings.json.before-fleet-hooks-${stamp})\n  ${changes.join('\n  ')}`;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const args = process.argv.slice(2), flags = new Set(args.filter((a) => a.startsWith('--')));
   const [hookPath, ...dirs] = args.filter((a) => !a.startsWith('--'));
   if (!hookPath || !dirs.length || !path.isAbsolute(hookPath)) { console.error('usage: install-hooks.mjs <absolute hook.sh path> <profile dir>... [--cap-http] [--remove] [--dry-run]'); process.exit(2); }
+  // The hook must be there to run: a path with a typo would make every event of every session fail (exit 127).
+  if (!flags.has('--remove') && !fs.existsSync(hookPath)) { console.error(`${hookPath}: no such file`); process.exit(2); }
   let failed = false;
   for (const d of dirs) {
     try { console.log(install(d, hookPath, { capHttp: flags.has('--cap-http'), remove: flags.has('--remove'), dryRun: flags.has('--dry-run') })); }

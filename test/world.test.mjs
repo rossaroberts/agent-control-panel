@@ -779,3 +779,33 @@ test('every git call World makes to look at a working tree starts with --no-opti
   for (const sub of ['status', 'ls-files', 'worktree']) assert.ok(gits.some((c) => c.includes(sub)), `${sub} was called`);
   for (const c of gits) assert.equal(c[1], '--no-optional-locks', `git ${c.slice(1).join(' ')}`);
 });
+
+// ---------------------------------------------------------------------------------------------- the review of 2026-10-24
+
+test('a world file that is not JSON is set aside and the last good save (.bak) stands in', () => {
+  const file = fromBefore({ purchases: [{ id: 'p1', at: START, cost: 10 }] });
+  fs.copyFileSync(file, `${file}.bak`);
+  fs.writeFileSync(file, '{"v":2,"startedAt":1,"seed":7,"files":{},"tokens":{},"lines":{' /* cut short by a power cut */);
+  const world = load(file, START);
+  assert.equal(world.started(), true, 'the .bak stood in');
+  assert.equal(world.summary().seed, 7);
+  assert.equal(fs.readdirSync(path.dirname(file)).filter((f) => f.startsWith('world.json.bad-')).length, 1, 'the broken file is kept, aside');
+  assert.equal(saved(file).seed, 7, 'and the switch to the new rules saved the good one back');
+});
+
+test('one process writes a World: a second panel on the same file reads it and never writes', () => {
+  const file = fromBefore();
+  fs.writeFileSync(`${file}.lock`, String(process.ppid)); // a live process that is not us owns it
+  const before = fs.readFileSync(file, 'utf8');
+  const world = load(file, START);
+  assert.equal(world.summary().readOnly, true);
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the switch to the new rules was not written');
+  // the owner gone: its lock is taken over
+  const file2 = fromBefore();
+  fs.writeFileSync(`${file2}.lock`, '4194303'); // above any pid macOS or Linux hands out
+  const world2 = load(file2, START);
+  assert.equal(world2.summary().readOnly, false);
+  assert.equal(fs.readFileSync(`${file2}.lock`, 'utf8'), String(process.pid));
+  assert.ok(saved(file2).newFrom, 'written');
+  assert.ok(fs.existsSync(`${file2}.bak`), 'the file it replaced is kept as .bak');
+});

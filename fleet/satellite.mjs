@@ -69,7 +69,7 @@ export const STALL = {
   dormant: 7 * 24 * HOUR, // ... but one untouched for a week is parked, not stalled: its age shows, it is not in the Stuck band
   green: 30 * MIN,       // an open PR green and not landed (the gate lands one within minutes)
   idle: 30 * MIN,        // an agent that stopped, with its PR (or branch) still going nowhere
-  staging: 3 * HOUR,     // merged into staging, in no promotion
+  staging: 8 * HOUR,     // merged into staging, in no promotion (promotions come a few times a day: over 120 of them the gaps' median was 3 h, three in four within 7 h)
   promotion: 2 * HOUR,   // in a promotion PR that is still open
   main: 1 * HOUR,        // in main, not on TEST (a deploy takes about twenty minutes)
   test: 2 * HOUR,        // on TEST, not in prod
@@ -88,12 +88,15 @@ export function guard(args) {
   const graphql = args[1] === 'graphql';
   for (let i = 2; i < args.length; i++) {
     const x = args[i];
-    if (x === '-X' || x === '--method' || x.startsWith('--method=') || x === '--input') throw new Error('satellite only reads GitHub: no method or body');
-    if (x === '-f' || x === '-F' || x === '--field' || x === '--raw-field') {
+    // Every spelling gh takes: -X POST, -XPOST, -X=POST, --method POST, --method=POST, --input file, --input=file, -H with an override.
+    if (/^(-X|--method|--input)(=|$)/.test(x) || /^-X./.test(x) || /^--input./.test(x) || (/^(-H|--header)/.test(x) && /x-http-method-override/i.test(`${x} ${args[i + 1] ?? ''}`))) throw new Error('satellite only reads GitHub: no method or body');
+    if (/^(-f|-F|--field|--raw-field)(=|$)/.test(x) || /^-[fF]./.test(x)) {
       if (!graphql) throw new Error('satellite only reads GitHub: a REST call takes no fields');
-      const v = String(args[i + 1] ?? '');
+      // The field is in the same word (-fk=v, --field=k=v) or the next one (-f k=v).
+      const inWord = /^-[fF]./.test(x) || x.includes('=');
+      const v = /^-[fF]./.test(x) ? x.slice(2) : inWord ? x.slice(x.indexOf('=') + 1) : String(args[i + 1] ?? '');
+      if (!inWord) i++;
       if (v.startsWith('query=') && (!/^query\s*[({]/.test(v.slice(6)) || /\b(mutation|subscription)\b/i.test(v))) throw new Error('satellite only reads GitHub: a GraphQL query, never a mutation');
-      i++;
     }
   }
 }
@@ -129,10 +132,16 @@ const BATTERY = /^battery/i;
 /** What a PR's check rollup says. A re-run adds a second check with the same name: the newest one speaks. The `land` job is
  *  the Land stage's, not a test, so it is read apart. */
 export function summarizeChecks(rollup) {
+  // A new run of a workflow supersedes the whole of its last one: a job of the old run that finished after the new one began
+  // must not speak for a job the new run has not reached (an old `static` failure over a running `quality`, PR #5874).
+  const runOf = (c) => { const m = /\/actions\/runs\/(\d+)(?:\/|$)/.exec(c.detailsUrl ?? ''); return m ? Number(m[1]) : null; };
+  const newest = new Map(); // workflow → its newest run among these checks
+  for (const c of rollup ?? []) { const id = runOf(c), wf = c.workflowName ?? ''; if (id != null && id > (newest.get(wf) ?? 0)) newest.set(wf, id); }
+  const current = (c) => { const id = runOf(c); return id == null || id === newest.get(c.workflowName ?? ''); };
   const latest = new Map();
   for (const c of rollup ?? []) {
     const name = c.name ?? c.context;
-    if (!name) continue;
+    if (!name || !current(c)) continue;
     const t = ms(c.startedAt) ?? 0, was = latest.get(name);
     if (!was || t >= was.t) latest.set(name, { name, t, done: ms(c.completedAt), state: checkState(c), url: c.detailsUrl ?? c.targetUrl ?? null });
   }
@@ -143,14 +152,18 @@ export function summarizeChecks(rollup) {
   // Name the job that broke, not the gate context that only reports it: `quality` before `static`.
   bad.sort((x, y) => Number(REQUIRED.includes(x.name)) - Number(REQUIRED.includes(y.name)));
   const running = tests.filter((c) => c.state === 'running' || c.state === 'queued');
-  const state = bad.length ? 'failed' : running.length ? 'running' : tests.length ? 'passed' : 'none';
   const required = REQUIRED.map((name) => ({ name, state: by[name] ?? 'none' }));
+  // The gate's contexts are made as its jobs reach them: until all four are there, nothing has passed ("0 of 4, passed" is
+  // a gate that has not reported yet).
+  const missing = tests.length > 0 && required.some((r) => r.state === 'none');
+  const state = bad.length ? 'failed' : running.length || missing ? 'running' : tests.length ? 'passed' : 'none';
   const battery = tests.find((c) => BATTERY.test(c.name));
   return {
     state, by, required, total: tests.length,
     passed: required.filter((r) => r.state === 'passed' || r.state === 'skipped').length,
     failing: bad.map((c) => c.name), running: running.map((c) => c.name),
     land: all.find((c) => LAND.test(c.name))?.state ?? null,
+    landUrl: all.find((c) => LAND.test(c.name))?.url ?? null,
     battery: battery?.state ?? null,
     url: bad[0]?.url ?? null,
     // Jobs that really broke (the gate context that reports them does not count twice): "two reds" is two of these.
@@ -169,6 +182,18 @@ const tipOf = (sum) => sum.required.map((r) => `${GLYPH[r.state]} ${r.name}`).jo
 /** A promotion is the PR that carries staging into main (ship cuts a release/* branch for it). */
 export function isPromotion(pr) {
   return pr.baseRefName === 'main' && (pr.headRefName === 'staging' || /^(release|promote)\//i.test(pr.headRefName ?? '') || /^(promote|release)\b\s*[:(]/i.test(pr.title ?? ''));
+}
+
+/** The post-merge proof of staging: gate's own runs on the staging branch (ship promotes only a head one of them proved
+ *  green). The newest green one, how many reds have come since it (and since when), and one still running. */
+export function stagingProof(gateRuns) {
+  const runs = [...(gateRuns ?? [])].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const done = (r) => r.status === 'completed';
+  const green = runs.find((r) => done(r) && r.conclusion === 'success') ?? null;
+  const reds = runs.filter((r) => done(r) && ['failure', 'timed_out', 'startup_failure'].includes(r.conclusion) && (!green || Date.parse(r.created_at) > Date.parse(green.created_at)));
+  const cell = (r) => (r ? { sha: r.head_sha, at: ms(r.updated_at) ?? ms(r.created_at), url: r.html_url ?? null } : null);
+  return { green: cell(green), reds: reds.length, red: cell(reds[0] ?? null), redSince: reds.length ? ms(reds.at(-1).run_started_at) ?? ms(reds.at(-1).created_at) : null,
+    running: cell(runs.find((r) => !done(r)) ?? null), total: runs.length };
 }
 
 /** TEST and Prod from release.yml's runs (newest first) and their jobs (`deploy-test`, `deploy-prod`; the one that did
@@ -274,7 +299,8 @@ export function placeAgents(snap, { repo = REPO, home = os.homedir() } = {}) {
     if (m.ok === false) continue;
     for (const a of m.accounts ?? []) for (const x of a.sessions ?? []) {
       if (x.state === 'closed' || !x.state) continue;
-      const cwd = String(x.cwd ?? '');
+      // Where it works: the folder its tools go into (a worktree of its own, often), else where it was started.
+      const cwd = String(x.workdir ?? x.cwd ?? '');
       const abs = cwd.startsWith('~/') ? path.join(home, cwd.slice(2)) : cwd;
       const nameIn = abs.toLowerCase().split(path.sep).some((p) => p === name);
       let branch = typeof x.branch === 'string' && x.branch ? x.branch : null;
@@ -372,6 +398,7 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
     if (!['staging', 'main'].includes(pr.baseRefName)) return { s: 'wait', t: 'stacked', tip: `into ${pr.baseRefName}, not into staging` };
     if (pr.mergeStateStatus === 'DIRTY') return { s: 'fail', t: 'conflict', tip: `conflicts with ${pr.baseRefName}: update the branch` };
     if (labelsOf(pr).includes('hold')) return { s: 'wait', t: 'hold' };
+    if (sum.land === 'failed' || sum.land === 'cancelled') return { s: 'fail', t: 'land failed', tip: 'the gate\'s land job failed: open the run', href: sum.landUrl };
     if (!pr.isDraft && sum.state === 'passed') return { s: 'wait', t: 'ready', tip: 'every check passed; the gate lands it' };
     return { s: 'wait', t: '' };
   };
@@ -456,6 +483,13 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
     // Where it sits now, and since when: in main from its promotion's merge (or its own, for a fix straight into main).
     const mergedAt = ms(pr.mergedAt), inMain = promoPr ? mergedAt : promo ? ms(promo.mergedAt) : !viaStaging && !stacked ? mergedAt : null;
     let sat = null;
+    const why = [];
+    // On staging and in no promotion: ship promotes the newest head the staging proof (gate on staging) found green, so a
+    // commit behind a red streak is not going anywhere until that is fixed; it says so.
+    const proof = raw.proof;
+    if (viaStaging && !promo && !(openPromo && has(sha, openPromo.head)) && proof?.reds && !(proof.green && has(sha, proof.green.sha))) {
+      why.push({ t: `staging proof red ×${proof.reds}${proof.redSince ? `, ${span(now - proof.redSince)}` : ''}`, rank: 4 });
+    }
     if (!stacked) {
       if (prod?.s === 'done') sat = { stage: 'in prod', since: inMain ?? mergedAt };
       else if (prod?.s === 'run' || test?.s === 'run') sat = { stage: 'deploying', since: (prod?.s === 'run' ? prod : test).at, cell: prod?.s === 'run' ? 'prod' : 'test' };
@@ -471,7 +505,7 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
       author: pr.author?.login ?? null, bot: Boolean(pr.author?.is_bot), promo: promoPr, labels: [], at: Math.max(mergedAt ?? 0, ...ags.map((a) => a.lastAt ?? 0)),
       cells: { agent: agentCell(ags), pr: { s: 'done', t: 'merged', at: mergedAt }, checks: { s: 'done', t: '' },
         land: { s: 'done', t: viaStaging ? 'staging' : stacked ? `into ${pr.baseRefName}` : 'main', at: mergedAt }, promotion, test, prod },
-    }, sat));
+    }, sat, why));
   }
   // A branch an agent is on that has no PR yet: of this repo by its folder, or because GitHub has a branch of that name.
   const windowStart = (raw.at ?? now) - ((raw.days ?? DAYS) + 1) * 86_400_000;
@@ -531,7 +565,7 @@ export function compose(raw, agents = { placed: [], unknown: 0 }, now = Date.now
   for (const r of rows) r.station = stationOf(r);
   // Yours: a PR you opened, or one of your Fleet sessions works on it (an agent cell). The rest is everyone else's.
   for (const r of rows) r.mine = Boolean((raw.me && r.author === raw.me) || r.cells?.agent || r.kind === 'branch');
-  return { ok: true, repo: raw.repo, at: raw.at, took: raw.took, calls: raw.calls, days: raw.days, warnings: raw.warnings ?? [], workflows: raw.workflows ?? [], me: raw.me ?? null, stations: STATIONS,
+  return { ok: true, repo: raw.repo, at: raw.at, took: raw.took, calls: raw.calls, days: raw.days, warnings: raw.warnings ?? [], workflows: raw.workflows ?? [], me: raw.me ?? null, stations: STATIONS, proof: raw.proof ?? null,
     stages, rows: orderRows(rows), counts: { open: open.length, merged: merged.length, shipped: rows.filter((r) => r.shipped).length, attention: rows.filter((r) => r.attention && !r.stuck).length, stuck: rows.filter((r) => r.stuck).length } };
 }
 
@@ -591,7 +625,9 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
     };
 
     // Every workflow file: its last run on staging or main. Two reads of the newest runs cover the busy ones; a quiet one
-    // (a nightly job, a PR-closed hook) is asked for by itself, at most every ten minutes.
+    // (a nightly job, a PR-closed hook) is asked for by itself, at most every ten minutes. Gate's runs on staging are kept
+    // apart: they are the staging proof (stagingProof).
+    let proof = null;
     const readWorkflows = async () => {
       if (!wfMeta || now() - wfMeta.at > 3_600_000) {
         const [files, list] = await Promise.all([
@@ -602,6 +638,8 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
       }
       const [a, b] = await Promise.all([stagingBranch, 'main'].map((br) => json(['api', `repos/${repo}/actions/runs?branch=${br}&per_page=100`, '--jq', RUN_FIELDS])));
       const runs = [...a, ...b].sort((x, y) => Date.parse(y.created_at) - Date.parse(x.created_at));
+      const gateId = wfMeta.list.find((w) => /\/gate\.ya?ml$/.test(w.path ?? ''))?.id;
+      if (gateId != null) proof = stagingProof(runs.filter((r) => r.workflow_id === gateId && r.head_branch === stagingBranch));
       const seen = new Set(runs.map((r) => r.workflow_id));
       await Promise.all(wfMeta.list.filter((w) => wfMeta.files.includes(w.path) && !seen.has(w.id)).map(async (w) => {
         const was = wfExtra.get(w.id);
@@ -675,7 +713,7 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
       ok: true, repo, at: started, took: now() - started, calls, days, warnings, me,
       open,
       merged: work,
-      promos, line, deploys, queue, workflows,
+      promos, line, deploys, queue, workflows, proof,
       rep: Object.fromEntries(repCache), pairs: Object.fromEntries(pairCache),
     };
   }
@@ -719,7 +757,10 @@ export function createSatellite({ repo = REPO, snapshot = async () => null, days
   async function read({ fresh = false } = {}) {
     const t = now();
     if (!raw) await refresh();
-    else if (!inflight && t - lastTry >= RETRY_MS && (fresh || t - rawAt >= TTL_MS)) refresh();
+    else if (fresh) { // the button: a read now, and this answer waits for it (within reason)
+      if (!inflight && t - lastTry >= 5000) refresh(); // a page pressing twice gets one read
+      if (inflight) await Promise.race([inflight, new Promise((ok) => setTimeout(ok, 30_000).unref?.())]);
+    } else if (!inflight && t - lastTry >= RETRY_MS && t - rawAt >= TTL_MS) refresh();
     if (!raw) return { ok: false, error: `GitHub could not be read: ${failure ?? 'no answer'}` };
     let snap = null;
     try { snap = await Promise.race([Promise.resolve().then(snapshot), new Promise((ok) => setTimeout(() => ok(null), SNAP_MS).unref?.())]); } catch {}

@@ -227,3 +227,54 @@ test('stage: from what its tools did last, never a guess', () => {
   assert.equal(stageOfTool('Bash', { command: 'npx vitest run features/ap' }), 'testing');
   assert.equal(stageOfTool('Bash', { command: 'git commit -m x' }), 'building');
 });
+
+// ---------------------------------------------------------------------------------------------- the review of 2026-10-24
+import { pickStep, queuedIn } from '../fleet/machine.mjs';
+
+test('hook events after a compaction and at the end: SessionStart(compact) says nothing, SessionEnd says closed', () => {
+  const at = NOW - 1000;
+  assert.equal(hookState({ e: 'SessionStart', r: 'startup', at }), 'ready');
+  assert.equal(hookState({ e: 'SessionStart', r: 'compact', at }), null, 'the turn goes on after a compaction mid-turn');
+  assert.equal(hookState({ e: 'SessionEnd', r: 'logout', at }), 'closed');
+  assert.equal(hookState({ e: 'constructor', at }), null, 'no prototype in the table');
+});
+
+test('a limit stop wins over the Stop hook that fires right after it: capped, not ready', () => {
+  const hit = { at: NOW - 5000, text: 'limit reached' };
+  const t = turn(true, 4000, { limitHit: hit, lastAt: hit.at });
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'idle' }, t, { e: 'Stop', at: NOW - 3000 }, NOW), { state: 'capped', live: true });
+  // a SessionEnd hook says nothing about a process still listed: the roster decides
+  assert.deepEqual(sessionState({ pid: 41, kind: 'interactive', status: 'idle' }, turn(true, 4000), { e: 'SessionEnd', at: NOW - 3000 }, NOW), { state: 'ready', live: true });
+});
+
+test('the stage of a Bash step: reading deploy docs is planning; running a deploy script is deploying', () => {
+  assert.equal(stageOfTool('Bash', { command: 'cat deploy/README.md' }), 'planning');
+  assert.equal(stageOfTool('Bash', { command: 'ls deploy/env' }), 'planning');
+  assert.equal(stageOfTool('Bash', { command: 'deploy/deploy.sh --env test' }), 'deploying');
+  assert.equal(stageOfTool('Bash', { command: 'bash deploy/scripts/swap.sh' }), 'deploying');
+});
+
+test('the queue: a remove of a message queued before the tail read leaves the rest alone', () => {
+  const op = (operation, content, ts = '2026-10-23T12:00:00Z') => JSON.stringify({ type: 'queue-operation', operation, content, timestamp: ts });
+  const q = queuedIn([op('enqueue', 'first'), op('enqueue', 'second'), op('remove', 'one queued before the tail'), op('remove', 'first')]);
+  assert.deepEqual(q.map((x) => x.text), ['second']);
+});
+
+test('pickStep: the step\'s own process group under the session, by when it began and the whole command; never the panel or two alike', () => {
+  const now = Date.UTC(2026, 9, 24, 12, 0, 0), since = now - 65_000;
+  const row = (pid, ppid, pgid, etime, args) => [null, String(pid), String(ppid), String(pgid), etime, args];
+  const rows = [
+    row(41, 1, 41, '02:00:00', 'claude --resume abc'),
+    row(500, 41, 500, '01:05', 'bash -c npm test -- --watch'), // the step: group leader, child of 41, started with the step
+    row(501, 500, 500, '01:05', 'node npm test -- --watch'),   // its child: in the same group, not a leader
+    row(600, 41, 600, '00:03', 'bash -c npm test -- --watch'), // the same words, begun a minute later: another step
+    row(700, 41, 700, '01:05', 'bash -c npm test'),            // a shorter command: not the whole of it
+    row(800, 41, 800, '01:05', 'bash -c npm test -- --watch'), // the panel itself (self), never
+  ];
+  const want = 'bash-cnpmtest----watch';
+  assert.deepEqual(pickStep(rows, { pid: 41, since, want, self: [800], now }), [500]);
+  assert.deepEqual(pickStep(rows, { pid: 41, since, want, self: [], now }), [500, 800], 'two alike: the caller stops neither');
+  assert.deepEqual(pickStep(rows, { pid: 41, since: now - 3000, want, self: [800], now }), [600], 'the step that began three seconds ago');
+  assert.deepEqual(pickStep(rows, { pid: 41, since, want: '', self: [], now }), []);
+  assert.deepEqual(pickStep([row(1, 41, 1, '01:05', 'bash -c npm test -- --watch')], { pid: 41, since, want, now }), [], 'never init');
+});

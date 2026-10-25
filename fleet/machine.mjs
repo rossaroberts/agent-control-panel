@@ -197,7 +197,7 @@ export function contextOf(sl, t, window, settings) {
 // Where a session is on the way to production, from what its tools did last (newest first): the first one that ships,
 // promotes, tests or builds says so; reading and looking around alone is planning. No model's guess.
 const STAGE_OF_RUN = [
-  ['deploying', /\b(gh workflow run\b|deploy\.sh|deploy\/|release\.yml|ship\.yml|kubectl|docker compose .*\bup\b)/i],
+  ['deploying', /\b(gh workflow run\b|deploy\.sh|deploy\/\S*\.sh\b|release\.yml|ship\.yml|kubectl|docker compose .*\bup\b)/i],
   ['promoting', /\b(gh pr (create|merge|ready|edit|update-branch|checks)|git push|gh run (watch|view)|merge.queue)/i],
   ['testing', /\b(npm (run )?(test|t)\b|test:[\w:-]+|vitest|jest|playwright|pytest|smoke(:[\w-]+)?|typecheck|tsc\b|lint\b|knip|verify-gate|check:[\w-]+|docs:check|node --test)/i],
   ['building', /\b(npm (i|install|ci)\b|db:(reset|rebuild)|new:migration|npm run build|git (commit|add|rebase|merge)\b)/i],
@@ -224,8 +224,9 @@ export function stageOf(uses) {
  *  started in a shared checkout often works in a worktree of its own; this, not where it started, is its branch. */
 function whereOf(name, x) {
   const abs = (v) => (typeof v === 'string' && (v.startsWith('/') || v.startsWith('~/')) ? v.replace(/^~(?=\/)/, HOME) : null);
-  // Only a folder in a git checkout says where the work is: not Claude Code's own (memory, settings), not loose files.
-  const work = (d) => (d && !/\/\.claude(-[\w.-]+)?(\/|$)/.test(d) && branchOf(d) ? d : null);
+  // Only a folder in a git checkout says where the work is: not Claude Code's own (memory, settings), not loose files. Its
+  // worktrees (<repo>/.claude/worktrees/<name>, where it puts them by default) are checkouts, and count.
+  const work = (d) => (d && !/\/\.claude(-[\w.-]+)?(\/(?!worktrees\/)|$)/.test(d) && branchOf(d) ? d : null);
   const f = abs(x.file_path ?? x.notebook_path);
   if (f) return work(path.dirname(f));
   if (name === 'Bash' && typeof x.command === 'string') {
@@ -269,7 +270,7 @@ export function queuedIn(lines) {
     if (d?.type !== 'queue-operation') continue;
     if (d.operation === 'enqueue' && typeof d.content === 'string') q.push({ text: d.content, at: Date.parse(d.timestamp) || null });
     else if (d.operation === 'dequeue') q.shift();
-    else if (d.operation === 'remove') { const i = q.findIndex((x) => x.text === d.content); q.splice(i >= 0 ? i : 0, 1); }
+    else if (d.operation === 'remove') { const i = q.findIndex((x) => x.text === d.content); if (i >= 0) q.splice(i, 1); } // one not in the tail read was queued before it
     else if (d.operation === 'popAll') q = [];
   }
   // What Claude Code queued itself (a view's context, a system note) is not yours.
@@ -407,11 +408,13 @@ function statusSnapshots(p, learned) {
 // ---------------------------------------------------------------- hooks
 // A profile with Fleet's hook (hook.sh) has one small file per session, <profile>/fleet-state/<session>.json, replaced at
 // each event of its main conversation: { e: event, t: tool, n: notification type, r: reason, i: interrupted, at }.
-const HOOK_STATES = { SessionStart: 'ready', UserPromptSubmit: 'working', PostToolUse: 'working', PostToolUseFailure: 'working',
-  PermissionDenied: 'working', ElicitationResult: 'working', PreCompact: 'working', PermissionRequest: 'needs-you', Elicitation: 'needs-you', Stop: 'ready' };
+const HOOK_STATES = { __proto__: null, SessionStart: 'ready', UserPromptSubmit: 'working', PostToolUse: 'working', PostToolUseFailure: 'working',
+  PermissionDenied: 'working', ElicitationResult: 'working', PreCompact: 'working', PermissionRequest: 'needs-you', Elicitation: 'needs-you', Stop: 'ready',
+  SessionEnd: 'closed' };
 /** What the last hook event says a session is doing, or null when it says nothing. */
 export function hookState(h) {
   if (!h?.e) return null;
+  if (h.e === 'SessionStart' && h.r === 'compact') return null; // a compaction mid-turn: the turn goes on, the roster says so
   if (h.e === 'PreToolUse') return /^(AskUserQuestion|ExitPlanMode)$/.test(h.t ?? '') ? 'needs-you' : 'working';
   if (h.e === 'PostToolUseFailure' && h.i) return 'ready'; // stopped with Esc
   if (h.e === 'Notification') return /^(permission_prompt|elicitation_dialog|elicitation_url_dialog)$/.test(h.n ?? '') ? 'needs-you' : h.n === 'idle_prompt' ? 'ready' : null;
@@ -420,7 +423,7 @@ export function hookState(h) {
   return HOOK_STATES[h.e] ?? null;
 }
 const hookFile = (p, sessionId) => path.join(p.dir, 'fleet-state', `${sessionId}.json`);
-const readHook = (p, sessionId) => (/^[\w-]{8,80}$/.test(sessionId ?? '') ? readJson(hookFile(p, sessionId), 4096) : null);
+const readHook = (p, sessionId) => (/^[\w-]{8,80}$/.test(sessionId ?? '') ? readJson(hookFile(p, sessionId), 65536) : null);
 /** Every profile's hook files, watched: `on({ sessionId, hook })` as one changes (a burst gives its last). */
 export function watchHooks(on) {
   const timers = new Map();
@@ -433,7 +436,7 @@ export function watchHooks(on) {
         clearTimeout(timers.get(name));
         timers.set(name, setTimeout(() => {
           timers.delete(name);
-          const hook = readJson(path.join(dir, name), 4096);
+          const hook = readJson(path.join(dir, name), 65536);
           if (hook) on({ profile: p.id, sessionId: name.slice(0, -5), hook });
         }, 120));
       }).on('error', () => {}).unref(); // watching alone keeps no process alive (the panel's server does that)
@@ -456,6 +459,8 @@ export function sessionState(r, t, h = null, now = Date.now()) {
   // A background job reads `blocked` both on a question to you and when it sits idle with no prompt yet: only the first
   // needs you.
   if (r.status === 'waiting' || r.waitingFor || (r.state === 'blocked' && r.status !== 'idle')) return { state: 'needs-you', live };
+  // Its last word was a limit stop: capped, whatever its hooks said after (a Stop fires right after that reply).
+  if (t?.limitHit && t.limitHit.at >= (t.lastAt ?? 0) - 120_000) return { state: 'capped', live };
   // Its hooks, while they are current (nothing written since that they didn't see): what it does, as Claude Code says.
   const hs = hookState(h);
   if (hs && hs !== 'closed' && h.at >= (t?.writtenAt ?? 0) - 15_000) {
@@ -466,7 +471,6 @@ export function sessionState(r, t, h = null, now = Date.now()) {
     if (hs === 'working' && r.status === 'idle' && quiet > 60_000) return { state: 'ready', live };
     return { state: hs, live };
   }
-  if (t?.limitHit && t.limitHit.at >= (t.lastAt ?? 0) - 120_000) return { state: 'capped', live };
   // Working is what Claude Code says: a turn that ended while its own background tasks run still carries on by itself.
   if (r.status === 'busy' || r.state === 'working' || r.state === 'running') return { state: 'working', live };
   return { state: 'ready', live };
@@ -1335,25 +1339,43 @@ export async function interject(a) {
   const t = file ? readTranscript(file) : null;
   if (!t?.running) return { ok: false, error: 'It is not in the middle of a step: what you send reaches it now.' };
   if (t.running.tool !== 'Bash' || !t.running.cmd) return { ok: false, error: `Its step (${t.running.step}) is not a command that can be stopped: your message waits for it to end.` };
-  // Its process: the session file Claude Code keeps per process names its session.
+  // The step you armed on, by when it began: one that ended meanwhile is not stopped in another's place.
+  if (a.since != null && Number(a.since) !== t.running.since) return { ok: false, error: 'That step has ended; another runs now. Look, then interject again.' };
+  // Its process: the session file Claude Code keeps per process names its session, and the process must still be Claude Code
+  // (a pid is reused once its owner has gone).
   let pid = null;
-  try { for (const n of fs.readdirSync(path.join(p.dir, 'sessions'))) { const d = readJson(path.join(p.dir, 'sessions', n), 1 << 20); if (d?.sessionId === a.sessionId && Number.isInteger(d.pid)) { try { process.kill(d.pid, 0); pid = d.pid; } catch {} } } } catch {}
+  try { for (const n of fs.readdirSync(path.join(p.dir, 'sessions'))) { const d = readJson(path.join(p.dir, 'sessions', n), 1 << 20); if (d?.sessionId === a.sessionId && Number.isInteger(d.pid) && d.pid > 1) { try { process.kill(d.pid, 0); pid = d.pid; } catch {} } } } catch {}
   if (!pid) return { ok: false, error: 'Its process is not running here.' };
-  // The step's shell: a child of it, leading a process group of its own, started when the step was, running that command.
-  const r = await run('ps', ['-A', '-o', 'pid=,ppid=,pgid=,etime=,args=']);
-  const flat = (v) => String(v).replace(/['"\\\s]/g, ''), want = flat(t.running.cmd).slice(0, 48);
-  const steps = [];
-  for (const line of r.stdout.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
-    if (!m || Number(m[2]) !== pid || m[1] !== m[3]) continue;
-    const started = Date.now() - (etimeMs(m[4]) ?? Infinity);
-    if (started >= (t.running.since ?? 0) - 5000 && want && flat(m[5]).includes(want)) steps.push(Number(m[3]));
-  }
-  if (!steps.length) return { ok: false, error: 'Its command could not be found: it may just have ended.' };
-  for (const g of steps) try { process.kill(-g, 'SIGTERM'); } catch {}
+  const r = await run('ps', ['-Aww', '-o', 'pid=,ppid=,pgid=,etime=,args=']);
+  const rows = r.stdout.split('\n').map((line) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line)).filter(Boolean);
+  if (!rows.some((m) => Number(m[1]) === pid && /claude/i.test(m[5]))) return { ok: false, error: 'Its process is not running here.' };
+  // The step's shell: a child of it, leading a process group of its own, started within seconds of the step, running the
+  // whole of that command (its first few words are not enough: two steps can start alike).
+  const flat = (v) => String(v).replace(/['"\\\s]/g, ''), want = flat(t.running.cmd).slice(0, 2000);
+  const found = pickStep(rows, { pid, since: t.running.since ?? 0, want, self: [process.pid, process.ppid] });
+  if (found.length !== 1) return { ok: false, error: found.length ? 'Two commands of that shape run under it: nothing was stopped.' : 'Its command could not be found: it may just have ended.' };
+  const [g] = found;
+  try { process.kill(-g, 'SIGTERM'); } catch (e) { return { ok: false, error: `It could not be stopped: ${e?.message ?? e}` }; }
   await new Promise((ok) => setTimeout(ok, 2000));
-  for (const g of steps) try { process.kill(-g, 'SIGKILL'); } catch {}
-  return { ok: true, stopped: t.running.step };
+  let alive = true;
+  try { process.kill(-g, 0); } catch { alive = false; }
+  if (alive) try { process.kill(-g, 'SIGKILL'); } catch {} // only one that ignored the hang-up
+  return { ok: true, stopped: t.running.step, killed: alive };
+}
+/** The process groups under `pid` (ps rows [pid, ppid, pgid, etime, args]) that lead a group of their own, began within five
+ *  seconds of `since`, run the whole command `want` (flattened), and are not the panel's own (`self`) or init's. */
+export function pickStep(rows, { pid, since, want, self = [], now = Date.now() }) {
+  if (!want) return [];
+  const flat = (v) => String(v).replace(/['"\\\s]/g, '');
+  const out = [];
+  for (const m of rows) {
+    if (Number(m[2]) !== pid || m[1] !== m[3]) continue;
+    const g = Number(m[3]);
+    if (g <= 1 || self.includes(g)) continue;
+    const started = now - (etimeMs(m[4]) ?? Infinity);
+    if (Math.abs(started - since) <= 5000 && flat(m[5]).includes(want)) out.push(g);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- run over SSH: `FLEET_DO=collect node --input-type=module -`

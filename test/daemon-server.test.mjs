@@ -8,8 +8,11 @@ const SERVER = new URL('../server.mjs', import.meta.url).pathname;
 const freePort = () => new Promise((r) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => r(port)); }); });
 const until = async (check, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await check()) return true; await new Promise((r) => setTimeout(r, 150)); } return false; };
 const answers = (port) => fetch(`http://127.0.0.1:${port}/`).then((r) => r.ok, () => false);
+// A home of its own: the real one's Claude Code profiles would be read (and titled, at a cost) by every run.
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-home-'));
+process.on('exit', () => { try { fs.rmSync(HOME, { recursive: true, force: true }); } catch {} });
 function start(port, prefsDir, extraEnv = {}) {
-  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, ACP_PORT: String(port), ACP_PREFS: path.join(prefsDir, 'prefs.json'), ACP_DAEMON: '1', ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, HOME, ACP_PORT: String(port), ACP_PREFS: path.join(prefsDir, 'prefs.json'), ACP_DAEMON: '1', ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; child.stdout.on('data', (d) => { out += d; }); child.stderr.on('data', (d) => { out += d; });
   // A child that already exited never emits 'exit' again, so stop resolves at once for it.
   const stop = () => new Promise((r) => { if (child.exitCode !== null || child.signalCode !== null) return r(); child.once('exit', r); child.kill(); });

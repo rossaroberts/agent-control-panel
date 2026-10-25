@@ -49,6 +49,7 @@ class Socket extends EventEmitter {
   get backlog() { return this.socket.writableLength; }
 
   feed(d) {
+    if (this.closed) return; // nothing after the goodbye is read, or kept
     this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d;
     while (!this.closed && this.buf.length >= 2) {
       const b0 = this.buf[0], b1 = this.buf[1];
@@ -74,7 +75,7 @@ class Socket extends EventEmitter {
 
   frame(fin, op, data) {
     if (op === 0x8) return this.close(1000);
-    if (op === 0x9) return this.write(0xa, data);
+    if (op === 0x9) return data.length <= 125 ? this.write(0xa, data) : this.close(1002); // a ping is a control frame: 125 bytes at most
     if (op === 0xa) return;
     if (op === 0x0) {
       if (!this.parts) return this.close(1002);

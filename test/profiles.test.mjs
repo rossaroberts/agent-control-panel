@@ -34,13 +34,15 @@ await new Promise((resolve, reject) => {
   server.stdout.on('data', () => { if (log.includes(BASE)) { clearTimeout(t); resolve(); } });
   server.on('exit', () => reject(new Error('server exited: ' + log)));
 });
-const token = (await (await fetch(BASE + '/')).text()).match(/[0-9a-f]{48}/)[0];
-const api = (p, body) => fetch(BASE + p, { method: 'POST', headers: { 'content-type': 'application/json', origin: BASE, 'x-acp-token': token }, body: JSON.stringify(body) }).then((r) => r.json());
+// The pairing cookie a browser holds once `node server.mjs open` has run: the server made the key beside prefs.json as it booted.
+const paired = { cookie: `acp_k=${fs.readFileSync(path.join(path.dirname(prefs), 'key'), 'utf8').trim()}` };
+const token = (await (await fetch(BASE + '/', { headers: paired })).text()).match(/[0-9a-f]{48}/)[0];
+const api = (p, body) => fetch(BASE + p, { method: 'POST', headers: { 'content-type': 'application/json', origin: BASE, 'x-acp-token': token, ...paired }, body: JSON.stringify(body) }).then((r) => r.json());
 
 // A page watching, so requests are held at all. Frames arrive as they are sent.
 const frames = [];
 const watcher = new AbortController();
-fetch(`${BASE}/events?t=${token}`, { signal: watcher.signal }).then(async (r) => {
+fetch(`${BASE}/events?t=${token}`, { headers: paired, signal: watcher.signal }).then(async (r) => {
   let buf = '';
   for await (const chunk of r.body) {
     buf += Buffer.from(chunk).toString();

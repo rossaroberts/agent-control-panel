@@ -19,6 +19,10 @@ def size(fd, c, r): fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', r, c
 pid, fd = pty.fork()
 if pid == 0:
     size(0, cols, rows)
+    # The size pipe is this relay's alone: a program that outlives the terminal (an ssh master, a server a step started)
+    # must not hold it open, or the panel waits on it and the terminal's slot never frees.
+    try: os.close(3)
+    except OSError: pass
     os.execvp(sys.argv[3], sys.argv[3:])
 def gone():
     try: return os.waitpid(pid, os.WNOHANG)[0] != 0

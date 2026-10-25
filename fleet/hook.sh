@@ -10,10 +10,10 @@ J=$(command -v jq 2>/dev/null || { [ -x /opt/homebrew/bin/jq ] && echo /opt/home
 line=$("$J" -r 'select((.agent_id // "") == "")
   | select(.hook_event_name != "Notification" or ((.notification_type // "") | test("^(permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog)$")))
   | "\(.session_id // "")\t\({e: .hook_event_name, t: (.tool_name // null), n: (.notification_type // null),
-       r: (.reason // .error // .source // .trigger // null), i: (.is_interrupt // null), at: (now * 1000 | floor)} | tojson)"' 2>/dev/null) || exit 0
+       r: (.reason // .source // .trigger // null), i: (.is_interrupt // null), at: (now * 1000 | floor)} | tojson)"' 2>/dev/null) || exit 0
 s=${line%%"	"*}
 j=${line#*"	"}
 case "$s" in ''|*[!0-9A-Za-z_-]*) exit 0 ;; esac
 d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet-state"
-mkdir -p "$d" 2>/dev/null && printf '%s\n' "$j" > "$d/.$s.$$" 2>/dev/null && mv -f "$d/.$s.$$" "$d/$s.json" 2>/dev/null
+{ mkdir -p "$d" && printf '%s\n' "$j" > "$d/.$s.$$" && mv -f "$d/.$s.$$" "$d/$s.json"; } 2>/dev/null || rm -f "$d/.$s.$$" 2>/dev/null
 exit 0

@@ -552,7 +552,7 @@ function md(text) {
 // ---------------------------------------------------------------- TEST, to try it yourself
 /** An epic's TEST site in one browser window of its own beside the panel, reused each time. (TEST won't load inside the
  *  page: it sends X-Frame-Options: DENY.) */
-const openTest = (url) => { const w = Math.min(1240, screen.availWidth - 420); window.open(url, 'fleet-test', `popup=yes,width=${w},height=${screen.availHeight},left=${screen.availWidth - w},top=0`)?.focus(); };
+const openTest = (url) => { const w = Math.min(1240, screen.availWidth - 420); window.open(url, 'fleet-test', `popup=yes,noopener,width=${w},height=${screen.availHeight},left=${screen.availWidth - w},top=0`)?.focus(); };
 const testOf = (x) => (snap.epics ?? []).find((e) => e.name === x.epic)?.test ?? null;
 
 // ---------------------------------------------------------------- machines and their sessions
@@ -719,7 +719,7 @@ const terms = new Map(); // key → one attached terminal
 let shown = null, lastSize = { cols: 100, rows: 30 };
 const TERM_THEME = { background: '#16181a', foreground: '#dcdfe1', cursor: '#3fb6ee', cursorAccent: '#16181a', selectionBackground: 'rgba(63,182,238,.3)' };
 const printable = (d) => d.length <= 64 && !/[\x00-\x1f\x7f]/.test(d);
-const wire = { ws: null, open: null, next: 1, refs: new Map() }; // the connection, and each terminal on it by number
+const wire = { ws: null, open: null, next: 1, refs: new Map(), tries: 0, bye: false }; // the connection, and each terminal on it by number
 
 /** The connection, opened if need be: a promise of it, open. */
 function wired() {
@@ -727,7 +727,7 @@ function wired() {
   const ws = new WebSocket(`ws://${location.host}/api/term/ws?t=${encodeURIComponent(TOKEN)}`);
   ws.binaryType = 'arraybuffer';
   wire.ws = ws;
-  wire.open = new Promise((ok, no) => { ws.onopen = () => ok(ws); ws.onerror = () => no(new Error('no connection to the panel')); });
+  wire.open = new Promise((ok, no) => { ws.onopen = () => { wire.tries = 0; wire.bye = false; ok(ws); }; ws.onerror = () => no(new Error('no connection to the panel')); });
   wire.open.catch(() => {});
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') {
@@ -735,17 +735,21 @@ function wired() {
       try { m = JSON.parse(e.data); } catch { return; }
       if (m.op === 'end') ended(wire.refs.get(m.ref), m.error ?? null);
       if (m.op === 'fleet') load(); // something changed between reads (a session's hook): read again now
+      if (m.op === 'bye') { wire.bye = true; $('err').hidden = false; $('err').textContent = 'The panel is restarting: this page comes back by itself.'; } // it closes next
       return;
     }
     const T = wire.refs.get(new DataView(e.data).getUint32(0));
     if (T) printed(T, new Uint8Array(e.data, 4));
   };
   // The panel restarted or the line dropped: every terminal on it has ended (Enter in one attaches it again), and the
-  // page connects again a moment later (a panel that restarted has a new token: the read that follows reloads the page).
+  // page connects again a moment later, then less and less often while the panel is away (a panel that restarted has a
+  // new token: the read that follows reloads the page).
   ws.onclose = () => {
     if (wire.ws === ws) wire.ws = null;
-    for (const T of [...wire.refs.values()]) ended(T, null);
-    setTimeout(() => { if (!wire.ws) { wired().catch(() => {}); load(); } }, 2000);
+    const note = wire.bye ? 'the panel is restarting · enter to attach again once it is back' : null;
+    for (const T of [...wire.refs.values()]) ended(T, null, note);
+    const wait = Math.min(30_000, 2000 * 2 ** Math.min(wire.tries++, 4));
+    setTimeout(() => { if (!wire.ws) { wired().catch(() => {}); load(); } }, wait);
   };
   return wire.open;
 }
@@ -798,12 +802,13 @@ function printed(T, bytes) {
 }
 /** It ended where it runs (exited, closed, its trust prompt answered) or could not start: an ended session's pane goes and
  *  it moves to closed; one still running says so, and Enter attaches it again. */
-async function ended(T, error) {
+async function ended(T, error, note = null) {
   if (!T || T.ended) return;
   wire.refs.delete(T.ref);
   if (terms.get(T.key) !== T) return; // let go of here
   T.ended = true; T.pend = []; drawGhost(T);
   if (error) { T.term.write(`\r\n\x1b[31m${error}\x1b[0m\r\n\x1b[2menter to try again\x1b[0m\r\n`); return; }
+  if (note) { T.term.write(`\r\n\x1b[2m${note}\x1b[0m\r\n`); return; }
   if (T.x.via === 'trust') return finish(T);
   await load();
   const y = everything.find((s) => keyOf(s) === T.key);
@@ -834,7 +839,7 @@ function drawGhost(T) {
   T.ghost.hidden = false;
 }
 /** The session on screen in the pane: its terminal, attached if need be. */
-function showTerm(x) {
+function showTerm(x, focus = !keyNav && x.state !== 'needs-you') {
   $('p-term').hidden = false;
   const T = attachTerm(x, true);
   if (!T) return;
@@ -842,7 +847,7 @@ function showTerm(x) {
     for (const o of terms.values()) o.el.hidden = o !== T;
     shown = T.key;
     if (!T.gl && window.WebglAddon) { try { T.gl = new WebglAddon.WebglAddon(); T.gl.onContextLoss(() => { T.gl?.dispose(); T.gl = null; }); T.term.loadAddon(T.gl); } catch { T.gl = null; } }
-    fitShown(!keyNav && x.state !== 'needs-you'); // a session waiting on you doesn't take the next Enter by accident; j/k stay in the list
+    fitShown(focus); // a session waiting on you doesn't take the next Enter by accident; j/k stay in the list
   }
   T.used = Date.now();
 }
@@ -963,7 +968,10 @@ function renderPane(toEnd = false) {
   if (!document.activeElement?.matches?.('.p-title, .p-group')) renderHead(x, term);
   if (term) {
     $('p-body').hidden = true; $('p-foot').hidden = true;
-    showTerm(x);
+    // Passing through with j/k: the terminal (a process on the panel) is attached once you have settled on a row, not for
+    // every row on the way; the focus stays in the list.
+    clearTimeout(pane.attachT);
+    if (keyNav) { for (const o of terms.values()) o.el.hidden = true; pane.attachT = setTimeout(() => { if (pane.key === keyOf(x)) showTerm(x, false); }, 400); } else showTerm(x);
     return;
   }
   hideTerms();
@@ -1056,7 +1064,8 @@ async function interjectNow() {
   if (!x?.running) return;
   if (!pane.armStop) { pane.armStop = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.armStop) { pane.armStop = false; renderPane(); } }, 4000); return; }
   pane.armStop = false; pane.moving = true; renderPane();
-  const r = await api('/api/fleet/interject', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
+  // The step you armed on, by when it began: a step that ended meanwhile is not stopped in another's place.
+  const r = await api('/api/fleet/interject', { machine: x.machine, profile: x.profile, sessionId: x.sessionId, since: x.running.since ?? null }).catch((e) => ({ ok: false, error: String(e.message) }));
   pane.moving = false;
   pane.said = r.ok ? null : { cls: 'no', text: r.error };
   renderPane(); load(); peek();
@@ -1112,7 +1121,7 @@ function arm(sel) {
 document.addEventListener('keydown', (e) => {
   const cmd = e.metaKey || e.ctrlKey;
   if (cmd && e.key === '\\' && pane.key) { e.preventDefault(); fold(!paneUi.min); return; }
-  if (cmd && e.key.toLowerCase() === 'k') { e.preventDefault(); finder(); return; }
+  if (cmd && e.key.toLowerCase() === 'k') { if (!e.metaKey && typing()) return; e.preventDefault(); finder(); return; } // ⌃K in a terminal or a box is its own
   if (e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && ($('p-term').contains(document.activeElement) || !document.activeElement?.matches?.('input, textarea, [contenteditable]'))) {
     e.preventDefault(); step(e.key === 'ArrowDown' ? 1 : -1, $('p-term').contains(document.activeElement)); return;
   }
@@ -1128,7 +1137,7 @@ document.addEventListener('keydown', (e) => {
   if (typing() || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
   const k = e.key;
   if (document.activeElement?.tagName === 'BUTTON' && (k === 'Enter' || k === ' ')) return; // the button's own: an armed one does it
-  if (Date.now() - gPressed < 1200) { gPressed = 0; const to = { f: '/', s: '/satellite', w: '/world' }[k]; if (to) { e.preventDefault(); location.href = to; } return; }
+  if (Date.now() - gPressed < 1200) { gPressed = 0; const to = { f: '/', s: '/satellite', w: '/world' }[k]; if (to) { e.preventDefault(); if (to !== location.pathname) location.href = to; } return; }
   const act = {
     j: () => step(1), ArrowDown: () => step(1), k: () => step(-1), ArrowUp: () => step(-1),
     Enter: () => { if (!pane.key) { const y = byKey(document.activeElement?.closest?.('[data-key]')?.dataset.key); if (y) select(y); } else enter(); },
@@ -1179,7 +1188,9 @@ function rowActs(x) {
   const plain = (e) => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
   // The press keeps the focus where opening put it (its terminal), not on the row the browser would move it to.
   return { onpointerdown: (e) => { if (plain(e)) select(now()); }, onmousedown: (e) => { if (plain(e)) e.preventDefault(); },
-           onkeydown: (e) => { if (e.key === 'Enter') select(now()); }, onmouseenter: () => prefetch(now()), onmouseleave: () => clearTimeout(hoverTimer) };
+           // Enter on a row opens it, or goes into the one already open (its terminal, or the message box): once, not also as the page's Enter.
+           onkeydown: (e) => { if (e.key !== 'Enter') return; e.preventDefault(); e.stopPropagation(); const y = now(); if (pane.key !== keyOf(y) || paneUi.min) select(y); else enter(); },
+           onmouseenter: () => prefetch(now()), onmouseleave: () => clearTimeout(hoverTimer) };
 }
 function row(x) {
   const c = x.context, on = pane.key === keyOf(x);

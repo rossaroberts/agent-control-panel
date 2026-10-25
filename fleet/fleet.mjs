@@ -60,16 +60,16 @@ export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED 
 export function createFleet({ dir, quiet = () => {} }) {
   const file = path.join(dir, 'fleet.json');
   const titlesFile = path.join(dir, 'fleet-titles.json');
-  let titles = {};
-  try { titles = JSON.parse(fs.readFileSync(titlesFile, 'utf8')); } catch {}
+  // A kept file is a JSON object or it is nothing: one holding `null` or a list would make every read throw.
+  const kept = (f) => { try { const v = JSON.parse(fs.readFileSync(f, 'utf8')); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch { return {}; } };
+  const keep = (f, v) => { try { fs.writeFileSync(f + '.tmp', JSON.stringify(v)); fs.renameSync(f + '.tmp', f); return true; } catch (e) { console.error(`fleet: could not write ${path.basename(f)}:`, e?.message ?? e); return false; } };
+  let titles = kept(titlesFile);
   // Sessions you archived: `machine:sessionId` → when. They leave the page; a closed one has nothing else to clear.
   const archivedFile = path.join(dir, 'fleet-archived.json');
-  let archived = {};
-  try { archived = JSON.parse(fs.readFileSync(archivedFile, 'utf8')); } catch {}
+  let archived = kept(archivedFile);
   // Your own name and group for a session, over Haiku's title and epic: `machine:sessionId` → { title, group }.
   const labelsFile = path.join(dir, 'fleet-labels.json');
-  let labels = {};
-  try { labels = JSON.parse(fs.readFileSync(labelsFile, 'utf8')); } catch {}
+  let labels = kept(labelsFile);
   const host = os.hostname().replace(/\.local$/, '');
 
   function config() {
@@ -244,7 +244,7 @@ export function createFleet({ dir, quiet = () => {} }) {
             }
             // Keep a fortnight of them.
             for (const [k, v] of Object.entries(titles)) if (Date.now() - (v.at ?? 0) > 14 * 86_400_000) delete titles[k];
-            try { fs.writeFileSync(titlesFile + '.tmp', JSON.stringify(titles)); fs.renameSync(titlesFile + '.tmp', titlesFile); } catch {}
+            keep(titlesFile, titles);
             done(); resolve();
             if (want.length > batch.length) writeTitles(reads); // the rest, straight after
             return;
@@ -324,32 +324,47 @@ export function createFleet({ dir, quiet = () => {} }) {
   // once, the pages are told, and you get a notification when it now needs you. A session the last read doesn't have (just
   // started) brings a read a moment later.
   const listeners = new Set();
-  let soonT = null, tellT = null;
-  function onHook(machine, { sessionId, hook }) {
-    const x = last?.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'claude' ? a.sessions ?? [] : [])).find((y) => y.sessionId === sessionId);
-    if (!x || !x.live) { soon(); return; }
-    // The last read's job state, without its word on waiting or busy: the hook is newer than that.
+  let soonT = null, soonAt = 0, tellT = null;
+  const hooked = new Map(); // machine:session → its latest hook event, for a read that was under way when it came
+  /** A hook event laid over a session's row: true when its state moved. The row's job state goes in without its word on
+   *  waiting or busy: the hook is newer than that. */
+  function patch(x, hook) {
     const r = { pid: x.pid, active: x.rs?.active ?? x.live, state: x.rs?.state === 'blocked' ? null : x.rs?.state ?? null };
     const { state, live } = sessionState(r, { writtenAt: x.writtenAt }, hook);
-    if (state === x.state && live === x.live) return;
+    if (state === x.state && live === x.live) return false;
     Object.assign(x, { state, live, hookAt: hook.at });
-    looked();
+    return true;
   }
+  function onHook(machine, { sessionId, hook }) {
+    const k = `${machine}:${sessionId}`;
+    if (!((hooked.get(k)?.at ?? 0) > hook.at)) hooked.set(k, hook);
+    if (hooked.size > 400) for (const [kk, h] of hooked) if (Date.now() - h.at > 120_000) hooked.delete(kk);
+    const x = last?.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'claude' ? a.sessions ?? [] : [])).find((y) => y.sessionId === sessionId);
+    if (!x || !x.live) { soon(); return; } // not listed yet (just started), or listed closed: a read says
+    if (patch(x, hook)) looked();
+  }
+  /** A read soon, for a session the last read does not have: only while a page looks, never while the panel rests after a
+   *  failed read, and at most one every few seconds (a `claude -p` run, or a session the roster has yet to list, fires hooks
+   *  all day; each used to bring a full read of every machine). */
   function soon() {
-    if (soonT) return;
-    soonT = setTimeout(() => { soonT = null; read().catch(() => {}); }, 800);
+    if (soonT || Date.now() - askedAt > WATCH_MS || Date.now() < restUntil) return;
+    soonT = setTimeout(() => { soonT = null; soonAt = Date.now(); read().catch(() => {}); }, Math.max(800, soonAt + 5000 - Date.now()));
     soonT.unref?.();
   }
-  /** After a read or a hook event: a notification for each session that now needs you, and the pages told. */
+  /** After a read or a hook event: a notification for each session that now needs you, and the pages told when any
+   *  session's state moved (they read on their own clock otherwise). */
   const was = new Map(); // machine:session → its state when last looked at
   function looked() {
     if (!last) return;
     const first = !was.size;
+    let moved = first;
     for (const m of last.machines) for (const a of m.accounts ?? []) for (const x of a.sessions ?? []) {
-      const k = `${m.name}:${x.sessionId ?? x.id}`, before = was.get(k);
+      const k = `${m.name}:${x.sessionId ?? x.id}`, before = was.get(k), now = x.live ? x.state : 'closed';
       if (!first && x.live && x.state === 'needs-you' && before !== undefined && before !== 'needs-you') notify(m.name, x);
-      was.set(k, x.live ? x.state : 'closed');
+      if (before !== now) moved = true;
+      was.set(k, now);
     }
+    if (!moved) return;
     clearTimeout(tellT);
     tellT = setTimeout(() => { for (const fn of listeners) try { fn(); } catch {} }, 50);
   }
@@ -372,9 +387,11 @@ export function createFleet({ dir, quiet = () => {} }) {
   // Every session ever seen, so none just disappears: one that a machine that answered no longer reports stays on the
   // page, closed, as it was last seen, until you archive it. machine:session → what it was.
   const seenFile = path.join(dir, 'fleet-seen.json');
-  let seen = {};
-  try { seen = JSON.parse(fs.readFileSync(seenFile, 'utf8')); } catch {}
+  let seen = kept(seenFile);
   let seenDirty = false, seenWritten = 0;
+  const writeSeen = () => { if (keep(seenFile, seen)) { seenDirty = false; seenWritten = Date.now(); } };
+  /** What is held in memory, written now (the panel is stopping). */
+  function flush() { if (seenDirty) writeSeen(); }
   const KEPT = ['engine', 'id', 'sessionId', 'name', 'title', 'cwd', 'startedAt', 'lastAt', 'model', 'via', 'web', 'effort', 'kind', 'stage', 'turnOver', 'branch'];
   function ledger(reads) {
     for (const m of reads) {
@@ -383,7 +400,9 @@ export function createFleet({ dir, quiet = () => {} }) {
         const k = `${m.name}:${x.sessionId ?? x.id}`;
         reported.add(k);
         const rec = { acct: `${a.engine}:${a.id}`, ...Object.fromEntries(KEPT.map((f) => [f, x[f] ?? null])) };
-        if (JSON.stringify(seen[k]?.rec) !== JSON.stringify(rec)) { seen[k] = { rec, at: Date.now() }; seenDirty = true; }
+        // A working session's lastAt moves at every read: that alone rewrites the file only every ten minutes.
+        const old = seen[k]?.rec, { lastAt: a1, ...rest } = rec, { lastAt: a0, ...restOld } = old ?? {};
+        if (!old || JSON.stringify(restOld) !== JSON.stringify(rest) || Math.abs((a1 ?? 0) - (a0 ?? 0)) >= 600_000) { seen[k] = { rec, at: Date.now() }; seenDirty = true; }
         else seen[k].at = Date.now();
       }
       if (m.ok === false || m.stale) continue; // a machine that didn't answer shows its last read anyway
@@ -395,33 +414,35 @@ export function createFleet({ dir, quiet = () => {} }) {
     }
     // An archived one long gone is forgotten.
     for (const [k, v] of Object.entries(seen)) if (archived[k] && Date.now() - v.at > 30 * 86_400_000) { delete seen[k]; seenDirty = true; }
-    if (seenDirty && Date.now() - seenWritten > 20_000) {
-      try { fs.writeFileSync(seenFile + '.tmp', JSON.stringify(seen)); fs.renameSync(seenFile + '.tmp', seenFile); seenDirty = false; seenWritten = Date.now(); } catch {}
-    }
+    if (seenDirty && Date.now() - seenWritten > 20_000) writeSeen();
   }
 
   /** One read of every machine; reads asked for while one runs share it. */
   async function read() {
     const gen = readGen;
     if (inflight) return inflight;
+    const startedAt = Date.now();
     const mine = (async () => {
       const { machines, names, self, epics, logins } = config();
       const reads = steady(await Promise.all([
         collect().then((d) => ({ ...d, name: self, local: true })).catch((e) => ({ name: self, local: true, ok: false, error: String(e?.message ?? e) })),
         ...machines.map((m) => overSsh(m, 'collect').then((d) => ({ ...d, name: m.name, ssh: m.ssh, user: m.user, local: false }))),
       ]));
-      ledger(reads);
       for (const m of reads) for (const a of m.accounts ?? []) {
         const real = a.engine === 'claude' && logins[`${m.name}:${a.id}`];
         if (real && a.account) a.account = { ...a.account, email: real, says: a.account.email };
         // An archived session that runs again (resumed) is back on the page.
         a.sessions = (a.sessions ?? []).filter((x) => x.live || !archived[`${m.name}:${x.sessionId ?? x.id}`]);
         for (const x of a.sessions) named(m.name, a.engine, x);
+        // A hook that fired while this read ran is newer than what the machine read: it is laid over the fresh row.
+        if (a.engine === 'claude') for (const x of a.sessions) { const h = hooked.get(`${m.name}:${x.sessionId}`); if (h && h.at >= startedAt && x.live) patch(x, h); }
       }
+      ledger(reads); // after the naming: a session's row is kept with the title it shows
       try { writeTitles(reads); } catch (e) { console.error('fleet titles:', e?.message ?? e); }
       // What the page shows of each session: what it was asked and its steps are for the titles only (half the bytes).
       const shown = reads.map((m) => ({ ...m, accounts: (m.accounts ?? []).map((a) => ({ ...a, sessions: (a.sessions ?? []).map(({ firstAsk, lastAsk, steps, ...x }) =>
-        ({ ...x, said: typeof x.said === 'string' ? x.said.slice(0, 400) : x.said, running: x.running && { step: x.running.step, since: x.running.since, tool: x.running.tool } })) })) }));
+        ({ ...x, said: typeof x.said === 'string' ? x.said.slice(0, 400) : x.said,
+           running: x.running && { step: x.running.step, since: x.running.since, tool: x.running.tool, cmd: typeof x.running.cmd === 'string' ? x.running.cmd.slice(0, 300) : null } })) })) }));
       const fresh = { ok: true, at: Date.now(), machines: shown, names, epics, groups: groupsMade(epics), configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
       // A close, archive, message or launch that landed while this read ran makes it out of date: hand it back, keep none.
       if (gen === readGen) { last = fresh; looked(); }
@@ -495,7 +516,7 @@ export function createFleet({ dir, quiet = () => {} }) {
       if (!r.ok) return r;
     }
     archived[`${machine}:${key}`] = Date.now();
-    try { fs.writeFileSync(archivedFile + '.tmp', JSON.stringify(archived)); fs.renameSync(archivedFile + '.tmp', archivedFile); } catch {}
+    keep(archivedFile, archived);
     changed();
     return { ok: true };
   }
@@ -512,7 +533,7 @@ export function createFleet({ dir, quiet = () => {} }) {
       if (g) l.group = g; else delete l.group;
     }
     if (Object.keys(l).length) labels[key] = l; else delete labels[key];
-    try { fs.writeFileSync(labelsFile + '.tmp', JSON.stringify(labels)); fs.renameSync(labelsFile + '.tmp', labelsFile); } catch {}
+    keep(labelsFile, labels);
     // On the page at once: the last read gets it now (a read under way names its sessions as it ends, so it has it too).
     if (last) {
       const m = last.machines.find((y) => y.name === machine);
@@ -542,7 +563,8 @@ export function createFleet({ dir, quiet = () => {} }) {
 
   /** Stop the command a session's current step runs, so what you queued reaches it now (machine.mjs interject). */
   async function interject(body) {
-    const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? '') };
+    // `since` is when the step you armed on began: one that ended meanwhile is not stopped in another's place.
+    const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? ''), since: Number.isFinite(Number(body?.since)) && body?.since != null ? Number(body.since) : null };
     if (!/^[\w.-]{1,40}$/.test(args.profile) || !/^[0-9a-f-]{36}$/.test(args.sessionId)) return { ok: false, error: 'Pick a session.' };
     const r = await onMachine(String(body?.machine ?? ''), 'interject', args, interjectHere);
     soon();
@@ -566,5 +588,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, flush };
 }

@@ -20,7 +20,7 @@ import { createWorld, claudeArgs, readAnswer } from './world.mjs';
 import { findRemoved } from './versions.mjs';
 import { readChat } from './history.mjs';
 import { UNTRUSTED, trustKey, isTrusted, trustScript } from './trust.mjs';
-import { prefsPath } from './cli.mjs';
+import { prefsPath, pairKey } from './cli.mjs';
 import { createHub } from './hub.mjs';
 import { createHubSync } from './hub-sync.mjs';
 import { createHubOrders } from './hub-orders.mjs';
@@ -73,6 +73,23 @@ const SPAWN_TOOLS = new Set(['Agent', 'Task']);
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ORIGINS = new Set([...HOSTS].map((h) => `http://${h}`));
+// Host and Origin stop a browser; they stop nothing that can open a loopback connection and set its own headers (a
+// container, another user of this Mac, a sandboxed app). So the token above is given only to a browser that is paired: one
+// that carries the key from a 0600 file beside prefs.json (cli.mjs pairKey) as an HttpOnly cookie, set once from the address
+// `node server.mjs open` opens. The pages themselves are served to anyone on the loopback, without the token.
+const PAGES = new Set(['/', '/fleet', '/satellite', '/board', '/world']);
+const same = (a, b) => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+function paired(req) {
+  const m = /(?:^|;\s*)acp_k=([0-9a-f]{48})(?:;|$)/.exec(req.headers.cookie ?? '');
+  return Boolean(m) && same(m[1], KEY);
+}
+const pairPage = () => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Pair this browser</title>
+<style>:root{--paper:#f6f7f7;--ink:#1e2124;--grey:#5f666b;--tint:#eceeef}@media(prefers-color-scheme:dark){:root{--paper:#191b1d;--ink:#dcdfe1;--grey:#9ba2a7;--tint:#232729}}
+html{background:var(--paper)}body{margin:0;color:var(--ink);font:15px/1.7 ui-monospace,Menlo,monospace;-webkit-font-smoothing:antialiased}main{max-width:620px;margin:0 auto;padding:44px 32px}
+p{margin:0 0 14px}code{background:var(--tint);border-radius:3px;padding:0 5px}.q{color:var(--grey);font-size:13px}</style></head>
+<body><main><p>This browser is not paired with the panel.</p><p>In a terminal, from the panel's folder: <code>node server.mjs open</code></p>
+<p class="q">It opens the panel once with its key in the address; the key stays here as a cookie. This page looks again every few seconds.</p></main>
+<script>setTimeout(() => location.reload(), 5000)</script></body></html>`;
 // Read per load, so a UI edit shows on refresh without a restart.
 const page = () => fs.readFileSync(new URL('./public/index.html', import.meta.url), 'utf8');
 const fleetPage = () => fs.readFileSync(new URL('./public/fleet.html', import.meta.url), 'utf8');
@@ -104,6 +121,7 @@ const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !
 const HOME = os.homedir();
 // ACP_PREFS gives a second panel (another ACP_PORT) a profile choice of its own.
 const PREFS = prefsPath();
+const KEY = pairKey(PREFS);
 // Every machine's agents and accounts in one view (fleet/); its machines are listed in fleet.json beside prefs.json.
 const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
 // Satellite: the delivery pipeline on GitHub, every PR from agent to production (fleet/satellite.mjs), read-only.
@@ -1699,7 +1717,8 @@ function readBody(req) {
 }
 
 const send = (res, code, body, type = 'application/json') => {
-  res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
+  // A page here is never shown inside another site's frame (a decoy over the board's buttons).
+  res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...(type.startsWith('text/html') ? { 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" } : {}) });
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 };
 
@@ -1733,6 +1752,14 @@ async function handle(req, res) {
     return send(res, 404, '');
   }
 
+  // Pairing: the key in the address once (see PAGES above) becomes the cookie, and the page is loaded again without it.
+  if (req.method === 'GET' && PAGES.has(url.pathname) && url.searchParams.has('k')) {
+    if (!same(url.searchParams.get('k'), KEY)) return send(res, 403, 'That is not this panel\'s key.', 'text/plain; charset=utf-8');
+    res.writeHead(303, { location: url.pathname, 'set-cookie': `acp_k=${KEY}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000`, 'cache-control': 'no-store' });
+    return res.end();
+  }
+  if (req.method === 'GET' && PAGES.has(url.pathname) && !paired(req)) return send(res, 200, pairPage(), 'text/html; charset=utf-8');
+
   // The same page twice: /board is the board, /world opens straight on the universe (the page reads ACP_VIEW).
   if (req.method === 'GET' && (url.pathname === '/board' || url.pathname === '/world')) {
     const view = url.pathname === '/board' ? 'board' : 'world';
@@ -1758,7 +1785,7 @@ async function handle(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/events') {
-    if (url.searchParams.get('t') !== TOKEN) return send(res, 403, { error: 'token' });
+    if (!paired(req) || url.searchParams.get('t') !== TOKEN) return send(res, 403, { error: 'token' });
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     res.write(`retry: 2000\ndata: ${JSON.stringify(snapshot())}\n\n`);
     clients.add(res);
@@ -1782,7 +1809,7 @@ async function handle(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
-    if (!ORIGINS.has(req.headers.origin) || req.headers['x-acp-token'] !== TOKEN) return send(res, 403, { error: 'forbidden' });
+    if (!ORIGINS.has(req.headers.origin) || !paired(req) || req.headers['x-acp-token'] !== TOKEN) return send(res, 403, { error: 'forbidden' });
     let body;
     try { body = await readBody(req); } catch { return send(res, 400, { error: 'bad body' }); }
     if (url.pathname === '/api/decide') {
@@ -1832,6 +1859,10 @@ async function handle(req, res) {
 // It says so on the first try and then every 60th, so a long wait adds a line every 5 minutes, not every 5 s.
 let portTries = 0;
 server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE' && !DAEMON) { // not under launchd: a second panel here would only start workers and watchers, listening to nobody
+    console.error(`port ${PORT} is taken: a panel is running there already (http://127.0.0.1:${PORT}). ACP_PORT=<port> starts a second one.`);
+    process.exit(1);
+  }
   if (!(DAEMON && err.code === 'EADDRINUSE')) throw err;
   if (++portTries === 1 || portTries % 60 === 0) console.log(`port ${PORT} is taken; trying again every ${RETRY_MS / 1000} s`);
   setTimeout(() => server.listen(PORT, '127.0.0.1'), RETRY_MS);
@@ -1866,7 +1897,7 @@ async function updateApp() {
   const restart = DAEMON || app !== null; // launchd restarts the service; the app starts a server when its own is gone
   appUpdate = { sha: r.sha, state: restart ? 'restarting' : 'done', built: r.built, buildError: r.buildError ?? null };
   broadcast();
-  if (restart) setTimeout(() => process.exit(0), 1500); // after this answer and the board's last snapshot
+  if (restart) setTimeout(() => stop('update'), 1500); // after this answer and the board's last snapshot
   return { ok: true, sha: r.sha, built: r.built, restart };
 }
 
@@ -1887,7 +1918,7 @@ server.on('upgrade', (req, socket, head) => {
   socket.on('error', () => socket.destroy());
   let url;
   try { url = new URL(req.url, 'http://127.0.0.1'); } catch { return refuseWs(socket, 400, 'Bad Request'); }
-  if (!HOSTS.has(req.headers.host) || !ORIGINS.has(req.headers.origin) || url.pathname !== '/api/term/ws' || url.searchParams.get('t') !== TOKEN) return refuseWs(socket, 403, 'Forbidden');
+  if (!HOSTS.has(req.headers.host) || !ORIGINS.has(req.headers.origin) || !paired(req) || url.pathname !== '/api/term/ws' || url.searchParams.get('t') !== TOKEN) return refuseWs(socket, 403, 'Forbidden');
   const ws = acceptWs(req, socket, head);
   if (!ws) return;
   terms.serve(ws);
@@ -1898,8 +1929,23 @@ server.on('upgrade', (req, socket, head) => {
 const pages = new Set();
 fleet.onChange(() => { for (const ws of pages) ws.send('{"op":"fleet"}'); });
 
+// A stop (launchd's SIGTERM at a restart or an update, ^C in a terminal): every page is told first, so its terminals say the
+// panel is restarting rather than going quiet, what Fleet holds in memory is written, and the process goes within a second.
+let stopping = false;
+function stop(why) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`stopping (${why})`);
+  for (const ws of pages) try { ws.send('{"op":"bye"}'); } catch {}
+  try { fleet.flush(); } catch (err) { console.error('fleet: could not write its ledger:', err?.message ?? err); }
+  server.close();
+  setTimeout(() => process.exit(0), 600).unref?.();
+}
+process.on('SIGTERM', () => stop('SIGTERM'));
+process.on('SIGINT', () => stop('SIGINT'));
+
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`agent control panel → http://127.0.0.1:${PORT}`);
+  console.log(`agent control panel → http://127.0.0.1:${PORT}  (a browser pairs once with: node server.mjs open)`);
   pollRoster().then(() => { if (looking()) checkVersions(); });
   setRosterPace(looking());
   setInterval(() => { if (looking()) checkVersions(); }, VERSIONS_MS);

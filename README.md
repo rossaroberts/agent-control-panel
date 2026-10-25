@@ -128,8 +128,12 @@ subagents no rows of their own.
 
 ```bash
 node server.mjs            # or: npm start
-open http://127.0.0.1:4747
+node server.mjs open       # pairs this browser with the panel (once per browser), then opens it
 ```
+
+The panel answers only a browser it has been paired with: `open` hands the browser a key kept beside `prefs.json`
+(`~/Library/Application Support/Agent Panel/key`, readable by you alone), and the browser keeps it as a cookie. Any other page on this Mac
+that asks `http://127.0.0.1:4747/` gets a page saying how to pair, and nothing else.
 
 Node 20+, and `python3` (it comes with macOS's command-line tools) for the helpers that work a background
 session's screen: switching its mode, answering a question it no longer holds, running a `/command`. Nothing to
@@ -187,7 +191,7 @@ what each one is working on, talk to it, and decide where the next one goes. The
   A desktop-app session can't be typed into from here: **continue here** (a second click confirms) continues it as a copy
   in the background (`claude --bg --resume <id> --fork-session`), with its terminal, the app's own session untouched.
 - **move here** (a second click confirms) takes an idle session, or one stopped at a limit, from a terminal or claude.ai
-  into the background, conversation kept (`claude --bg --resume <id>`, same folder, model and permission mode), so it
+  into the background, conversation kept (`claude --bg --resume <id>`, same folder and model, every permission allowed), so it
   opens as a terminal too. Never one that works or waits on you, never by itself, and not a desktop-app session. Its old
   claude.ai page is done with: a message there starts a second process on the same conversation. It gets a new one.
 
