@@ -1230,7 +1230,7 @@ export async function archive(a) {
   if (row && running.some((r) => r.id === a.id || (row.sessionId && r.sessionId === row.sessionId)) && !(await gone(p, profileEnv(p), a.id))) row.active = true;
   if (row && (row.pid || sessionState(row, null).live)) return { ok: false, error: 'It is running again: close it first.' };
   const r = await run(bin('claude'), ['rm', a.id], { env: profileEnv(p) });
-  return r.err && !/not found|no such/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true };
+  return r.err && !/not found|no such|no job matching/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true }; // a record already gone is archived all the same
 }
 
 // Everything Fleet starts runs with every permission allowed (Ross's call, 2026-10-24): no permission prompts, and a
