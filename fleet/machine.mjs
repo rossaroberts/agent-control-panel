@@ -752,7 +752,7 @@ function readRollout(f, m, open) {
   // A question to you stays up until it is answered (the Codex app keeps it open), up to three days.
   const live = Boolean(open?.has(f)) || Date.now() - m < CODEX_LIVE_MS || (asking === true && Date.now() - m < 3 * DAY);
   return {
-    session: { engine: 'codex', id: meta.id ?? path.basename(f, '.jsonl'), sessionId: meta.id ?? null,
+    session: { engine: 'codex', id: meta.id ?? path.basename(f, '.jsonl'), sessionId: meta.id ?? null, file: f,
                name: oneLine(meta.originator, 60), kind: meta.source ?? null, live,
                state: !live ? 'closed' : asking ? 'needs-you' : done === false ? 'working' : 'ready', turnOver: done !== false,
                cwd: tilde(meta.cwd ?? null), startedAt: Date.parse(meta.timestamp) || null, lastAt: lastAt ?? m, model,
@@ -774,6 +774,23 @@ function codexHome(home, open) {
   if (!limits) for (const { f, m } of recentRollouts(home, 14 * DAY).slice(0, 5)) if ((limits = readRollout(f, m, open).limits)) break;
   return { engine: 'codex', id: path.basename(home).slice(1), dir: tilde(home), account: codexAccount(home), limits,
            sessions: read.map((r) => r.session), error: null };
+}
+
+/** Whether a Codex home has trusted a folder: its config.toml has `[projects."<folder>"]` with `trust_level = "trusted"`
+ *  (the one table Codex writes when you say yes at its prompt). Read, never written: only you trust a folder. */
+export function codexTrusts(home, cwd) {
+  let text = '';
+  try { text = fs.readFileSync(path.join(home, 'config.toml'), 'utf8'); } catch { return false; }
+  const real = (() => { try { return fs.realpathSync(cwd); } catch { return cwd; } })();
+  let inTable = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    const table = /^\[\s*projects\s*\.\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')\s*\]/.exec(line);
+    if (table) { const key = table[1] != null ? table[1].replace(/\\(.)/g, '$1') : table[2]; inTable = key === cwd || key === real; continue; }
+    if (/^\[/.test(line)) { inTable = false; continue; }
+    if (inTable && /^trust_level\s*=\s*["']trusted["']/.test(line)) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- Muse (Meta's Muse Code)
@@ -892,10 +909,14 @@ async function machineStatus() {
 
 // ---------------------------------------------------------------- collect
 
+/** Where tmux keeps its sockets: TMUX_TMPDIR, else (as tmux itself does) TMPDIR, else /tmp. */
+const tmuxDir = () => path.join(process.env.TMUX_TMPDIR || process.env.TMPDIR || '/tmp', `tmux-${process.getuid?.() ?? 0}`);
+/** The tmux server Fleet starts its own agents in (`tmux -L fleet`). */
+const FLEET_TMUX = 'fleet';
 /** Every tmux pane of this user's tmux servers: pane pid → { socket, target }. A session running in one can be attached to
  *  there (`tmux -L <socket> attach -t <target>`), its real screen, with nothing moved or restarted. */
 async function tmuxPanes() {
-  const dir = path.join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid?.() ?? 0}`);
+  const dir = tmuxDir();
   let names = [];
   try { names = fs.readdirSync(dir).filter((n) => /^[\w.-]{1,40}$/.test(n)); } catch {}
   const panes = new Map();
@@ -927,6 +948,12 @@ export async function collect() {
   try { fs.mkdirSync(path.dirname(USAGE_FILE), { recursive: true }); fs.writeFileSync(USAGE_FILE + '.tmp', JSON.stringify(usage)); fs.renameSync(USAGE_FILE + '.tmp', USAGE_FILE); } catch {}
   const open = procs ? new Set(procs.flatMap((x) => x.open)) : null;
   const codex = codexHomes().map((h) => { try { return codexHome(h, open); } catch (e) { return { engine: 'codex', id: path.basename(h).slice(1), dir: tilde(h), error: String(e?.message ?? e).slice(0, 200), sessions: [] }; } });
+  // A Codex session running inside tmux (Fleet starts Astra that way, so it can be typed into any time): the pane of the
+  // process that holds its log open. It opens as that pane, the real screen, nothing resumed.
+  const paneOfLog = new Map();
+  for (const x of procs ?? []) if (x.engine === 'codex' && x.open.length) { const t = paneOf(x.pid); if (t) for (const f of x.open) paneOfLog.set(f, t); }
+  for (const a of codex) for (const x of a.sessions ?? []) if (x.live && x.file && paneOfLog.has(x.file)) x.tmux = paneOfLog.get(x.file);
+  for (const a of codex) for (const x of a.sessions ?? []) delete x.file;
   const muse = museHome();
   const rosterPids = new Set(claude.flatMap((a) => (a.sessions ?? []).map((x) => x.pid).filter(Boolean)));
   const sorted = procs ? sortProcesses(procs, rosterPids, open) : { bridges: [], workers: [], others: [] };
@@ -1017,6 +1044,21 @@ export async function launch(a) {
     const cwd = folder(a.cwd);
     if (!cwd) return { ok: false, error: `There is no folder at ${a.cwd}.` };
     const env = { ...baseEnv(), CODEX_HOME: home };
+    const tmux = bin('tmux');
+    // With tmux here, Astra runs as Codex's own screen in a tmux session of Fleet's: it takes the prompt, works, and then
+    // waits for your next message, which you type in its pane from the page (it opens as its tmux pane, like any session in
+    // tmux). Without tmux, `codex exec` as before: one prompt, and the thread opens as `codex resume` once it is done.
+    if (path.isAbsolute(tmux)) {
+      // Codex asks whether to trust a folder it hasn't seen, on its screen, before it writes any log: with nothing to list,
+      // the page would show nothing started. Only you can trust it, at Codex's own prompt (the page opens it for you).
+      if (!codexTrusts(home, cwd)) return { ok: false, untrusted: true, cwd: tilde(cwd), error: `Codex has not trusted ${tilde(cwd)} yet.` };
+      const name = `codex-${stamp}`;
+      const args = ['-L', FLEET_TMUX, 'new-session', '-d', '-s', name, '-x', '200', '-y', '50', '-c', cwd];
+      if (path.basename(home) !== '.codex') args.push('-e', `CODEX_HOME=${home}`);
+      args.push('--', bin('codex'), '--dangerously-bypass-approvals-and-sandbox', prompt);
+      const r = await run(tmux, args, { cwd, env, timeout: 15_000 });
+      return r.err ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true, id: name, cwd: tilde(cwd), tmux: { socket: FLEET_TMUX, target: `${name}:0.0` } };
+    }
     return detached(bin('codex'), ['exec', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '-C', cwd, prompt],
       { cwd, env, log: path.join(logs, `codex-${stamp}.log`) });
   }

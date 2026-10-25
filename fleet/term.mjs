@@ -90,11 +90,13 @@ export function createTerms({ config, codexBusy = () => null }) {
 
   /** The program the pty runs: `claude attach <job>` here, or the same over SSH as the machine's user; with `dir` instead of
    *  a job, Claude Code itself in that folder, so its trust prompt waits for you there. Null for a bad request. */
-  function command(machine, profile, job, dir = null, tmux = null, codex = null) {
+  function command(machine, profile, job, dir = null, tmux = null, codex = null, engine = 'claude') {
     if (tmux && !(TMUX_SOCKET.test(tmux.socket ?? '') && TMUX_TARGET.test(tmux.target ?? ''))) return null;
     if (codex && !(UUID.test(codex.sessionId ?? '') && DIR.test(codex.cwd ?? ''))) return null;
     if (codex) dir = codex.cwd;
     if (!PROFILE.test(profile) || (tmux || codex ? false : dir == null ? !JOB.test(job) : !DIR.test(dir))) return null;
+    // A folder's trust prompt for Codex: Codex itself in that folder (its prompt, then its screen), under that Codex home.
+    if (engine === 'codex' && dir != null && !tmux && !codex) codex = { trust: true };
     const c = config();
     const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE') && !k.startsWith('FLEET_') && k !== 'TMUX' && k !== 'TMUX_PANE')),
                   TERM: 'xterm-256color', COLORTERM: 'truecolor', COLORFGBG: '15;0', LANG: process.env.LANG || 'en_US.UTF-8' };
@@ -104,7 +106,7 @@ export function createTerms({ config, codexBusy = () => null }) {
         const cwd = dir === '~' ? HOME : dir.startsWith('~/') ? path.join(HOME, dir.slice(2)) : dir;
         // --no-daemon: without it Codex starts a shared background service that keeps the thread (and blocks the Codex app,
         // "open in another app") after this terminal closes.
-        return fs.existsSync(cwd) ? { argv: [codexBin(), 'resume', '--no-daemon', codex.sessionId, '--dangerously-bypass-approvals-and-sandbox'], env, cwd } : null;
+        return fs.existsSync(cwd) ? { argv: codex.trust ? [codexBin(), '--dangerously-bypass-approvals-and-sandbox'] : [codexBin(), 'resume', '--no-daemon', codex.sessionId, '--dangerously-bypass-approvals-and-sandbox'], env, cwd } : null;
       }
       if (profile !== 'default') env.CLAUDE_CONFIG_DIR = path.join(HOME, `.claude-${profile}`);
       if (tmux) return { argv: [tmuxBin(), '-L', tmux.socket, 'attach', '-t', tmux.target], env, cwd: HOME };
@@ -118,6 +120,7 @@ export function createTerms({ config, codexBusy = () => null }) {
     const there = dir == null ? null : dir === '~' ? '"$HOME"' : dir.startsWith('~/') ? `"$HOME"/${shq(dir.slice(2))}` : shq(dir);
     const inner = `export XDG_RUNTIME_DIR=/run/user/$(id -u) TERM=xterm-256color COLORTERM=truecolor COLORFGBG='15;0' LANG=C.UTF-8${cfg}; `
       + (tmux ? `exec tmux -L ${tmux.socket} attach -t ${tmux.target}`
+        : codex?.trust ? `cd -- ${there} && exec codex --dangerously-bypass-approvals-and-sandbox`
         : codex ? `cd -- ${there} && exec codex resume --no-daemon ${codex.sessionId} --dangerously-bypass-approvals-and-sandbox`
         : there ? `cd -- ${there} && exec claude` : `exec claude attach ${job}`);
     const remote = m.user ? `sudo -n -u ${m.user} -H bash -lc ${shq(inner)}` : `bash -lc ${shq(inner)}`;
@@ -131,9 +134,11 @@ export function createTerms({ config, codexBusy = () => null }) {
     const machine = String(q?.machine ?? '');
     const codex = q?.codex && typeof q.codex === 'object' ? { sessionId: String(q.codex.sessionId ?? ''), cwd: String(q.codex.cwd ?? '') } : null;
     const cmd = command(machine, String(q?.profile ?? ''), String(q?.id ?? ''), typeof q?.trust === 'string' ? q.trust : null,
-      q?.tmux && typeof q.tmux === 'object' ? { socket: String(q.tmux.socket ?? ''), target: String(q.tmux.target ?? '') } : null, codex);
+      q?.tmux && typeof q.tmux === 'object' ? { socket: String(q.tmux.socket ?? ''), target: String(q.tmux.target ?? '') } : null, codex,
+      q?.engine === 'codex' ? 'codex' : 'claude');
     if (!cmd) return { ok: false, error: 'Pick a background session, or a folder that exists.' };
     if (all.size >= MAX) return { ok: false, error: 'Too many terminals open.' };
+    // A resumed Codex thread: one terminal at a time, and never while it runs elsewhere (a trust prompt is no thread yet).
     const codexKey = codex ? `${machine}:${codex.sessionId}` : null;
     if (codexKey) {
       if (codexOpen.has(codexKey)) return { ok: false, error: 'It is open in another Fleet terminal already.' };

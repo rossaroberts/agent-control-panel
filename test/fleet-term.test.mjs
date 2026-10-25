@@ -161,3 +161,17 @@ test('a page that goes without a goodbye (its connection just ends) has its term
     c.destroy();
   } finally { server.close(); }
 });
+
+test('a folder\'s trust prompt for Codex: Codex itself in that folder, here and on another machine; the Claude one is unchanged', () => {
+  const t = createTerms({ config });
+  const here = t.command('Mac', 'codex', '', '~/work', null, null, 'codex');
+  assert.deepEqual(here.argv.slice(1), ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.match(here.argv[0], /codex$/);
+  assert.equal(here.cwd, path.join(home, 'work'));
+  assert.equal(here.env.CODEX_HOME, undefined, 'the plain ~/.codex');
+  assert.match(t.command('Mac', 'codex-work', '', '~/work', null, null, 'codex').env.CODEX_HOME, /\/\.codex-work$/);
+  const there = t.command('server', 'codex', '', '~/work', null, null, 'codex');
+  assert.match(there.argv.at(-1), /cd -- "\$HOME"\/'\\''work'\\'' && exec codex --dangerously-bypass-approvals-and-sandbox'$/);
+  assert.match(t.command('Mac', 'default', '', '~/work').argv[0], /claude$/, 'Claude Code\'s own trust prompt as before');
+  assert.equal(t.command('Mac', 'codex', '', 'work', null, null, 'codex'), null, 'a relative folder is refused');
+});
