@@ -304,3 +304,48 @@ test('the agents a session has going: not finished and written to within the hou
   assert.deepEqual(agentsOf(null, sid), []);
   fs.rmSync(h, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------- Astra in tmux
+import { codexTrusts } from '../fleet/machine.mjs';
+
+test('codexTrusts: the [projects."<folder>"] table with trust_level = "trusted", and nothing else', () => {
+  const h = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-codex-')), c = path.join(h, '.codex');
+  fs.mkdirSync(c);
+  assert.equal(codexTrusts(c, '/w/a'), false, 'no config.toml');
+  fs.writeFileSync(path.join(c, 'config.toml'), 'model = "gpt-6"\n\n[projects."/w/a"]\ntrust_level = "trusted"\n\n[projects."/w/b"]\ntrust_level = "untrusted"\n\n[projects.\'/w/c\']\n# nothing\n');
+  assert.equal(codexTrusts(c, '/w/a'), true);
+  assert.equal(codexTrusts(c, '/w/b'), false);
+  assert.equal(codexTrusts(c, '/w/c'), false);
+  assert.equal(codexTrusts(c, '/w/d'), false);
+});
+
+/** launch, run the way the worker runs it: machine.mjs on stdin, FLEET_DO=launch, the arguments in FLEET_ARGS. */
+function launch(h, args) {
+  const out = execFileSync(process.execPath, ['--input-type=module', '-'], {
+    input: fs.readFileSync(SCRIPT), env: { HOME: h, PATH: '/usr/bin:/bin', FLEET_DO: 'launch', FLEET_ARGS: Buffer.from(JSON.stringify(args)).toString('base64'), FLEET_PROC_SCAN: '0' }, timeout: 30_000 });
+  return JSON.parse(String(out));
+}
+
+test('Astra starts in a tmux session of Fleet\'s, as Codex\'s own screen with the prompt; a folder Codex has not trusted is refused first', () => {
+  const h = home(), repo = path.join(h, 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  // Stand-ins for tmux and codex, in the one place looked at first: each writes its arguments down.
+  fs.mkdirSync(path.join(h, '.local', 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(h, '.local', 'bin', 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/tmux.args"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(h, '.local', 'bin', 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const ask = { engine: 'codex', profile: 'codex', cwd: repo, prompt: 'Say OK' };
+  const refused = launch(h, ask);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.untrusted, true, 'Codex would ask on its screen, before any log exists: the page opens that prompt instead');
+  assert.ok(!fs.existsSync(path.join(h, 'tmux.args')), 'nothing started');
+  fs.writeFileSync(path.join(h, '.codex', 'config.toml'), `[projects."${repo}"]\ntrust_level = "trusted"\n`);
+  const r = launch(h, ask);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.match(r.id, /^codex-\d{4}-/);
+  assert.deepEqual(r.tmux, { socket: 'fleet', target: `${r.id}:0.0` });
+  const args = fs.readFileSync(path.join(h, 'tmux.args'), 'utf8').split('\n').filter(Boolean);
+  assert.deepEqual(args.slice(0, 6), ['-L', 'fleet', 'new-session', '-d', '-s', r.id]);
+  assert.deepEqual(args.slice(-4), ['--', path.join(h, '.local', 'bin', 'codex'), '--dangerously-bypass-approvals-and-sandbox', 'Say OK']);
+  assert.equal(args[args.indexOf('-c') + 1], repo);
+  assert.ok(!args.includes('-e'), 'the plain ~/.codex needs no CODEX_HOME');
+});

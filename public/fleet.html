@@ -485,11 +485,19 @@ function renderHow() {
   if (!opts.some(([k]) => k === pickKey)) pickKey = subs.find((s) => !s.capped)?.key ?? opts[0]?.[0];
   $('acct').replaceChildren(...opts.map(([k, l]) => h('option', { value: k, text: l, selected: k === pickKey })));
   const sub = subs.find((s) => s.key === pickKey);
-  const where = isFleet() ? machines.filter((m) => m.fleet).map((m) => m.name) : (sub?.places ?? []).filter((p) => p.loggedIn).map((p) => p.machine);
+  // A Claude account can go on any machine: one it isn't signed in on yet is offered too ("· sign in"), and Fire there
+  // opens Claude Code in the pane for you to sign in once; after that it launches like anywhere else.
+  const where = isFleet() ? machines.filter((m) => m.fleet).map((m) => m.name)
+    : sub?.engine === 'claude' ? machines.map((m) => m.name).sort((a, b) => Number(signedIn(sub, b)) - Number(signedIn(sub, a)))
+    : (sub?.places ?? []).filter((p) => p.loggedIn).map((p) => p.machine);
   if (!where.includes(pickMachine)) pickMachine = where[0];
-  $('mach').replaceChildren(...where.map((n) => h('option', { value: n, text: n, selected: n === pickMachine })));
+  $('mach').replaceChildren(...where.map((n) => h('option', { value: n, text: sub?.engine === 'claude' && !signedIn(sub, n) ? `${n} · sign in` : n, selected: n === pickMachine })));
+  const login = sub?.engine === 'claude' && !signedIn(sub, pickMachine);
+  $('fire').textContent = login ? 'Sign in' : 'Fire';
+  $('fire').title = login ? `Open Claude Code on ${pickMachine} as a new ${sub.label} profile and sign in there; then Fire` : '⌘↵';
   $('cwd').hidden = isFleet();
-  $('model').hidden = $('effort').hidden = $('name').hidden = sub?.engine !== 'claude';
+  $('model').hidden = $('effort').hidden = $('name').hidden = sub?.engine !== 'claude' || login;
+  $('prompt').hidden = login;
   // The folders this account works in on this machine, the latest first: they are trusted, so a start there takes.
   const used = (sub?.sessions ?? []).filter((x) => x.machine === pickMachine && x.cwd).sort((a, b) => (b.lastAt ?? b.startedAt ?? 0) - (a.lastAt ?? a.startedAt ?? 0)).map((x) => x.cwd);
   const folders = [...new Set([store.get('folder.' + pickMachine), ...used].filter(Boolean))].slice(0, 12);
@@ -499,6 +507,22 @@ function renderHow() {
   $('cwd').style.width = `${Math.max(8, $('cwd').value.length + 1)}ch`;
   $('prompt').placeholder = isFleet() ? 'Issue number, or what it should do' : 'What should it do?';
   renderAccounts();
+}
+/** Whether an account is signed in on a machine (a profile of it there, logged in). */
+const signedIn = (sub, machine) => (sub?.places ?? []).some((p) => p.machine === machine && p.loggedIn);
+/** The profile a Claude account gets on a machine it isn't signed in on: the one it has there (signed out), else the name its
+ *  profile goes by on another machine, else its label; never a name another account holds on that machine, never `default`
+ *  (that is whoever ~/.claude is there). */
+function profileFor(sub, machine) {
+  const have = sub.places.find((p) => p.machine === machine);
+  if (have) return have.profile;
+  const taken = new Set(['default', ...subs.filter((s) => s !== sub).flatMap((s) => s.places.filter((p) => p.machine === machine).map((p) => p.profile))]);
+  const slug = (v) => String(v ?? '').toLowerCase().replace(/[^\w.-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40);
+  const want = [...new Set([...sub.places.map((p) => p.profile), sub.label !== sub.email ? slug(sub.label) : '', slug(sub.email?.split('@')[0])].filter((p) => p && p !== 'default'))];
+  const free = want.find((p) => !taken.has(p));
+  if (free) return free;
+  const base = want[0] ?? 'claude';
+  for (let i = 2; ; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
 }
 $('acct').addEventListener('change', (e) => pick(e.target.value));
 $('mach').addEventListener('change', (e) => { pickMachine = e.target.value; store.set('machine', pickMachine); renderHow(); });
@@ -510,8 +534,15 @@ $('fire').addEventListener('click', fire);
 async function fire() {
   const prompt = $('prompt').value.trim(), said = $('said');
   if ($('fire').disabled) return;
-  if (!prompt) { $('prompt').focus(); return; }
   const sub = subs.find((s) => s.key === pickKey), place = sub?.places.find((p) => p.machine === pickMachine);
+  // Not signed in there yet: Claude Code opens in the pane, on that machine, as a profile of this account's name, and you
+  // sign in at its prompt (and trust the folder). Then it is an account there like any other, and Fire launches.
+  if (sub?.engine === 'claude' && !signedIn(sub, pickMachine)) {
+    said.className = 'fired'; said.textContent = '';
+    openTrust({ machine: pickMachine, profile: profileFor(sub, pickMachine), cwd: $('cwd').value.trim() || '~', sub: sub.label, login: true });
+    return;
+  }
+  if (!prompt) { $('prompt').focus(); return; }
   const body = { machine: pickMachine, engine: isFleet() ? 'fleet' : sub.engine, profile: place?.profile ?? '', cwd: $('cwd').value, prompt,
                  model: sub?.engine === 'claude' ? $('model').value : '', effort: sub?.engine === 'claude' ? $('effort').value : '',
                  name: sub?.engine === 'claude' ? $('name').value.trim() : '' };
@@ -528,7 +559,7 @@ async function fire() {
       // Only you can trust a folder, at Claude Code's own prompt: open it in the pane, then Fire again.
       said.className = 'fired no';
       said.replaceChildren(`${r.cwd} isn't trusted by ${sub.label} on ${body.machine}  `,
-        h('button', { class: 'act test', text: 'trust it', onclick: () => openTrust({ machine: body.machine, profile: body.profile, cwd: r.cwd, sub: sub.label }) }));
+        h('button', { class: 'act test', text: 'trust it', onclick: () => openTrust({ machine: body.machine, profile: body.profile, cwd: r.cwd, sub: sub.label, engine: sub.engine }) }));
     } else { said.className = 'fired no'; said.textContent = r.error ?? 'Did not start'; }
   } catch (e) { said.className = 'fired no'; said.textContent = String(e.message); }
   $('fire').disabled = false;
@@ -604,15 +635,20 @@ const pane = { key: null, items: null, error: null, said: null, sending: false, 
 const drafts = new Map(); // what you had typed to each session, kept when you switch away
 let everything = [];
 const current = () => everything.find((x) => keyOf(x) === pane.key) ?? (pane.trust && keyOf(pane.trust) === pane.key ? pane.trust : null);
-/** A folder's trust prompt, as a session of its own in the pane: approve it there, close the pane, Fire again. */
-function openTrust({ machine, profile, cwd, sub }) {
-  pane.trust = { engine: 'claude', via: 'trust', live: true, state: 'needs-you', machine, profile, cwd, sub, sessionId: `trust:${cwd}`, title: `trust ${cwd}`,
-    doing: 'Approve the folder at Claude Code\'s prompt, then close this and Fire again' };
+/** A folder's trust prompt (Claude Code's, or Codex's), or a sign-in, as a session of its own in the pane: the program itself
+ *  in that folder on that machine, under that profile; answer it there, close the pane, Fire again. */
+function openTrust({ machine, profile, cwd, sub, login = false, engine = 'claude' }) {
+  const who = engine === 'codex' ? 'Codex' : 'Claude Code';
+  pane.trust = { engine, via: 'trust', live: true, state: 'needs-you', machine, profile, cwd, sub, sessionId: `trust:${engine}:${profile}:${cwd}`,
+    title: login ? `sign in ${sub} on ${machine}` : `trust ${cwd}`,
+    doing: login ? `Sign in as ${sub} at Claude Code's prompt (its profile on ${machine}: ${profile === 'default' ? '~/.claude' : `~/.claude-${profile}`}), trust the folder, then close this and Fire again`
+      : `Approve the folder at ${who}'s prompt, then close this and Fire again` };
   if (pane.key === keyOf(pane.trust)) deselect();
   select(pane.trust);
 }
-/** A background session opens as its own terminal. */
-const attachable = (x) => x?.engine === 'claude' && x.live && ((x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '')) || Boolean(x.tmux));
+/** A background session opens as its own terminal; so does any session running in tmux, Astra's included (Fleet starts
+ *  Astra in tmux, so it is typed into there, mid-work or after). */
+const attachable = (x) => Boolean(x?.live) && ((x.engine === 'claude' && ((x.via === 'background' && /^[0-9a-f]{8}$/.test(x.id ?? '')) || Boolean(x.tmux))) || (x.engine === 'codex' && Boolean(x.tmux)));
 /** An idle session in a terminal or claude.ai can move into the background here, conversation kept, and open as one too. */
 const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) && !x.tmux && (x.via === 'remote' || x.via === 'terminal') && (x.state === 'ready' || x.state === 'capped' || atPrompt(x));
 // A Codex session opens as `codex resume` once you ask for it, and stays so: only one that is closed and whose last turn
@@ -810,7 +846,7 @@ function attachTerm(x, now = false) {
   // Its size goes once you stop dragging: every change makes the program draw its whole screen again.
   term.onResize(({ cols, rows }) => { clearTimeout(T.sizeT); T.sizeT = setTimeout(() => { if (!T.ended) tell(T, { op: 'size', cols, rows }); }, 80); });
   tell(T, { op: 'open', machine: x.machine, profile: x.profile, cols: term.cols, rows: term.rows,
-    ...(x.via === 'trust' ? { trust: x.cwd } : x.engine === 'codex' ? { codex: { sessionId: x.sessionId, cwd: x.cwd } } : x.tmux && x.via !== 'background' ? { tmux: x.tmux } : { id: x.id }) });
+    ...(x.via === 'trust' ? { trust: x.cwd, engine: x.engine } : x.tmux && x.via !== 'background' ? { tmux: x.tmux } : x.engine === 'codex' ? { codex: { sessionId: x.sessionId, cwd: x.cwd } } : { id: x.id }) });
   trimTerms();
   return T;
 }
@@ -899,14 +935,15 @@ function dropTerm(key) {
   T.gl?.dispose(); T.term.dispose(); T.el.remove();
   if (shown === key) shown = null;
 }
-/** Only the last few stay attached: the oldest out of sight lets go first. Never a Codex one: there the terminal is the
- *  agent itself, and letting go would stop it mid-turn. */
+/** A resumed Codex thread runs in its terminal itself (not in tmux): letting go would stop it mid-turn. */
+const termIsAgent = (o) => o.x.engine === 'codex' && !o.x.tmux && o.x.via !== 'trust';
+/** Only the last few stay attached: the oldest out of sight lets go first. Never one that is the agent itself. */
 function trimTerms() {
-  const old = [...terms.values()].filter((o) => o.key !== shown && o.x.engine !== 'codex').sort((a, b) => b.used - a.used).slice(KEEP - 1);
+  const old = [...terms.values()].filter((o) => o.key !== shown && !termIsAgent(o)).sort((a, b) => b.used - a.used).slice(KEEP - 1);
   for (const o of old) dropTerm(o.key);
 }
-// Closing the tab (or reloading) stops a Codex terminal's agent with it: ask first.
-addEventListener('beforeunload', (e) => { if ([...terms.values()].some((o) => o.x.engine === 'codex' && !o.ended)) e.preventDefault(); });
+// Closing the tab (or reloading) stops such a terminal's agent with it: ask first.
+addEventListener('beforeunload', (e) => { if ([...terms.values()].some((o) => termIsAgent(o) && !o.ended)) e.preventDefault(); });
 /** /exit typed in its terminal: the session ends (conversation kept), the pane closes, it moves to closed. */
 async function exitSession(T) {
   const x = T.x, now = current();
@@ -964,7 +1001,7 @@ async function continueHere() {
   pane.armMove = false; pane.moving = true; pane.said = null; renderPane();
   const r = await api('/api/fleet/fork', { machine: x.machine, profile: x.profile, sessionId: x.sessionId }).catch((e) => ({ ok: false, error: String(e.message) }));
   pane.moving = false;
-  if (r.untrusted) { openTrust({ machine: x.machine, profile: x.profile, cwd: r.cwd, sub: x.sub }); return; }
+  if (r.untrusted) { openTrust({ machine: x.machine, profile: x.profile, cwd: r.cwd, sub: x.sub, engine: x.engine }); return; }
   if (!r.ok) { pane.said = { cls: 'no', text: r.error }; renderPane(); return; }
   // The copy takes a few seconds to be listed: open it as soon as it is (it may first ask you something at startup).
   for (let i = 0; i < 12; i++) {

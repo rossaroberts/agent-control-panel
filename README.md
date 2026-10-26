@@ -155,9 +155,13 @@ what each one is working on, talk to it, and decide where the next one goes. The
 - **Machines**, one line each: dev servers, database stacks, containers, load, memory and disk.
 - **Launch**: write what it should do, pick the account, machine, folder (it offers the folders that account works in
   there, the latest first), model and effort, and ⌘↵. A folder the account hasn't trusted is refused with **trust it**:
-  Claude Code opens in that folder in the pane with its own trust prompt; approve it there, close the pane, Fire again. `claude --bg` for a
-  Claude account, `codex exec --sandbox workspace-write` for Codex, `muse exec` for Muse, or a fleet dispatch
-  (`fleet-workers --dispatch`) on a machine with the fleet kit.
+  Claude Code (or Codex) opens in that folder in the pane with its own trust prompt; approve it there, close the pane, Fire again. `claude --bg` for a
+  Claude account, Codex's own screen in tmux for Astra (below), `muse exec` for Muse, or a fleet dispatch
+  (`fleet-workers --dispatch`) on a machine with the fleet kit. **A Claude account goes on any machine**, signed in there or
+  not: a machine it isn't signed in on is listed too (`Mac · sign in`), and the button reads **Sign in**: Claude Code opens in
+  the pane on that machine as a new profile of that account's name (`~/.claude-gmail`, say; a name no other account holds
+  there), you sign in at its prompt and trust the folder, close the pane, and from then on it launches there like anywhere
+  else. The panel never copies a sign-in between machines: each profile signs in on its own.
 - **Needs you**, above everything: every session waiting on a question or permission, then every one stopped at a limit,
   the longest wait first, each with what it waits on under it. The tab's title carries the count.
 - **Sessions**, grouped by epic (`epics` in `fleet.json`), then by the groups you make: each under its own name (the
@@ -179,7 +183,11 @@ what each one is working on, talk to it, and decide where the next one goes. The
   the session runs); a row opens as you press it. Where a key takes long to come back (redbat is a quarter of a second away),
   what you type shows at once over the cursor, an overlay only, until the real screen catches up. **/exit** ends the
   session and closes the pane. xterm draws on the GPU (WebGL) where it can.
-- **An Astra (Codex) session** shows its conversation; one that is closed and finished its last turn has **terminal**,
+- **An Astra (Codex) session Fleet starts runs in tmux** on its machine (`tmux -L fleet`, Codex's own screen with the prompt,
+  every permission allowed), so it opens as its pane like any session in tmux: type to it while it works or after, and it
+  keeps running when you close the tab. (Without tmux on that machine it is `codex exec`, one prompt, as before.) Codex asks
+  whether to trust a folder before it writes anything, so a folder Codex hasn't trusted is refused with **trust it** first. Any
+  other Astra session shows its conversation; one that is closed and finished its last turn has **terminal**,
   which opens it in Codex's own screen here (`codex resume <id>` in its folder, every permission allowed). Not a live one
   (open in the Codex app): resuming takes the thread over. One that stopped mid-turn asks first ("continue its turn?").
 - **A session running inside tmux** (anywhere, any account) opens as its tmux pane: `tmux -L <server> attach -t <pane>`,
