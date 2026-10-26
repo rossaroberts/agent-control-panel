@@ -199,6 +199,16 @@ what each one is working on, talk to it, and decide where the next one goes. The
   opens as a terminal too. Never one that works or waits on you, never by itself, and not a desktop-app session. Its old
   claude.ai page is done with: a message there starts a second process on the same conversation. It gets a new one.
 
+**Context** (`/context`, `g c`) shows, as rendered markdown, every document that shapes how a session starts: the start scripts in
+`~/.zshrc` (`claude…`, `gpt`, `codex`), the session defaults of every profile on every machine (model, effort, permission mode,
+tui, account: read through each machine's worker, `defaults` in `fleet/machine.mjs`, only those keys), the project's hooks, its
+CLAUDE.md and AGENTS.md, the memory index (a link opens the note inside the tab, from that folder only; the sync state from
+`~/.memory-sync/status.json` sits above it), the newest HANDOFF and chai-fm's CLAUDE.md. The list is `DOCS` in
+`fleet/context.mjs`: one entry per document. It is read-only. These files are written by agents that read emails and invoices, so
+`public/context-render.mjs` never renders raw HTML (it is shown as text), links only to http(s) and the notes, images not at all;
+and the page is served with a policy (`script-src 'self'` and its own nonce) so that nothing a document got into it would run.
+marked (MIT) is vendored in `public/vendor`.
+
 How a message gets in, for a session that isn't a terminal here. A background job gets it as yours, the way agent view's
 reply does (`claude --resume <id> -- <text>`); one still on an older Claude Code than the one installed says to type in its
 terminal (restarting it is never a message's call). A Remote Control session (a bridge's, a desktop-app one with Remote

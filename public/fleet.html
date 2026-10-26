@@ -256,6 +256,8 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 
 @media (max-width: 720px) {
   main { width: calc(100% - 32px); padding-top: 28px; }
+  .top { flex-wrap: wrap; gap: 4px 20px; }
+  .top .tabs { flex-wrap: wrap; gap: 4px 20px; }
   :root { --pane: 100vw; }
   body.has-pane main { display: none; }
   body.has-pane.pane-min main { display: block; width: calc(100% - var(--rail) - 32px); margin-left: 16px; }
@@ -267,7 +269,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 </head>
 <body>
 <main>
-  <nav class="top" aria-label="Panel"><div class="tabs"><a href="/" aria-current="page">Fleet</a><a href="/satellite">Satellite</a><a href="/world">World</a></div><a href="/board" title="The board: answer permission prompts for terminal sessions">Board</a><button id="refresh" title="Read again" aria-label="Read again"><svg class="i" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg></button></nav>
+  <nav class="top" aria-label="Panel"><div class="tabs"><a href="/" aria-current="page">Fleet</a><a href="/satellite">Satellite</a><a href="/context">Context</a><a href="/world">World</a></div><a href="/board" title="The board: answer permission prompts for terminal sessions">Board</a><button id="refresh" title="Read again" aria-label="Read again"><svg class="i" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg></button></nav>
   <div class="err" id="err" hidden></div>
   <div id="accts"></div>
   <div class="machines" id="mlines"></div>
@@ -304,7 +306,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
   <b>Esc</b><span>close it (in a terminal, Esc is the session's)</span><b>⌘↓ ⌘↑</b><span>next, previous, from inside a terminal</span>
   <b>⌃`</b><span>between the list and the terminal</span><b>⌘K  /</b><span>find a session</span><b>c</b><span>start a session</span>
   <b>r  l</b><span>rename, group</span><b>e</b><span>close, or archive: then Enter to do it</span><b>m</b><span>move here, continue here: then Enter</span>
-  <b>i</b><span>interject: then Enter</span><b>⌘\</b><span>fold the pane</span><b>g f  g s  g w</b><span>Fleet, Satellite, World</span><b>?</b><span>this list</span></div>
+  <b>i</b><span>interject: then Enter</span><b>⌘\</b><span>fold the pane</span><b>g f  g s  g c  g w</b><span>Fleet, Satellite, Context, World</span><b>?</b><span>this list</span></div>
 </div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
@@ -1252,7 +1254,7 @@ document.addEventListener('keydown', (e) => {
   if (typing() || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
   const k = e.key;
   if (document.activeElement?.tagName === 'BUTTON' && (k === 'Enter' || k === ' ')) return; // the button's own: an armed one does it
-  if (Date.now() - gPressed < 1200) { gPressed = 0; const to = { f: '/', s: '/satellite', w: '/world' }[k]; if (to) { e.preventDefault(); if (to !== location.pathname) location.href = to; } return; }
+  if (Date.now() - gPressed < 1200) { gPressed = 0; const to = { f: '/', s: '/satellite', c: '/context', w: '/world' }[k]; if (to) { e.preventDefault(); if (to !== location.pathname) location.href = to; } return; }
   const act = {
     j: () => step(1), ArrowDown: () => step(1), k: () => step(-1), ArrowUp: () => step(-1),
     Enter: () => { if (!pane.key) { const y = byKey(document.activeElement?.closest?.('[data-key]')?.dataset.key); if (y) select(y); } else enter(); },

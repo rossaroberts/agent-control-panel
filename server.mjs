@@ -31,6 +31,7 @@ import { createFleet } from './fleet/fleet.mjs';
 import { createTerms } from './fleet/term.mjs';
 import { accept as acceptWs, refuse as refuseWs } from './fleet/ws.mjs';
 import { createSatellite } from './fleet/satellite.mjs';
+import { createContext } from './fleet/context.mjs';
 
 // `node server.mjs <command>` runs the CLI (cli.mjs) and never starts the server.
 if (process.argv.length > 2) { const { main } = await import('./cli.mjs'); process.exit(await main(process.argv.slice(2))); }
@@ -77,7 +78,7 @@ const ORIGINS = new Set([...HOSTS].map((h) => `http://${h}`));
 // container, another user of this Mac, a sandboxed app). So the token above is given only to a browser that is paired: one
 // that carries the key from a 0600 file beside prefs.json (cli.mjs pairKey) as an HttpOnly cookie, set once from the address
 // `node server.mjs open` opens. The pages themselves are served to anyone on the loopback, without the token.
-const PAGES = new Set(['/', '/fleet', '/satellite', '/board', '/world']);
+const PAGES = new Set(['/', '/fleet', '/satellite', '/context', '/board', '/world']);
 const same = (a, b) => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 function paired(req) {
   const m = /(?:^|;\s*)acp_k=([0-9a-f]{48})(?:;|$)/.exec(req.headers.cookie ?? '');
@@ -94,6 +95,7 @@ p{margin:0 0 14px}code{background:var(--tint);border-radius:3px;padding:0 5px}.q
 const page = () => fs.readFileSync(new URL('./public/index.html', import.meta.url), 'utf8');
 const fleetPage = () => fs.readFileSync(new URL('./public/fleet.html', import.meta.url), 'utf8');
 const satellitePage = () => fs.readFileSync(new URL('./public/satellite.html', import.meta.url), 'utf8');
+const contextPage = () => fs.readFileSync(new URL('./public/context.html', import.meta.url), 'utf8');
 
 /** sessionId → session record (roster fields + what the hooks told us). */
 const sessions = new Map();
@@ -126,9 +128,11 @@ const KEY = pairKey(PREFS);
 const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
 // Satellite: the delivery pipeline on GitHub, every PR from agent to production (fleet/satellite.mjs), read-only.
 const satellite = createSatellite({ snapshot: () => fleet.snapshot(), testUrl: () => (fleet.config().epics ?? []).find((e) => e.test)?.test ?? null });
+// Context: the documents that shape how a session starts, read-only (fleet/context.mjs).
+const context = createContext({ home: HOME, fleet });
 const terms = createTerms({ config: () => fleet.config(), codexBusy: (machine, sessionId) => fleet.codexBusy(machine, sessionId) });
-// The terminal in Fleet's page: xterm.js, kept here so the page needs no network for it.
-const VENDOR = { 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
+// The terminal in Fleet's page: xterm.js, and marked (MIT, Context's markdown), kept here so the pages need no network for them.
+const VENDOR = { 'marked.umd.js': 'text/javascript; charset=utf-8', 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
   'plex-mono-400.woff2': 'font/woff2', 'plex-mono-500.woff2': 'font/woff2', 'plex-mono-400-ext.woff2': 'font/woff2', 'plex-mono-500-ext.woff2': 'font/woff2' };
 const HOOK_URL = `127.0.0.1:${PORT}/hook/`;
 function listProfiles() {
@@ -1716,9 +1720,9 @@ function readBody(req) {
   });
 }
 
-const send = (res, code, body, type = 'application/json') => {
+const send = (res, code, body, type = 'application/json', headers = {}) => {
   // A page here is never shown inside another site's frame (a decoy over the board's buttons).
-  res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...(type.startsWith('text/html') ? { 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" } : {}) });
+  res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...(type.startsWith('text/html') ? { 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" } : {}), ...headers });
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 };
 
@@ -1772,6 +1776,17 @@ async function handle(req, res) {
   }
   if (req.method === 'GET' && url.pathname === '/satellite') {
     return send(res, 200, satellitePage().replace('__ACP_TOKEN__', TOKEN), 'text/html; charset=utf-8');
+  }
+
+  // Context shows files agents wrote, rendered from markdown. Its page is also held by a policy of its own: script only from here
+  // and only the page's own (by this response's nonce), so whatever a document managed to put in the page would not run.
+  if (req.method === 'GET' && url.pathname === '/context') {
+    const nonce = crypto.randomBytes(16).toString('base64');
+    const csp = `default-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+    return send(res, 200, contextPage().replace('__ACP_TOKEN__', TOKEN).replaceAll('__ACP_NONCE__', nonce), 'text/html; charset=utf-8', { 'content-security-policy': csp });
+  }
+  if (req.method === 'GET' && url.pathname === '/context-render.mjs') {
+    return send(res, 200, fs.readFileSync(new URL('./public/context-render.mjs', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
   }
 
   if (req.method === 'GET' && url.pathname.startsWith('/vendor/') && Object.hasOwn(VENDOR, url.pathname.slice(8))) {
@@ -1838,7 +1853,8 @@ async function handle(req, res) {
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
                       '/api/fleet/archive-all': (b) => fleet.archiveAll(b), '/api/fleet/hide': (b) => fleet.hide(b), '/api/fleet/resume': (b) => fleet.resume(b),
                       '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b), '/api/fleet/fork': (b) => fleet.fork(b),
-                      '/api/fleet/interject': (b) => fleet.interject(b), '/api/satellite': (b) => satellite.read(b) };
+                      '/api/fleet/interject': (b) => fleet.interject(b), '/api/satellite': (b) => satellite.read(b),
+                      '/api/context': (b) => context.read(b) };
     if (Object.hasOwn(ACTIONS, url.pathname)) {
       let r;
       try { r = await ACTIONS[url.pathname](body); } catch (err) { r = { ok: false, error: String(err?.message ?? err).slice(0, 300) }; }

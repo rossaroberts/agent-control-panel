@@ -60,6 +60,23 @@ test('the worker loads machine.mjs from its first line, then answers requests by
   assert.equal(w.lines.some((l) => l.id === 3), false, 'an unknown job gets no answer');
 });
 
+test('defaults: the worker answers what each profile starts with, from a fixed set of keys, and nothing of the rest', async (t) => {
+  const h = home();
+  fs.writeFileSync(path.join(h, '.claude-work', 'settings.json'), JSON.stringify({ model: 'claude-fable-5-1[1m]', effortLevel: 'low', tui: 'fullscreen',
+    permissions: { defaultMode: 'bypassPermissions' }, modelSettings: { 'claude-fable-5-1': { effortLevel: 'xhigh' } }, env: { API_KEY: 'sk-LEAK' } }));
+  const w = startWorker(t, h);
+  w.child.stdin.write(fs.readFileSync(SCRIPT).toString('base64') + '\n');
+  await w.next((l) => l.ready);
+  w.send({ id: 1, do: 'defaults' });
+  const r = (await w.next((l) => l.id === 1)).r;
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.profiles.map(({ at, ...p }) => p), [{ id: 'work', dir: '~/.claude-work', email: 'me@example.com', model: 'claude-fable-5-1[1m]', modelEffort: 'xhigh', effort: 'low', defaultMode: 'bypassPermissions', tui: 'fullscreen' }]);
+  assert.ok(r.profiles[0].at > 0);
+  assert.ok(!JSON.stringify(r).includes('LEAK'));
+  w.child.stdin.end();
+  assert.equal(await w.exited, 0);
+});
+
 test('end of input: what it started is answered before it exits', async (t) => {
   const w = startWorker(t, home());
   w.child.stdin.write(fs.readFileSync(SCRIPT).toString('base64') + '\n');

@@ -6,6 +6,8 @@
 //
 // collect: every Claude Code profile (~/.claude, ~/.claude-<name>) with its account, plan, limits and sessions; Codex
 //          (~/.codex) with its account, limits and recent sessions; the fleet kit's capped accounts and live dispatches.
+// defaults: what each Claude Code profile starts a session with (model, effort, permission mode, tui) and whose account it is:
+//          a fixed set of keys of settings.json and .claude.json, never anything else (the Context page).
 // launch:  `claude --bg` on a profile, `codex exec` or `muse exec` detached, or a fleet dispatch, each through argv with no shell.
 //
 // Limits: Claude Code shows an account's plan limits only to its status line, so fleet/statusline.mjs keeps the newest
@@ -1444,6 +1446,34 @@ export async function tokens(a = {}) {
   return { ok: true, since, slotMs: SLOT_MS, buckets: st.buckets, files: Object.keys(st.files).length };
 }
 
+// ---------------------------------------------------------------- session defaults (the Context page)
+/** The model whose own effort the Context page shows next to the profile's general one (`modelSettings.<key>.effortLevel`). */
+const DEFAULTS_MODEL = 'claude-fable-5-1';
+const word = (v, n = 80) => (typeof v === 'string' && /^[\w .:\[\]/+-]{1,200}$/.test(v) ? v.slice(0, n) : null);
+/** What a profile starts a session with, from its settings.json: ONLY these keys, as short words (a value that is not a
+ *  plain word, or the wrong type, is null). Nothing else of the file is ever read out: it also holds hooks, env and plugins. */
+export function settingsSummary(settings, config = null) {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  const per = s.modelSettings && typeof s.modelSettings === 'object' ? s.modelSettings[DEFAULTS_MODEL] : null;
+  const email = config?.oauthAccount?.emailAddress;
+  return {
+    email: typeof email === 'string' && /^[^\s@]{1,100}@[^\s@]{1,200}$/.test(email) ? email : null,
+    model: word(s.model),
+    modelEffort: word(per && typeof per === 'object' ? per.effortLevel : null, 20),
+    effort: word(s.effortLevel, 20),
+    defaultMode: word(s.permissions && typeof s.permissions === 'object' ? s.permissions.defaultMode : null, 40),
+    tui: typeof s.tui === 'boolean' ? String(s.tui) : word(s.tui, 20),
+  };
+}
+/** Every Claude Code profile here with its defaults. */
+export function defaults() {
+  const profiles = claudeProfiles().map((p) => {
+    const file = path.join(p.dir, 'settings.json');
+    return { id: p.id, dir: tilde(p.dir), at: Math.round(mtime(file)) || null, ...settingsSummary(readJson(file), readJson(p.config, 64 << 20)) };
+  });
+  return { ok: true, host: os.hostname().replace(/\.local$/, ''), profiles };
+}
+
 // ---------------------------------------------------------------- interject
 /** Your message now, not after the step it is in. A message you send while a session works waits for its current step to
  *  end; this ends that step: the command it runs is stopped (that command's own process group, and nothing else: not the
@@ -1501,7 +1531,7 @@ if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
   const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
                  close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args), interject: () => interject(args),
-                 tokens: () => tokens(args), resume: () => resume(args), revive: () => revive(args) }[process.env.FLEET_DO];
+                 tokens: () => tokens(args), resume: () => resume(args), revive: () => revive(args), defaults: () => defaults() }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };
   process.stdout.write(JSON.stringify(r));
 }

@@ -51,6 +51,7 @@ svg.i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-widt
 .top button.busy svg { animation: turn 900ms linear infinite; }
 @keyframes turn { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .top button.busy svg { animation: none; opacity: .5; } }
+@media (max-width: 720px) { .top, .top .tabs { flex-wrap: wrap; gap: 4px 20px; } }
 .err { color: var(--red); font-size: 13px; margin: -16px 0 22px; white-space: pre-line; }
 .note { color: var(--grey); font-size: 13px; margin: -16px 0 22px; white-space: pre-line; }
 
@@ -147,7 +148,7 @@ tr.group td button:hover { color: var(--ink); }
 <body>
 <main>
   <nav class="top" aria-label="Panel">
-    <div class="tabs"><a href="/">Fleet</a><a href="/satellite" aria-current="page">Satellite</a><a href="/world">World</a></div>
+    <div class="tabs"><a href="/">Fleet</a><a href="/satellite" aria-current="page">Satellite</a><a href="/context">Context</a><a href="/world">World</a></div>
     <span class="nstuck" id="nstuck" hidden></span>
     <span class="read" id="read"></span>
     <button id="refresh" title="Read GitHub again" aria-label="Read GitHub again"><svg class="i" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg></button>

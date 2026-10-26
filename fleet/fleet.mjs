@@ -15,7 +15,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere,
-  interject as interjectHere, tokens as tokensHere, resume as resumeHere, revive as reviveHere, watchHooks, sessionState } from './machine.mjs';
+  interject as interjectHere, tokens as tokensHere, resume as resumeHere, revive as reviveHere, defaults as defaultsHere, watchHooks, sessionState } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 
@@ -24,6 +24,8 @@ const SCRIPT = new URL('./machine.mjs', import.meta.url);
 // one); while a page has asked in the last WATCH_MS, the panel reads every machine again every WARM_MS behind it.
 const WARM_MS = 10_000, WATCH_MS = 90_000;
 const SSH_MS = 25_000, COLLECT_MS = 12_000;
+// The Context page's read of each machine's profile defaults: a few small files, so a machine that is not up in this long is called unreachable.
+const DEFAULTS_MS = 10_000;
 // An ssh host never starts with "-" (ssh would take it as an option).
 const HOST = /^[\w.@][\w.@-]{0,99}$/, USER = /^[a-z_][\w-]{0,31}$/, NAME = /^[\w .-]{1,40}$/;
 const ENGINES = new Set(['claude', 'codex', 'muse', 'fleet']);
@@ -47,7 +49,7 @@ const clean = (v, n) => String(v ?? '').replace(/[<>\x00-\x08\x0b-\x1f\x7f]/g, '
 // then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. A read asked
 // for while one runs shares it (a slow machine never piles reads up). Between answers it says when a session's hook file
 // changes ({ event }). On end of input it finishes what it started, then exits.
-export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject','tokens','resume','revive']);"
+export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject','tokens','resume','revive','defaults']);"
   + " const running = new Set(); let m = null, reading = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
   + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n');"
   + " try { m.watchHooks?.((ev) => process.stdout.write(JSON.stringify({ event: ev }) + '\\n')); } catch {} continue; }"
@@ -146,7 +148,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   }
   /** Run machine.mjs's `todo` on a machine: through its worker, else (an action it never got) the one-shot way. */
   async function overSsh(m, todo, args = {}) {
-    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' || todo === 'tokens' || todo === 'resume' || todo === 'revive' ? 150_000 : todo === 'send' ? 90_000 : todo === 'collect' ? COLLECT_MS : SSH_MS;
+    const ms = todo === 'launch' || todo === 'adopt' || todo === 'fork' || todo === 'tokens' || todo === 'resume' || todo === 'revive' ? 150_000 : todo === 'send' ? 90_000 : todo === 'collect' ? COLLECT_MS : todo === 'defaults' ? DEFAULTS_MS : SSH_MS;
     const w = worker(m);
     const up = await Promise.race([w.ready, new Promise((ok) => setTimeout(() => ok(false), ms).unref?.())]);
     if (up && !w.dead) {
@@ -156,14 +158,15 @@ export function createFleet({ dir, quiet = () => {} }) {
           w.pending.delete(id);
           // No answer in time: the next call goes to a new worker on a fresh channel; this one finishes what it has.
           w.stuck = true;
-          resolve({ ok: false, error: `${m.name} did not answer in ${ms / 1000}s.${todo === 'collect' || todo === 'peek' ? '' : ' It may or may not have happened: look before trying again.'}` });
+          resolve({ ok: false, error: `${m.name} did not answer in ${ms / 1000}s.${todo === 'collect' || todo === 'peek' || todo === 'defaults' ? '' : ' It may or may not have happened: look before trying again.'}` });
         }, ms);
         w.pending.set(id, { resolve, timer });
         w.child.stdin.write(JSON.stringify({ id, do: todo, args }) + '\n');
       });
     }
     // A read waits for the next one rather than starting a second connection.
-    if (todo === 'collect') return { ok: false, error: `${m.name}: ${w.err.trim().split('\n').at(-1) || 'no connection'}`.slice(0, 200) };
+    // (The Context page's read of the defaults waits the same way: it never opens a second connection either.)
+    if (todo === 'collect' || todo === 'defaults') return { ok: false, error: `${m.name}: ${w.err.trim().split('\n').at(-1) || 'no connection'}`.slice(0, 200) };
     return oneShot(m, todo, args, ms);
   }
   /** The one-shot way: machine.mjs on stdin to a `node` of its own, what to do and its arguments in the environment. */
@@ -631,6 +634,17 @@ export function createFleet({ dir, quiet = () => {} }) {
     return out;
   }
 
+  /** What each Claude Code profile starts a session with, on every machine (machine.mjs defaults): the Mac read here, each
+   *  other machine through its worker (never a new connection), all at once. [{ name, r }]; a machine that is not up has
+   *  r.ok false and says why. */
+  async function profileDefaults() {
+    const { self, machines } = config();
+    return Promise.all([
+      Promise.resolve().then(() => defaultsHere()).then((r) => ({ name: self, r }), (e) => ({ name: self, r: { ok: false, error: String(e?.message ?? e) } })),
+      ...machines.map((m) => overSsh(m, 'defaults').then((r) => ({ name: m.name, r }))),
+    ]);
+  }
+
   /** Archive several closed sessions at once (an epic's): each as archive() does; a job record that refuses stays. */
   async function archiveAll(body) {
     const list = Array.isArray(body?.sessions) ? body.sessions.slice(0, 300) : [];
@@ -640,5 +654,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, hide: hideRow, resume, revive, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, flush };
+  return { snapshot, launch, peek, send, close, archive, archiveAll, hide: hideRow, resume, revive, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, profileDefaults, flush };
 }
