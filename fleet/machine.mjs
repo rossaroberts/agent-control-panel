@@ -773,7 +773,10 @@ function readRollout(f, m, open) {
   const size = tokens?.model_context_window ?? null, used = tokens?.last_token_usage?.input_tokens ?? null;
   // Open while a running Codex holds its log; without a process scan, while it was written in the last ten minutes.
   // A question to you stays up until it is answered (the Codex app keeps it open), up to three days.
-  const live = Boolean(open?.has(f)) || Date.now() - m < CODEX_LIVE_MS || (asking === true && Date.now() - m < 3 * DAY);
+  // One the panel started (`codex exec`, one turn) is over once its process has let go of its log: closed at once, so
+  // its terminal (codex resume) is there to go on in.
+  const exited = open && meta.source === 'exec' && !open.has(f);
+  const live = !exited && (Boolean(open?.has(f)) || Date.now() - m < CODEX_LIVE_MS || (asking === true && Date.now() - m < 3 * DAY));
   return {
     session: { engine: 'codex', id: meta.id ?? path.basename(f, '.jsonl'), sessionId: meta.id ?? null,
                name: oneLine(meta.originator, 60), kind: meta.source ?? null, live,

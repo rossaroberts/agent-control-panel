@@ -85,6 +85,24 @@ test('a Codex session whose newest call asks you something, unanswered: needs yo
   assert.equal(s.doing, 'Asks you: Which batch should I post?');
 });
 
+test('a Codex session the panel started (codex exec) is closed once no process holds its log: its terminal is there at once', () => {
+  const h = home(), d = new Date();
+  const day = path.join(h, '.codex', 'sessions', String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0'));
+  const t = (s) => new Date(Date.now() - 60_000 + s * 1000).toISOString();
+  fs.writeFileSync(path.join(day, 'rollout-s-3.jsonl'), [
+    { timestamp: t(0), type: 'session_meta', payload: { id: 's-3', cwd: path.join(h, 'repo'), timestamp: t(0), originator: 'Codex Desktop', source: 'vscode' } },
+    { timestamp: t(1), type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'Done.' } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const out = execFileSync(process.execPath, ['--input-type=module', '-'], {
+    input: fs.readFileSync(SCRIPT), env: { HOME: h, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', FLEET_DO: 'collect' }, timeout: 30_000 });
+  const sessions = JSON.parse(String(out)).accounts.find((x) => x.engine === 'codex').sessions;
+  const exec = sessions.find((x) => x.sessionId === 's-1'), app = sessions.find((x) => x.sessionId === 's-3');
+  assert.equal(exec.live, false);
+  assert.equal(exec.state, 'closed');
+  assert.equal(exec.turnOver, true);
+  assert.equal(app.state, 'ready'); // the Codex app's may sit open between turns: the ten minutes still hold for it
+});
+
 test('no fleet kit, no fleet', () => {
   assert.equal(collect(home()).fleet, null);
 });
