@@ -662,7 +662,7 @@ async function processes() {
 const profileOfDir = (dir) => (!dir ? 'default' : path.basename(dir).replace(/^\.claude-?/, '') || 'default');
 
 /** The scan, sorted: bridges per profile, fleet workers, and agent processes no roster or log accounts for. */
-function sortProcesses(list, rosterPids, codexOpen) {
+export function sortProcesses(list, rosterPids, codexOpen) {
   const byPid = new Map(list.map((x) => [x.pid, x]));
   const under = (x, test) => { for (let p = byPid.get(x.ppid), i = 0; p && i < 12; p = byPid.get(p.ppid), i++) if (test(p)) return p; return null; };
   const bridges = [], workers = [], others = [];
@@ -680,7 +680,9 @@ function sortProcesses(list, rosterPids, codexOpen) {
     }
     // this read's own calls, and Claude Code's own background machinery (the job supervisor, a job's terminal host, a
     // warmed-up spare), which are no agents
-    if (x.ppid === process.pid || ['agents', 'auth', 'attach', 'stop', 'rm', 'daemon', 'bg-pty-host', 'bg-spare', '--version'].includes(x.args[1])) continue;
+    if (x.ppid === process.pid || ['agents', 'auth', 'attach', 'stop', 'rm', 'daemon', 'bg-pty-host', 'bg-spare', '--bg-pty-host', '--bg-spare', '--version'].includes(x.args[1])) continue;
+    // a wrapper around a listed session (the desktop app runs each in a `disclaimer` process): the session is its row
+    if (list.some((c) => c.ppid === x.pid && rosterPids.has(c.pid))) continue;
     if (x.args.includes('--json-schema') && x.args.includes('--no-session-persistence')) continue; // the panel's own titles and World's builds
     if (rosterPids.has(x.pid) || under(x, (p) => rosterPids.has(p.pid) || p.engine === 'fleet')) continue; // listed, or a part of one
     if (x.args.includes('--sdk-url') || x.args[1] === 'app-server' || x.args.includes('mcp-server')) continue; // a bridge's session (in the roster), Codex's desktop backend

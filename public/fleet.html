@@ -1350,7 +1350,8 @@ function row(x) {
   return h('div', { class: `s${on ? ' open' : ''}${x.live ? '' : ' gone'}`, 'data-key': keyOf(x), title: `${WORD[x.state] ?? x.state}${x.name ? `\n${x.name}` : ''}${agentLines ? `\nagents:\n${agentLines}` : ''}`, tabindex: 0,
       ...rowActs(x) },
     word(x.state, lifted ? 'lifted' : '', lifted ? 'its limit has lifted' : null),
-    h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine }),
+    h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine, title: x.sessionId ? 'Double-click to rename' : '',
+      ondblclick: (e) => { e.stopPropagation(); renameInList(x, e.currentTarget); } }),
     h('span', { class: `stage ${x.stage ?? ''}`, text: x.stage ?? '' }),
     h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }),
@@ -1366,7 +1367,8 @@ function row(x) {
 /** A closed session, as one quiet line: what it was, where, whose, and when it last moved. */
 function gone(x) {
   return h('div', { class: `c${pane.key === keyOf(x) ? ' open' : ''}`, 'data-key': keyOf(x), tabindex: 0, title: x.name ?? '', ...rowActs(x) },
-    word('closed'), h('span', { text: x.title ?? x.name ?? x.id ?? x.engine }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
+    word('closed'), h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine, title: x.sessionId ? 'Double-click to rename' : '',
+      ondblclick: (e) => { e.stopPropagation(); renameInList(x, e.currentTarget); } }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }), startCell(x), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
     h('span', { class: 'use' }), h('span', { class: 'what' }));
 }
@@ -1375,9 +1377,30 @@ let press = null, dragKey = null;
 addEventListener('pointerup', (e) => {
   const p = press; press = null;
   if (!p || Math.hypot(e.clientX - p.x, e.clientY - p.y) > 6) return;
+  // The second click of a double-click (a rename) leaves the pane as the first one left it.
+  if (lastOpen.key === p.key && Date.now() - lastOpen.at < 400) return;
+  lastOpen = { key: p.key, at: Date.now() };
   const y = everything.find((s) => keyOf(s) === p.key);
   if (y) select(y);
 });
+let lastOpen = { key: null, at: 0 };
+/** Double-click a row's name to rename it there: Enter keeps it, Esc puts it back, empty puts the written one back. */
+function renameInList(x, el) {
+  if (!x.sessionId || x.via === 'trust') return;
+  const was = el.textContent, row = el.closest('[draggable]');
+  row?.setAttribute('draggable', 'false'); // a draggable row would take the caret's drags as its own
+  el.contentEditable = 'plaintext-only'; el.spellcheck = false; el.focus();
+  getSelection().selectAllChildren(el);
+  const done = (keep) => {
+    el.removeEventListener('keydown', key); el.removeEventListener('blur', blur);
+    el.contentEditable = 'false'; row?.setAttribute('draggable', 'true');
+    const t = el.textContent.trim();
+    if (keep && t !== was) saveLabel(x, { title: t }); else { el.textContent = was; renderMachines(); }
+  };
+  const key = (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); done(true); } if (e.key === 'Escape') { e.preventDefault(); done(false); } };
+  const blur = () => done(true);
+  el.addEventListener('keydown', key); el.addEventListener('blur', blur);
+}
 addEventListener('pointercancel', () => { press = null; });
 /** A group takes a dragged row: Other, or Needs you, takes the group off it. */
 function dropOn(el, group) {
@@ -1423,6 +1446,7 @@ function renderMachines() {
   ]);
   everything = [...all, ...extra];
   if (dragKey) return; // a redraw would drop the row being dragged: the one after the drop catches up
+  if (document.activeElement?.matches?.('#machines .ttl[contenteditable="plaintext-only"]')) return; // nor under a rename
   // Only the account you clicked, when you clicked one.
   const only = onlySub(), list = only ? everything.filter((x) => x.sub === only.label) : everything;
   // One line per machine: how it is doing, and what runs on it.

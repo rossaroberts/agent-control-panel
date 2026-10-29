@@ -322,3 +322,18 @@ test('the agents a session has going: not finished and written to within the hou
   assert.deepEqual(agentsOf(null, sid), []);
   fs.rmSync(h, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------- processes no roster lists
+import { sortProcesses } from '../fleet/machine.mjs';
+
+test('no stray "claude process" rows: the desktop app\'s wrapper around a listed session, and a warm spare, are not agents', () => {
+  const p = (pid, ppid, args) => ({ pid, ppid, engine: 'claude', args, since: 0, cwd: '/', env: {}, open: [] });
+  const list = [
+    p(5798, 3316, ['/Applications/Claude.app/Contents/Helpers/disclaimer', '--pgroup', '--', 'claude', '--output-format', 'stream-json']),
+    p(5799, 5798, ['claude', '--output-format', 'stream-json']),
+    p(38333, 1, ['claude', '--bg-pty-host', '/tmp/cc-daemon-501/x/spare/y.pty.sock', '--', 'claude', '--resume', 'z']),
+    p(40000, 1, ['claude', '-p', 'what nobody listed']),
+  ];
+  const { others } = sortProcesses(list, new Set([5799]), new Set());
+  assert.deepEqual(others.map((o) => o.pid), [40000]);
+});
