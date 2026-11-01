@@ -486,6 +486,9 @@ export function watchHooks(on) {
 export function atPrompt(r, h) {
   return /permission/i.test(r?.waitingFor ?? '') || h?.e === 'PermissionRequest' || (h?.e === 'Notification' && h?.n === 'permission_prompt');
 }
+/** A roster row with a process that Claude Code still calls live: `stopped` or `failed` beside a pid is a respawned job
+ *  that has not spoken yet, closed to the list and to resume alike. */
+export const jobOpen = (r) => Boolean(r?.pid) && r.state !== 'stopped' && r.state !== 'failed';
 export function sessionState(r, t, h = null, now = Date.now()) {
   // Open means a process, or a background job Claude Code still lists as active (one waiting at a startup question, trust
   // or a project's MCP servers, has no process of its own yet). Any other job without one only keeps its record. One whose
@@ -1293,7 +1296,10 @@ export async function resume(a) {
   let rows = [];
   try { rows = JSON.parse(roster.stdout); } catch {}
   const row = rowOf(rows, a.sessionId) ?? (a.id ? rows.find((r) => r?.id === a.id) : null);
-  if (row?.pid) return { ok: true, id: row.id ?? null, running: true };
+  // Open means a process AND a record Claude Code still calls live. A job whose host died and was respawned by the daemon
+  // with no turn since keeps `state: stopped` beside a live idle pid: the list reads that as closed (sessionState), so
+  // calling it running here left it closed and unopenable (2026-11-01). It is respawned like any other closed job.
+  if (jobOpen(row)) return { ok: true, id: row.id ?? null, running: true };
   const id = /^[0-9a-f]{8}$/.test(row?.id ?? '') ? row.id : /^[0-9a-f]{8}$/.test(a?.id ?? '') ? a.id : null;
   if (id && row?.kind === 'background') {
     const r = await run(bin('claude'), ['respawn', id], { env: profileEnv(p), timeout: 30_000 });

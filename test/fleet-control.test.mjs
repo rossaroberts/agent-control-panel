@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { atPrompt, jobFresh, sessionState } from '../fleet/machine.mjs';
+import { atPrompt, jobFresh, jobOpen, sessionState } from '../fleet/machine.mjs';
 import { easeMs } from '../fleet/fleet.mjs';
 
 test('a permission prompt: the roster says so, or the last hook event was the request itself', () => {
@@ -53,4 +53,18 @@ test('an overloaded machine is read less often: every 30 s past twice its cores,
   assert.equal(easeMs(2.1), 30_000);
   assert.equal(easeMs(34.3 / 8), 60_000, 'redbat at load 34 on 8 cores');
   assert.equal(easeMs(NaN), 0);
+});
+
+test('a job with a process but a record that says stopped is closed, and continue respawns it rather than calling it running', () => {
+  // 2026-11-01: a host died under load, the daemon respawned it, and the record stayed `stopped` beside the new idle pid.
+  // The list read it closed; resume saw the pid and answered "running" without doing anything: closed and unopenable.
+  const NOW = Date.parse('2026-11-01T10:54:00Z');
+  const row = { kind: 'background', id: 'e0d17ae7', pid: 86137, status: 'idle', state: 'stopped' };
+  assert.deepEqual(sessionState(row, null, null, NOW), { state: 'closed', live: false });
+  assert.equal(jobOpen(row), false, 'the same answer resume must give: not running, so respawn');
+  assert.equal(jobOpen({ ...row, state: 'failed' }), false);
+  assert.equal(jobOpen({ ...row, state: 'working' }), true);
+  assert.equal(jobOpen({ ...row, state: 'blocked', status: 'idle' }), true, 'idle with no prompt yet is open');
+  assert.equal(jobOpen({ ...row, pid: undefined, state: 'working' }), false, 'no process is not open, whatever the record says');
+  assert.equal(jobOpen(null), false);
 });
