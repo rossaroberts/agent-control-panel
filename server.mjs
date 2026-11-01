@@ -31,6 +31,7 @@ import { admit, takeBuild } from './web-orders.mjs';
 import { workerOf, markStarted, rolledBack, checkForUpdate, recordCheck, lastCheck } from './update.mjs';
 import { checkClone, updateClone, appFor } from './clone-update.mjs';
 import { createFleet } from './fleet/fleet.mjs';
+import { vapidKeys, pushStore } from './fleet/push.mjs';
 import { createTerms } from './fleet/term.mjs';
 import { accept as acceptWs, refuse as refuseWs } from './fleet/ws.mjs';
 import { createSatellite } from './fleet/satellite.mjs';
@@ -1837,6 +1838,10 @@ async function handle(req, res) {
     return send(res, 200, fs.readFileSync(new URL('./public/pair.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
   }
 
+  if (req.method === 'GET' && url.pathname === '/push.js') {
+    return send(res, 200, fs.readFileSync(new URL('./public/push.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
+  }
+
   if (req.method === 'GET' && url.pathname === '/world.js') {
     return send(res, 200, fs.readFileSync(new URL('./public/world.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
   }
@@ -1888,6 +1893,10 @@ async function handle(req, res) {
                       '/api/world/build': buildInWorld, '/api/world/probe': probeInWorld, '/api/world/probe-ready': probeReady,
                       '/api/world/found': foundGalaxies, '/api/history': history,
                       '/api/trust-terminal': openTrustTerminal, '/api/pair-url': () => ({ ok: true, url: `${PUBLIC ? `https://${PUBLIC}` : `http://127.0.0.1:${PORT}`}/?p=${pairCodes.mint()}`, public: PUBLIC, expiresInMs: pairCodes.ttlMs }),
+                      // Push: the page asks for the panel's VAPID public key, then hands over the subscription its browser made.
+                      '/api/push/key': () => ({ ok: true, publicKey: vapidKeys(path.dirname(PREFS)).publicKey, public: PUBLIC }),
+                      '/api/push/subscribe': (b) => pushStore(path.dirname(PREFS)).add(b?.subscription),
+                      '/api/push/unsubscribe': (b) => ({ ok: true, removed: pushStore(path.dirname(PREFS)).remove(String(b?.endpoint ?? '')) }),
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
                       '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),

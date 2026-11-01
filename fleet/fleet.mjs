@@ -19,6 +19,7 @@ import { collect, launch as launchHere, peek as peekHere, doc as docHere, send a
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
 import { publicHost } from './public-host.mjs';
+import { pushAll, needsYou } from './push.mjs';
 
 const SCRIPT = new URL('./machine.mjs', import.meta.url);
 // A page gets the last read at once, however old (it carries when it was read, and the page asks again soon after an old
@@ -63,7 +64,9 @@ export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED 
 /** How long an overloaded machine's last read stands, by its load per core: 0 (read every time) under 2×, 30 s to 4×, 60 s over. */
 export const easeMs = (ratio) => (ratio > 4 ? 60_000 : ratio > 2 ? 30_000 : 0);
 
-export function createFleet({ dir, quiet = () => {} }) {
+// `notifier` replaces what notify() calls out to (tests only): the push sender, the payload builder, osascript, the platform.
+export function createFleet({ dir, quiet = () => {}, notifier = {} }) {
+  const { push = pushAll, build = needsYou, exec = execFile, platform = process.platform } = notifier;
   const file = path.join(dir, 'fleet.json');
   const titlesFile = path.join(dir, 'fleet-titles.json');
   // A kept file is a JSON object or it is nothing: one holding `null` or a list would make every read throw.
@@ -387,17 +390,26 @@ export function createFleet({ dir, quiet = () => {} }) {
   }
   /** Pages hear when something changed (server.mjs passes it on over their sockets). */
   function onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
-  // A Mac notification when a session comes to need you: once per session a minute at most; "notify": false in fleet.json
-  // turns them off.
+  // A notification when a session comes to need you: on this Mac, and on every phone that asked for push (fleet/push.mjs).
+  // Once per session a minute at most; "notify": false in fleet.json turns both off.
   const notified = new Map();
   function notify(machine, x) {
     let off = false;
     try { off = JSON.parse(fs.readFileSync(file, 'utf8')).notify === false; } catch {}
     const k = `${machine}:${x.sessionId ?? x.id}`;
-    if (off || process.platform !== 'darwin' || Date.now() - (notified.get(k) ?? 0) < 60_000) return;
+    if (off || Date.now() - (notified.get(k) ?? 0) < 60_000) return;
+    const mac = platform === 'darwin', pub = publicHost(file);
+    if (!mac && !pub) return;
     notified.set(k, Date.now());
+    // The phone is its own failure domain: building or sending the push can throw (a lone surrogate in a title breaks the link
+    // encoding), and that must neither skip the Mac notification nor abort looked()'s loop over the other sessions.
+    if (pub) {
+      try { Promise.resolve(push({ dir, payload: build(machine, x), subject: `https://${pub}` })).catch((e) => console.error('fleet: push failed:', e?.message ?? e)); }
+      catch (e) { console.error('fleet: push failed:', e?.message ?? e); }
+    }
+    if (!mac) return;
     const what = clean(typeof x.waitingFor === 'string' ? x.waitingFor : x.doing ?? 'It waits for you', 160) || 'It waits for you';
-    execFile('osascript', ['-e', 'on run argv', '-e', 'display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv)', '-e', 'end run',
+    exec('osascript', ['-e', 'on run argv', '-e', 'display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv)', '-e', 'end run',
       what, 'Fleet · needs you', clean(`${x.title ?? x.name ?? 'A session'} · ${machine}`, 120)], { timeout: 5000 }, () => {});
   }
 
@@ -671,5 +683,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, doc, send, close, archive, archiveAll, hide: hideRow, resume, revive, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, profileDefaults, flush };
+  return { snapshot, launch, peek, doc, send, close, archive, archiveAll, hide: hideRow, resume, revive, label, adopt, fork, interject, config, codexBusy, notify, onChange, tokenCounts, profileDefaults, flush };
 }

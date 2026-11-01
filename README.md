@@ -172,6 +172,9 @@ address in Safari and use Share, Add to Home Screen.
   Because a Host with a port is refused, `tailscale serve` on a port other than 443 is not supported.
 - The pairing cookie is `Secure` when the request carries `X-Forwarded-Proto: https` (what Tailscale Serve adds) or arrives with the
   public Host; that flag depends on one of those two.
+- Push for "needs you" (the **Notify me** button, installed app only) goes through the phone vendor's push service (Apple, Google,
+  Mozilla or Microsoft). The VAPID `sub` sends this Mac's public host name to that service, and the lock-screen text mirrors the
+  Mac notification, so it can carry a command line a session is waiting on. `"notify": false` in `fleet.json` turns off both.
 - When the tailnet is up but the panel is down, Tailscale answers 502 with its own error page. The offline page appears only when the
   phone cannot reach the Mac at all (no tailnet), because the service worker sees a failed fetch, not an HTTP error.
 

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import net from 'node:net';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
+import crypto from 'node:crypto';
 
 const SERVER = new URL('../server.mjs', import.meta.url).pathname;
 const freePort = () => new Promise((r) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => r(port)); }); });
@@ -273,4 +274,36 @@ test('/sw.js carries a cache name made from the offline page, with no placeholde
   const body = await fetch(`http://127.0.0.1:${port}/sw.js`).then((r) => r.text());
   assert.match(body, /'fleet-offline-[0-9a-f]{12}'/);
   assert.doesNotMatch(body, /__OFFLINE_HASH__/);
+});
+
+test('/api/push/*: the VAPID key, subscribe and unsubscribe, for a paired page only; a bad subscription is refused; push.js is served', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const call = (route, body, headers) => fetch(`${p.base}${route}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: p.base, cookie: `acp_k=${p.key}`, 'x-acp-token': p.token, ...headers }, body: JSON.stringify(body ?? {}) });
+  for (const route of ['/api/push/key', '/api/push/subscribe', '/api/push/unsubscribe']) {
+    assert.equal((await call(route, {}, { 'x-acp-token': 'nope' })).status, 403, `${route} wants the page's token`);
+    assert.equal((await call(route, {}, { cookie: '' })).status, 403, `${route} wants the cookie`);
+  }
+  const key = await (await call('/api/push/key')).json();
+  assert.equal(key.ok, true);
+  assert.equal(Buffer.from(key.publicKey, 'base64url').length, 65);
+  assert.equal((await (await call('/api/push/key')).json()).publicKey, key.publicKey, 'the same key every time');
+  assert.equal(fs.statSync(path.join(prefs, 'push-vapid.json')).mode & 0o777, 0o600);
+
+  const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys();
+  const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') } };
+  const bad = await call('/api/push/subscribe', { subscription: { ...subscription, endpoint: 'http://127.0.0.1:9/x' } });
+  assert.equal(bad.status, 422);
+  assert.equal((await call('/api/push/subscribe', {})).status, 422);
+  assert.equal((await call('/api/push/subscribe', { subscription })).status, 200);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(prefs, 'push.json'), 'utf8')).map((x) => x.endpoint), [subscription.endpoint]);
+  assert.equal(fs.statSync(path.join(prefs, 'push.json')).mode & 0o777, 0o600);
+  assert.deepEqual(await (await call('/api/push/unsubscribe', { endpoint: subscription.endpoint })).json(), { ok: true, removed: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(prefs, 'push.json'), 'utf8')), []);
+
+  const js = await fetch(`${p.base}/push.js`, { headers: { cookie: `acp_k=${p.key}` } });
+  assert.equal(js.status, 200);
+  assert.match(js.headers.get('content-type'), /^text\/javascript/);
 });

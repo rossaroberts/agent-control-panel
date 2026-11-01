@@ -96,3 +96,20 @@ test('a notification url that leaves this origin is replaced by the root', async
   }
   assert.equal(sw.opened.join(), '/,/,/');
 });
+
+test('a tap only takes over a window on the Fleet page, else opens a new one', async () => {
+  const sw = load();
+  const touched = [];
+  const win = (url) => ({ url, focus: async () => { touched.push(`focus ${url}`); }, navigate: async (u) => { touched.push(`navigate ${u}`); } });
+  sw.setClients([win('https://mac.example-tailnet.ts.net/world'), win('https://mac.example-tailnet.ts.net/board'), win('https://mac.example-tailnet.ts.net/satellite')]);
+  const click = waitEvent({ notification: { data: { url: '/#mac%3Aabc' }, close() {} } });
+  sw.handlers.notificationclick(click);
+  await click.waited;
+  assert.deepEqual(touched, [], 'World, Board and Satellite are left alone');
+  assert.equal(sw.opened.join(), '/#mac%3Aabc');
+  sw.setClients([win('https://mac.example-tailnet.ts.net/world'), win('https://mac.example-tailnet.ts.net/?x=1#old')]);
+  const click2 = waitEvent({ notification: { data: { url: '/#mac%3Aabc' }, close() {} } });
+  sw.handlers.notificationclick(click2);
+  await click2.waited;
+  assert.deepEqual(touched, ['focus https://mac.example-tailnet.ts.net/?x=1#old', 'navigate /#mac%3Aabc']);
+});
