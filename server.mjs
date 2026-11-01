@@ -21,6 +21,7 @@ import { findRemoved } from './versions.mjs';
 import { readChat } from './history.mjs';
 import { UNTRUSTED, trustKey, isTrusted, trustScript } from './trust.mjs';
 import { prefsPath, pairKey } from './cli.mjs';
+import { publicHost } from './fleet/public-host.mjs';
 import { createHub } from './hub.mjs';
 import { createHubSync } from './hub-sync.mjs';
 import { createHubOrders } from './hub-orders.mjs';
@@ -74,6 +75,10 @@ const SPAWN_TOOLS = new Set(['Agent', 'Task']);
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ORIGINS = new Set([...HOSTS].map((h) => `http://${h}`));
+// One more name when the Mac is reached through `tailscale serve` (fleet/public-host.mjs): Host is the bare name, Origin is https.
+// The listener is still the loopback; only these two allow-lists widen.
+const PUBLIC = publicHost(prefsPath());
+if (PUBLIC) { HOSTS.add(PUBLIC); ORIGINS.add(`https://${PUBLIC}`); }
 // Host and Origin stop a browser; they stop nothing that can open a loopback connection and set its own headers (a
 // container, another user of this Mac, a sandboxed app). So the token above is given only to a browser that is paired: one
 // that carries the key from a 0600 file beside prefs.json (cli.mjs pairKey) as an HttpOnly cookie, set once from the address
@@ -1759,7 +1764,7 @@ async function handle(req, res) {
   // Pairing: the key in the address once (see PAGES above) becomes the cookie, and the page is loaded again without it.
   if (req.method === 'GET' && PAGES.has(url.pathname) && url.searchParams.has('k')) {
     if (!same(url.searchParams.get('k'), KEY)) return send(res, 403, 'That is not this panel\'s key.', 'text/plain; charset=utf-8');
-    res.writeHead(303, { location: url.pathname, 'set-cookie': `acp_k=${KEY}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000`, 'cache-control': 'no-store' });
+    res.writeHead(303, { location: url.pathname, 'set-cookie': `acp_k=${KEY}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : ''}`, 'cache-control': 'no-store' });
     return res.end();
   }
   if (req.method === 'GET' && PAGES.has(url.pathname) && !paired(req)) return send(res, 200, pairPage(), 'text/html; charset=utf-8');

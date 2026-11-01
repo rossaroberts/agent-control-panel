@@ -18,6 +18,7 @@ import { collect, launch as launchHere, peek as peekHere, send as sendHere, clos
   interject as interjectHere, tokens as tokensHere, resume as resumeHere, revive as reviveHere, defaults as defaultsHere, watchHooks, sessionState } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
+import { publicHost } from './public-host.mjs';
 
 const SCRIPT = new URL('./machine.mjs', import.meta.url);
 // A page gets the last read at once, however old (it carries when it was read, and the page asks again soon after an old
@@ -91,7 +92,7 @@ export function createFleet({ dir, quiet = () => {} }) {
     // The account a profile's login really is, where its config file says another (`machine:profile` → email).
     const logins = c.logins && typeof c.logins === 'object'
       ? Object.fromEntries(Object.entries(c.logins).filter(([k, v]) => /^[\w .-]{1,40}:[\w.-]{1,40}$/.test(k) && /^[^\s@]+@[^\s@]+$/.test(String(v))).map(([k, v]) => [k, String(v)])) : {};
-    return { machines, names, self, epics, logins, file };
+    return { machines, names, self, epics, logins, public: publicHost(file), file };
   }
 
   // Each machine has one worker for the panel's life: through the machine's open connection, one `node` that has
@@ -472,7 +473,7 @@ export function createFleet({ dir, quiet = () => {} }) {
       const shown = reads.map((m) => ({ ...m, accounts: (m.accounts ?? []).map((a) => ({ ...a, sessions: (a.sessions ?? []).map(({ firstAsk, lastAsk, steps, ...x }) =>
         ({ ...x, said: typeof x.said === 'string' ? x.said.slice(0, 400) : x.said,
            running: x.running && { step: x.running.step, since: x.running.since, tool: x.running.tool, cmd: typeof x.running.cmd === 'string' ? x.running.cmd.slice(0, 300) : null } })) })) }));
-      const fresh = { ok: true, at: Date.now(), machines: shown, names, epics, groups: groupsMade(epics), configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~') };
+      const fresh = { ok: true, at: Date.now(), machines: shown, names, epics, groups: groupsMade(epics), configured: machines.map((m) => m.name), config: file.replace(os.homedir(), '~'), public: config().public };
       // A close, archive, message or launch that landed while this read ran makes it out of date: hand it back, keep none.
       if (gen === readGen) { last = fresh; looked(); }
       return fresh;

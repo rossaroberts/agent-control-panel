@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import net from 'node:net';
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 
 const SERVER = new URL('../server.mjs', import.meta.url).pathname;
 const freePort = () => new Promise((r) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => r(port)); }); });
@@ -56,4 +57,58 @@ test('an argument runs the CLI instead of the server', async () => {
   const r = await new Promise((resolve) => { const c = spawn(process.execPath, [SERVER, 'nonsense'], { env: process.env }); let out = ''; c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { out += d; }); c.on('exit', (code) => resolve({ code, out })); });
   assert.equal(r.code, 2);
   assert.match(r.out, /daemon install \[--program <path>\]\|remove\|status/);
+});
+
+test('a public host from fleet.json is accepted as Host and https Origin, nothing else is', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  // fetch will not let a script set Host, so these go over a raw http request.
+  const raw = (method, p, headers, body) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path: p, headers }, (res) => { let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve({ status: res.statusCode, body: b, headers: res.headers })); });
+    req.on('error', reject); req.end(body);
+  });
+  const get = (host) => raw('GET', '/', { host });
+  const page = await get('mac.example-tailnet.ts.net');
+  assert.equal(page.status, 200, 'the pair page renders on the public host');
+  assert.match(page.body, /not paired/);
+  assert.equal((await get('evil.example.com')).status, 421);
+  const post = (origin) => raw('POST', '/api/fleet', { host: 'mac.example-tailnet.ts.net', origin, 'content-type': 'application/json' }, '{}');
+  assert.equal((await post('http://mac.example-tailnet.ts.net')).status, 403, 'http origin on the public host is refused');
+  const r = await post('https://mac.example-tailnet.ts.net');
+  assert.equal(r.status, 403); assert.deepEqual(JSON.parse(r.body), { error: 'forbidden' });
+});
+
+test('with no public host configured, a tailnet name is still a wrong host', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const r = await new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: '/', headers: { host: 'mac.example-tailnet.ts.net' } }, (res) => { res.resume(); resolve(res.statusCode); }); q.on('error', reject); q.end(); });
+  assert.equal(r, 421);
+});
+
+test('ACP_PUBLIC_HOST overrides fleet.json, and an invalid value is ignored', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'a.example-tailnet.ts.net' }));
+  const s = start(port, prefs, { ACP_PUBLIC_HOST: 'b.example-tailnet.ts.net' }); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const status = (host) => new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: '/', headers: { host } }, (res) => { res.resume(); resolve(res.statusCode); }); q.on('error', reject); q.end(); });
+  assert.equal(await status('b.example-tailnet.ts.net'), 200);
+  assert.equal(await status('a.example-tailnet.ts.net'), 421);
+});
+
+test('pairing over https sets a Secure cookie; loopback over http does not', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const key = fs.readFileSync(path.join(prefs, 'key'), 'utf8').trim();
+  const pair = (headers) => new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: `/?k=${key}`, headers }, (res) => { res.resume(); resolve(res); }); q.on('error', reject); q.end(); });
+  const r = await pair({ host: 'mac.example-tailnet.ts.net', 'x-forwarded-proto': 'https' });
+  assert.equal(r.statusCode, 303);
+  assert.match(r.headers['set-cookie'][0], /; Secure/);
+  const r2 = await pair({});
+  assert.equal(r2.statusCode, 303);
+  assert.doesNotMatch(r2.headers['set-cookie'][0], /; Secure/, 'loopback over http keeps a non-Secure cookie');
 });
