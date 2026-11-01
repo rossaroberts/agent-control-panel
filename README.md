@@ -144,6 +144,29 @@ Installed with `./install.sh`, the panel also runs as a launchd service (`local.
 `launchctl kickstart -k gui/$UID/local.agent-panel` restarts it, and its log is
 `~/Library/Logs/Agent Panel/daemon-<port>.log`. `node server.mjs daemon install|remove|status` manages it.
 
+## On your phone
+
+Fleet runs as an installed Home Screen app over Tailscale. The server still listens on `127.0.0.1` only; Tailscale Serve
+terminates HTTPS on the Mac and proxies to it, and the panel learns one more name to answer to.
+
+```bash
+tailscale serve --bg 4747        # https://<this-mac>.<your-tailnet>.ts.net  ->  http://127.0.0.1:4747
+```
+
+Then put that name in `fleet.json` beside `prefs.json` (or set `ACP_PUBLIC_HOST`), restart the panel, and pair the phone once:
+
+```json
+{ "public": "<this-mac>.<your-tailnet>.ts.net" }
+```
+
+```bash
+node server.mjs pair             # prints the address and a QR; scan it with the phone's camera
+```
+
+The **Pair a phone** button in Fleet's top bar shows the same QR on screen. On the phone, open it in Safari and use Share, Add to Home
+Screen. The address carries the pairing key, which is the login for this panel: treat the code like a password. Only that one
+name is added to the Host and Origin allow-lists (the Origin must be `https://`); any other Host is still refused.
+
 ## Fleet
 
 `http://127.0.0.1:4747/` is Fleet: every agent on this Mac and on the machines you list, on one screen, so you can see
@@ -207,7 +230,7 @@ CLAUDE.md and AGENTS.md, the memory index (a link opens the note inside the tab,
 `fleet/context.mjs`: one entry per document. It is read-only. These files are written by agents that read emails and invoices, so
 `public/context-render.mjs` never renders raw HTML (it is shown as text), links only to http(s) and the notes, images not at all;
 and the page is served with a policy (`script-src 'self'` and its own nonce) so that nothing a document got into it would run.
-marked (MIT) is vendored in `public/vendor`.
+marked (MIT) is vendored in `public/vendor`; so is qrcode-generator (MIT), for the pairing QR.
 
 How a message gets in, for a session that isn't a terminal here. A background job gets it as yours, the way agent view's
 reply does (`claude --resume <id> -- <text>`); one still on an older Claude Code than the one installed says to type in its

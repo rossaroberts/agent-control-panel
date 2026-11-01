@@ -20,7 +20,7 @@ import { createWorld, claudeArgs, readAnswer } from './world.mjs';
 import { findRemoved } from './versions.mjs';
 import { readChat } from './history.mjs';
 import { UNTRUSTED, trustKey, isTrusted, trustScript } from './trust.mjs';
-import { prefsPath, pairKey } from './cli.mjs';
+import { prefsPath, pairKey, pairUrl } from './cli.mjs';
 import { publicHost } from './fleet/public-host.mjs';
 import { createHub } from './hub.mjs';
 import { createHubSync } from './hub-sync.mjs';
@@ -137,7 +137,7 @@ const satellite = createSatellite({ snapshot: () => fleet.snapshot(), testUrl: (
 const context = createContext({ home: HOME, fleet });
 const terms = createTerms({ config: () => fleet.config(), codexBusy: (machine, sessionId) => fleet.codexBusy(machine, sessionId) });
 // The terminal in Fleet's page: xterm.js, and marked (MIT, Context's markdown), kept here so the pages need no network for them.
-const VENDOR = { 'marked.umd.js': 'text/javascript; charset=utf-8', 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
+const VENDOR = { 'marked.umd.js': 'text/javascript; charset=utf-8', 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'qrcode.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
   'plex-mono-400.woff2': 'font/woff2', 'plex-mono-500.woff2': 'font/woff2', 'plex-mono-400-ext.woff2': 'font/woff2', 'plex-mono-500-ext.woff2': 'font/woff2' };
 // What makes Fleet installable on a phone. Served without the pairing cookie: a browser fetches the manifest, the icons and the
 // service worker without one (iOS does), and none of it carries the token or any session data.
@@ -1819,6 +1819,10 @@ async function handle(req, res) {
     return res.end(fs.readFileSync(new URL(`./public/icons/${f}`, import.meta.url)));
   }
 
+  if (req.method === 'GET' && url.pathname === '/pair.js') {
+    return send(res, 200, fs.readFileSync(new URL('./public/pair.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
+  }
+
   if (req.method === 'GET' && url.pathname === '/world.js') {
     return send(res, 200, fs.readFileSync(new URL('./public/world.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
   }
@@ -1869,7 +1873,7 @@ async function handle(req, res) {
                       '/api/answer-open': answerOpen, '/api/world/open': openWorld, '/api/world/buy': buyInWorld,
                       '/api/world/build': buildInWorld, '/api/world/probe': probeInWorld, '/api/world/probe-ready': probeReady,
                       '/api/world/found': foundGalaxies, '/api/history': history,
-                      '/api/trust-terminal': openTrustTerminal,
+                      '/api/trust-terminal': openTrustTerminal, '/api/pair-url': () => ({ ok: true, url: pairUrl({ publicHost: PUBLIC, port: PORT, key: KEY }), public: PUBLIC }),
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
                       '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),

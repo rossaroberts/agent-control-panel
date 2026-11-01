@@ -13,8 +13,10 @@ import { LABEL, plistPath, logPath, install, remove, status } from './daemon.mjs
 import { createHub } from './hub.mjs';
 import { workerOf, lastCheck, safeLine } from './update.mjs';
 import { describe, setOn } from './web-orders.mjs';
+import { publicHost } from './fleet/public-host.mjs';
+import { encode, qrLines } from './fleet/qr.mjs';
 
-const USAGE = 'usage: node server.mjs daemon install [--program <path>]|remove|status | login [--link <code>] | logout | status | orders [on|off] | open';
+const USAGE = 'usage: node server.mjs daemon install [--program <path>]|remove|status | login [--link <code>] | logout | status | orders [on|off] | open | pair';
 
 /** Where this panel keeps its preferences; ACP_PREFS gives a second panel a folder of its own. The hub file lives beside it. */
 export const prefsPath = () => process.env.ACP_PREFS || path.join(os.homedir(), 'Library', 'Application Support', 'Agent Panel', 'prefs.json');
@@ -29,8 +31,9 @@ export function pairKey(prefs = prefsPath()) {
   fs.writeFileSync(file, k + '\n', { mode: 0o600 });
   return k;
 }
-/** The address that pairs a browser with the panel on `port`. */
-export const pairUrl = (port, key = pairKey()) => `http://127.0.0.1:${port}/?k=${key}`;
+/** The address that pairs a browser with the panel: https on the public host (the Tailscale name) when there is one, else the
+ *  loopback address on `port`. */
+export const pairUrl = ({ publicHost: host, port, key = pairKey() }) => (host ? `https://${host}/?k=${key}` : `http://127.0.0.1:${port}/?k=${key}`);
 const webOrdersFile = () => path.join(path.dirname(prefsPath()), 'web-orders.json');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -123,9 +126,25 @@ export async function main(argv) {
   if (cmd === 'open' && argv.length === 1) {
     // Pairs the browser this opens in: the key goes once in the address, and stays as a cookie. The address is printed too,
     // for a browser on another profile or a machine that `open` cannot reach.
-    const url = pairUrl(Number(process.env.ACP_PORT ?? 4747));
+    const url = pairUrl({ publicHost: null, port: Number(process.env.ACP_PORT ?? 4747) });
     console.log(url);
     execFile('open', [url], () => {});
+    return 0;
+  }
+  if (cmd === 'pair' && argv.length === 1) {
+    // Pairs a phone: the same key as `open`, but on the public host, drawn as a QR to scan with the phone's camera.
+    const host = publicHost(prefsPath());
+    const port = Number(process.env.ACP_PORT ?? 4747);
+    if (!host) {
+      console.log(pairUrl({ publicHost: null, port }));
+      console.error('No public host is set, so there is nothing for a phone to scan. Put the Mac\'s Tailscale name in fleet.json beside prefs.json as\n'
+        + '  { "public": "<this-mac>.<your-tailnet>.ts.net" }\nrun `tailscale serve --bg ' + port + '`, restart the panel, and run this again.');
+      return 0;
+    }
+    const url = pairUrl({ publicHost: host, port });
+    const paint = process.stdout.isTTY ? (l) => `\x1b[30;47m${l}\x1b[0m` : (l) => l;
+    console.log(qrLines(encode(url)).map(paint).join('\n'));
+    console.log(`\n${url}\n\nScan it with the phone's camera, once. That key is the login for this panel: do not share the code or the address.`);
     return 0;
   }
   if (cmd !== 'daemon' || !['install', 'remove', 'status'].includes(sub)) { console.error(USAGE); return 2; }

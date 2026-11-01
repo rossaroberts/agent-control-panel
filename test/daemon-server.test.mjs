@@ -152,3 +152,23 @@ test('the Fleet page is installable: manifest, touch icon and viewport-fit in it
   assert.match(head, /viewport-fit=cover/);
   assert.match(html, /serviceWorker\.register\('\/sw\.js'\)/);
 });
+
+test('/api/pair-url hands the pairing address to a paired page only', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const key = fs.readFileSync(path.join(prefs, 'key'), 'utf8').trim();
+  const base = `http://127.0.0.1:${port}`;
+  const post = (headers) => fetch(`${base}/api/pair-url`, { method: 'POST', headers: { origin: base, 'content-type': 'application/json', ...headers }, body: '{}' });
+  assert.equal((await post({})).status, 403, 'no cookie, no token');
+  const html = await fetch(`${base}/`, { headers: { cookie: `acp_k=${key}` } }).then((r) => r.text());
+  const token = /const TOKEN = '([0-9a-f]+)'/.exec(html)?.[1];
+  assert.ok(token, 'the page carries its token');
+  const r = await post({ cookie: `acp_k=${key}`, 'x-acp-token': token });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(j.url, `https://mac.example-tailnet.ts.net/?k=${key}`);
+  assert.equal(j.public, 'mac.example-tailnet.ts.net');
+  assert.equal((await fetch(`${base}/vendor/qrcode.js`)).status, 200);
+});
