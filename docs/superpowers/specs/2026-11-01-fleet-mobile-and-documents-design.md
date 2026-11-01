@@ -88,7 +88,7 @@ desktop-only and is hidden on the phone.
 posts the subscription to `/api/push/subscribe`; the server sends a push (RFC 8291 `aes128gcm`,
 RFC 8292 VAPID, implemented on Node's `crypto`, no dependency) wherever it already sends the Mac
 notification for a session that comes to need you. Tapping the notification opens
-`/?s=<machine>:<sessionId>`, which the page reads to select that session.
+`/#<machine>:<sessionId>`, which the page already reads to select that session.
 
 ## The Documents pane
 

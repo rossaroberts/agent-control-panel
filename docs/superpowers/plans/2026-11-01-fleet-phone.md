@@ -98,7 +98,7 @@ test('pairing over https sets a Secure cookie', async (t) => {
 ### Task 3: Phone layout in `public/fleet.html`
 
 **Files:**
-- Modify: `public/fleet.html` CSS (`@media (max-width: 720px)` block, lines ~269-279, replaced) and JS (`select`, `deselect`, `renderPane`, `renderHead`, `termView`, `renderMachines`, `prefetch`, `wired` untouched)
+- Modify: `public/fleet.html` CSS (`@media (max-width: 720px)` block, lines ~269-279, replaced) and JS (`select`, `deselect`, `renderPane`, `renderHead`, `termView`, `renderMachines`, `prefetch`; `wired` line 772: `ws://` → `location.protocol === 'https:' ? 'wss' : 'ws'`). Under `body.phone` also wrap or hide `.tally`/`.vitals`, drop `.stage`, and `overflow-x: hidden` on `main` (a 390 px check clipped all three). Harness fallback when Playwright is absent: headless Chrome (`--headless=new --screenshot`) paired through `?k=`.
 - No `<head>` edits (Task 2 owns them; if run in parallel, rebase).
 
 **Interfaces:**
@@ -128,7 +128,7 @@ test('pairing over https sets a Secure cookie', async (t) => {
 
 **Files:**
 - Create: `fleet/push.mjs`, `test/push.test.mjs`
-- Modify: `server.mjs` (`/api/push/subscribe`, `/api/push/unsubscribe`, `/api/push/key`), `fleet/fleet.mjs` (~line 379 where the Mac notification fires), `public/sw.js` (already handles `push`), `public/fleet.html` (subscribe when `matchMedia('(display-mode: standalone)')` and permission granted; read `?s=` on load to `select` that key).
+- Modify: `server.mjs` (`/api/push/subscribe`, `/api/push/unsubscribe`, `/api/push/key`), `fleet/fleet.mjs` (~line 379 where the Mac notification fires), `public/sw.js` (already handles `push`), `public/fleet.html` (subscribe when `matchMedia('(display-mode: standalone)')` and permission granted; use the existing `#<machine>:<sessionId>` hash (`fromHash`, line ~1546) as the notification's URL; no new query parameter).
 
 **Interfaces:**
 - Produces in `fleet/push.mjs`: `export function vapidKeys(dir)` (reads or creates `push-vapid.json` with P-256 `publicKey` base64url and `privateKey` PKCS8), `export function encrypt(subscription, payloadBuffer)` → `{ body, headers }` per RFC 8291 `aes128gcm`, `export function vapidHeaders(audience, subject, keys)` → `{ Authorization: 'vapid t=…, k=…' }` per RFC 8292, `export async function send(subscription, payload, keys)` → `{ ok, status, gone: boolean }` (`gone` when 404/410). Subscriptions stored in `<prefs dir>/push.json` as `{ endpoint, keys: { p256dh, auth }, at }[]`.
