@@ -307,3 +307,141 @@ test('/api/push/*: the VAPID key, subscribe and unsubscribe, for a paired page o
   assert.equal(js.status, 200);
   assert.match(js.headers.get('content-type'), /^text\/javascript/);
 });
+
+// ---------------------------------------------------------------- held permission requests on the Fleet page
+
+// A home with one Claude profile whose `claude` (a stub, first on PATH and in ~/.local/bin where Fleet looks) lists one
+// background job that waits at a permission prompt: Fleet shows it as a row of this machine, the board as a session.
+function homeWithJob(sessionId) {
+  const h = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-home-job-'));
+  process.on('exit', () => { try { fs.rmSync(h, { recursive: true, force: true }); } catch {} });
+  fs.mkdirSync(path.join(h, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(h, '.claude', 'settings.json'), '{}');
+  fs.mkdirSync(path.join(h, '.local', 'bin'), { recursive: true });
+  const roster = JSON.stringify([{ id: 'a1b2c3d4', sessionId, name: 'fixture', kind: 'background', pid: 4242, state: 'blocked', status: 'waiting',
+    waitingFor: 'permission prompt', cwd: h, startedAt: Date.now() - 60_000 }]);
+  fs.writeFileSync(path.join(h, '.local', 'bin', 'claude'), `#!/bin/sh\ncase "$1" in\n  agents) cat <<'EOF_ROSTER'\n${roster}\nEOF_ROSTER\n  ;;\n  auth) echo '{"loggedIn":true,"email":"me@example.com"}' ;;\n  *) exit 1 ;;\nesac\n`, { mode: 0o755 });
+  return { home: h, env: { HOME: h, PATH: `${path.join(h, '.local', 'bin')}:${process.env.PATH}` } };
+}
+// A Fleet page's socket as a browser holds it: paired, with the page's token. `frames` are the texts the panel sends it.
+function fleetPage(port, p) {
+  return new Promise((resolve, reject) => {
+    const frames = []; let buf = Buffer.alloc(0);
+    const q = http.request({ host: '127.0.0.1', port, path: `/api/term/ws?t=${p.token}`, headers: { origin: p.base, cookie: `acp_k=${p.key}`, connection: 'Upgrade',
+      upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } });
+    q.on('upgrade', (res, socket, head) => {
+      const feed = (d) => {
+        buf = Buffer.concat([buf, d]);
+        while (buf.length >= 2) { // the panel's frames are not masked
+          let len = buf[1] & 0x7f, at = 2;
+          if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); at = 4; }
+          if (buf.length < at + len) return;
+          if ((buf[0] & 0x0f) === 1) frames.push(buf.subarray(at, at + len).toString());
+          buf = buf.subarray(at + len);
+        }
+      };
+      if (head.length) feed(head);
+      socket.on('data', feed); socket.on('error', () => {});
+      resolve({ frames, close: () => socket.destroy() });
+    });
+    q.on('response', (res) => { res.resume(); reject(new Error(`the socket was refused: ${res.statusCode}`)); });
+    q.on('error', reject);
+    q.end();
+  });
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// What Claude Code posts when a tool wants a yes. No Origin: a hook is not a browser. `settled` is the hook's answer, once it comes.
+function holdRequest(port, over = {}) {
+  const body = { hook_event_name: 'PermissionRequest', session_id: 's1-fixture', tool_name: 'Bash', tool_input: { command: 'ls -la' }, cwd: '/tmp',
+    permission_mode: 'default', permission_suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'ls:*' }], behavior: 'allow', destination: 'session' }], ...over };
+  const ctl = new AbortController();
+  const settled = fetch(`http://127.0.0.1:${port}/hook/permission`, { method: 'POST', body: JSON.stringify(body), signal: ctl.signal }).then(async (r) => ({ status: r.status, text: await r.text() }));
+  settled.catch(() => {});
+  return { settled, abort: () => ctl.abort(), answeredWithin: async (ms) => (await Promise.race([settled, sleep(ms).then(() => null)])) };
+}
+const apiCall = (p, route, body) => fetch(`${p.base}${route}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: p.base, cookie: `acp_k=${p.key}`, 'x-acp-token': p.token }, body: JSON.stringify(body ?? {}) });
+/** The row Fleet lists for a session on this machine. */
+async function fleetRow(p, sessionId) {
+  const snap = await (await apiCall(p, '/api/fleet')).json();
+  const m = snap.machines.find((x) => x.local);
+  return { snap, machine: m, row: (m?.accounts ?? []).flatMap((a) => a.sessions ?? []).find((x) => x.sessionId === sessionId) };
+}
+
+test('a Fleet page alone is enough to hold a permission request: no board page, and it is held, not answered empty', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  // Nobody watching: the hook is answered at once with nothing, and the terminal decides.
+  const idle = holdRequest(port);
+  assert.equal((await idle.answeredWithin(2000))?.text, '', 'with no page it is answered empty');
+  const page = await fleetPage(port, p); t.after(page.close);
+  const hook = holdRequest(port);
+  assert.equal(await hook.answeredWithin(400), null, 'with a Fleet page it is held');
+  const { row } = await fleetRow(p, 's1-fixture');
+  assert.ok(row?.pending?.id, 'the row carries it');
+  const r = await apiCall(p, '/api/decide', { id: row.pending.id, behavior: 'allow' });
+  assert.equal(r.status, 200, await r.clone().text());
+  const answer = await hook.answeredWithin(2000);
+  assert.deepEqual(JSON.parse(answer.text), { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } });
+});
+
+test('a local Fleet row carries its held request, without the plumbing of the held one', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const before = await fleetRow(p, 's1-fixture');
+  assert.equal(before.row?.sessionId, 's1-fixture', 'the fixture session is listed: ' + s.log());
+  assert.equal(before.row.pending, null, 'nothing is held yet');
+  const page = await fleetPage(port, p); t.after(page.close);
+  const hook = holdRequest(port, { transcript_path: path.join(job.home, '.claude', 'projects', '-x', 's1-fixture.jsonl') });
+  assert.equal(await hook.answeredWithin(300), null);
+  const { row } = await fleetRow(p, 's1-fixture');
+  assert.equal(row.pending.toolName, 'Bash');
+  assert.deepEqual(row.pending.toolInput, { command: 'ls -la' });
+  assert.equal(row.pending.open, false);
+  assert.equal(row.pending.permissionMode, 'default');
+  assert.equal(row.pending.suggestions.length, 1);
+  assert.ok(row.pending.createdAt > 0 && row.pending.deadline > row.pending.createdAt);
+  for (const k of ['res', 'timer', 'profileDir']) assert.ok(!(k in row.pending), `${k} stays on the server`);
+  assert.ok(!JSON.stringify(row).includes(job.home + '/.claude/projects'), 'no transcript path leaves the server');
+});
+
+test('the Fleet page hears {"op":"fleet"} once when a request is held and once when it settles', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const page = await fleetPage(port, p); t.after(page.close);
+  await fleetRow(p, 's1-fixture'); // Fleet's first read tells the page too (a session it had not listed): let that land first
+  await sleep(400);
+  const fleetPushes = () => page.frames.filter((f) => f === '{"op":"fleet"}').length;
+  const base = fleetPushes();
+  const hook = holdRequest(port);
+  assert.equal(await hook.answeredWithin(300), null);
+  assert.equal(fleetPushes() - base, 1, 'one push when it is held');
+  const { row } = await fleetRow(p, 's1-fixture');
+  await sleep(200);
+  const base2 = fleetPushes();
+  assert.equal((await apiCall(p, '/api/decide', { id: row.pending.id, behavior: 'deny', message: 'no' })).status, 200);
+  await hook.settled;
+  await sleep(200);
+  assert.equal(fleetPushes() - base2, 1, 'one push when it settles');
+});
+
+test('the last board page going does not hand a request back while a Fleet page is still there', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, { ...job.env, ACP_RECONNECT_MS: '300' }); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const page = await fleetPage(port, p); t.after(page.close);
+  const sse = new AbortController();
+  const res = await fetch(`${p.base}/events?t=${p.token}`, { headers: { cookie: `acp_k=${p.key}` }, signal: sse.signal });
+  assert.equal(res.status, 200);
+  const hook = holdRequest(port);
+  assert.equal(await hook.answeredWithin(300), null);
+  sse.abort();
+  await sleep(1000); // well past the 300 ms a board page is given to come back
+  assert.equal(await hook.answeredWithin(10), null, 'still held: someone is looking on Fleet');
+});

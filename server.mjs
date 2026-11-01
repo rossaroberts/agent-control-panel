@@ -31,6 +31,7 @@ import { admit, takeBuild } from './web-orders.mjs';
 import { workerOf, markStarted, rolledBack, checkForUpdate, recordCheck, lastCheck } from './update.mjs';
 import { checkClone, updateClone, appFor } from './clone-update.mjs';
 import { createFleet } from './fleet/fleet.mjs';
+import { heldIndex, withHeld } from './fleet/held.mjs';
 import { vapidKeys, pushStore } from './fleet/push.mjs';
 import { createTerms } from './fleet/term.mjs';
 import { accept as acceptWs, refuse as refuseWs } from './fleet/ws.mjs';
@@ -119,9 +120,11 @@ const stops = new Map();
 /** Sessions removed or hidden from the panel. One comes back only if it runs again (a resumed terminal session). */
 const dismissed = new Set();
 const clients = new Set();
+/** Fleet's pages, one WebSocket each (the same socket carries its terminals). A page that is open is a page that is looking. */
+const pages = new Set();
 /** Set while no page is connected but one may still come back (RECONNECT_MS). */
 let releaseTimer = null;
-const watched = () => clients.size > 0 || releaseTimer !== null;
+const watched = () => clients.size > 0 || pages.size > 0 || releaseTimer !== null;
 let armed = true;
 let rosterError = null;
 
@@ -447,7 +450,10 @@ function holdPermission(e, res) {
   pending.set(id, p);
   if (e.session_id && profileDir === configDir) session(e.session_id).lastEventAt = Date.now();
   broadcast({ type: 'new-request', id });
+  tellPages();
 }
+/** Fleet's pages read the list again at once: a held request opened or settled, so a card appears or goes without a poll. */
+function tellPages() { for (const ws of pages) try { ws.send('{"op":"fleet"}'); } catch {} }
 /** The held requests of the profile on the board. */
 const shownPending = () => [...pending.values()].filter((p) => p.profileDir === configDir);
 
@@ -462,6 +468,7 @@ function settle(id, decision, why) {
     p.res.end(decision ? JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } }) : '');
   }
   broadcast({ type: 'settled', id, why });
+  tellPages();
   return true;
 }
 
@@ -1862,7 +1869,7 @@ async function handle(req, res) {
       // the roster down. Not before: until then a held request still needs the fast polls to see a terminal answer.
       if (clients.size === 0 && releaseTimer === null) releaseTimer = setTimeout(() => {
         releaseTimer = null;
-        if (clients.size > 0) return;
+        if (clients.size > 0 || pages.size > 0) return; // a Fleet page is still looking
         for (const id of [...pending.keys()]) settle(id, null, 'panel closed');
         if (DAEMON) setRosterPace(false);
       }, RECONNECT_MS);
@@ -1899,7 +1906,7 @@ async function handle(req, res) {
                       '/api/push/unsubscribe': (b) => ({ ok: true, removed: pushStore(path.dirname(PREFS)).remove(String(b?.endpoint ?? '')) }),
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
-                      '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),
+                      '/api/update': updateApp, '/api/fleet': async () => withHeld(await fleet.snapshot(), heldIndex([...pending.values(), ...openRequests()])), '/api/fleet/launch': (b) => fleet.launch(b),
                       '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/doc': (b) => fleet.doc(b), '/api/fleet/send': (b) => fleet.send(b),
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
                       '/api/fleet/archive-all': (b) => fleet.archiveAll(b), '/api/fleet/hide': (b) => fleet.hide(b), '/api/fleet/resume': (b) => fleet.resume(b),
@@ -1993,8 +2000,7 @@ server.on('upgrade', (req, socket, head) => {
   ws.on('close', () => pages.delete(ws));
 });
 // Each page's socket also hears when Fleet's list changed between its reads (a hook event): it reads again at once.
-const pages = new Set();
-fleet.onChange(() => { for (const ws of pages) ws.send('{"op":"fleet"}'); });
+fleet.onChange(tellPages);
 
 // A stop (launchd's SIGTERM at a restart or an update, ^C in a terminal): every page is told first, so its terminals say the
 // panel is restarting rather than going quiet, what Fleet holds in memory is written, and the process goes within a second.
