@@ -163,9 +163,17 @@ Then put that name in `fleet.json` beside `prefs.json` (or set `ACP_PUBLIC_HOST`
 node server.mjs pair             # prints the address and a QR; scan it with the phone's camera
 ```
 
-The **Pair a phone** button in Fleet's top bar shows the same QR on screen. On the phone, open it in Safari and use Share, Add to Home
-Screen. The address carries the pairing key, which is the login for this panel: treat the code like a password. Only that one
-name is added to the Host and Origin allow-lists (the Origin must be `https://`); any other Host is still refused.
+The **Pair a phone** button in Fleet's top bar shows a QR on screen. That one carries a one-time code (good for one use and two
+minutes, never the key), and the address is not printed. `node server.mjs pair` reads the key file as `open` does, so its QR
+carries the key itself: it is the login for this panel, so treat that code and address like a password. On the phone, open the
+address in Safari and use Share, Add to Home Screen.
+
+- Only the one public name is added to the Host and Origin allow-lists (the Origin must be `https://`); any other Host is refused.
+  Because a Host with a port is refused, `tailscale serve` on a port other than 443 is not supported.
+- The pairing cookie is `Secure` when the request carries `X-Forwarded-Proto: https` (what Tailscale Serve adds) or arrives with the
+  public Host; that flag depends on one of those two.
+- When the tailnet is up but the panel is down, Tailscale answers 502 with its own error page. The offline page appears only when the
+  phone cannot reach the Mac at all (no tailnet), because the service worker sees a failed fetch, not an HTTP error.
 
 ## Fleet
 
