@@ -472,6 +472,32 @@ export function readDocs(p, sessionId, limit = 50) {
   }
   return [...byPath.values()].sort((a, b) => b.at - a.at).slice(0, limit);
 }
+const DOC_MAX = 1 << 20;
+const DOC_KINDS = { __proto__: null, md: 'md', markdown: 'md', html: 'html', htm: 'html' };
+/**
+ * One document a session wrote, for the Documents pane: `a = { profile, sessionId, path }` → `{ ok: true, kind, text, at, path }`
+ * or `{ ok: false, error }`. The only paths it serves are the ones that session's docs list holds, and each is checked on disk:
+ * absolute and already normal (no `..`), no symlink anywhere in it (the real path is the path), a regular file, 1 MiB at most.
+ * The hook trusts the `file_path` Claude Code reports, so the list alone is not enough. `deps.profiles` is a seam for the tests.
+ */
+export async function doc(a, deps = {}) {
+  const { profiles = claudeProfiles } = deps;
+  const p = profiles().find((x) => x.id === a?.profile);
+  if (!p) return { ok: false, error: 'There is no such account here.' };
+  const want = typeof a.path === 'string' ? a.path : '';
+  const entry = want ? readDocs(p, a.sessionId, Infinity).find((d) => d.path === want) : null;
+  if (!entry) return { ok: false, error: 'Not one of this session\'s documents.' };
+  try {
+    if (!path.isAbsolute(want) || path.resolve(want) !== want || fs.realpathSync(want) !== want) return { ok: false, error: 'That path leads somewhere else (a link, or ..): not served.' };
+    const st = fs.statSync(want);
+    if (!st.isFile()) return { ok: false, error: 'Not a file.' };
+    if (st.size > DOC_MAX) return { ok: false, error: 'Larger than 1 MiB.' };
+    const text = fs.readFileSync(want, 'utf8');
+    return { ok: true, kind: DOC_KINDS[path.extname(want).slice(1).toLowerCase()] ?? 'text', text, at: entry.at, path: want };
+  } catch (e) {
+    return { ok: false, error: e?.code === 'ENOENT' ? 'The file is gone.' : oneLine(String(e?.message ?? e), 160) };
+  }
+}
 /** Every profile's hook files, watched: `on({ sessionId, hook })` as one changes (a burst gives its last). */
 export function watchHooks(on) {
   const timers = new Map();
@@ -1572,7 +1598,7 @@ export function pickStep(rows, { pid, since, want, self = [], now = Date.now() }
 
 if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
-  const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
+  const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), doc: () => doc(args), send: () => send(args),
                  close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args), interject: () => interject(args),
                  tokens: () => tokens(args), resume: () => resume(args), revive: () => revive(args), defaults: () => defaults() }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };

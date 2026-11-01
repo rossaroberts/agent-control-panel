@@ -1849,7 +1849,7 @@ async function handle(req, res) {
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
                       '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),
-                      '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/send': (b) => fleet.send(b),
+                      '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/doc': (b) => fleet.doc(b), '/api/fleet/send': (b) => fleet.send(b),
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
                       '/api/fleet/archive-all': (b) => fleet.archiveAll(b), '/api/fleet/hide': (b) => fleet.hide(b), '/api/fleet/resume': (b) => fleet.resume(b),
                       '/api/fleet/label': (b) => fleet.label(b), '/api/fleet/adopt': (b) => fleet.adopt(b), '/api/fleet/fork': (b) => fleet.fork(b),

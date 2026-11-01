@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { collect, launch as launchHere, peek as peekHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere,
+import { collect, launch as launchHere, peek as peekHere, doc as docHere, send as sendHere, close as closeHere, archive as archiveHere, adopt as adoptHere, fork as forkHere,
   interject as interjectHere, tokens as tokensHere, resume as resumeHere, revive as reviveHere, defaults as defaultsHere, watchHooks, sessionState } from './machine.mjs';
 import { DENIED_TOOLS } from '../world.mjs';
 import { sshArgs, shq } from './ssh.mjs';
@@ -49,7 +49,7 @@ const clean = (v, n) => String(v ?? '').replace(/[<>\x00-\x08\x0b-\x1f\x7f]/g, '
 // then one JSON request a line ({ id, do, args }) and answers each with one line ({ id, r }), many at a time. A read asked
 // for while one runs shares it (a slow machine never piles reads up). Between answers it says when a session's hook file
 // changes ({ event }). On end of input it finishes what it started, then exits.
-export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','send','close','archive','adopt','fork','interject','tokens','resume','revive','defaults']);"
+export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED = new Set(['collect','launch','peek','doc','send','close','archive','adopt','fork','interject','tokens','resume','revive','defaults']);"
   + " const running = new Set(); let m = null, reading = null; for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity })) {"
   + " if (!m) { m = await import('data:text/javascript;base64,' + line); process.stdout.write('{\"ready\":true}\\n');"
   + " try { m.watchHooks?.((ev) => process.stdout.write(JSON.stringify({ event: ev }) + '\\n')); } catch {} continue; }"
@@ -158,7 +158,7 @@ export function createFleet({ dir, quiet = () => {} }) {
           w.pending.delete(id);
           // No answer in time: the next call goes to a new worker on a fresh channel; this one finishes what it has.
           w.stuck = true;
-          resolve({ ok: false, error: `${m.name} did not answer in ${ms / 1000}s.${todo === 'collect' || todo === 'peek' || todo === 'defaults' ? '' : ' It may or may not have happened: look before trying again.'}` });
+          resolve({ ok: false, error: `${m.name} did not answer in ${ms / 1000}s.${todo === 'collect' || todo === 'peek' || todo === 'doc' || todo === 'defaults' ? '' : ' It may or may not have happened: look before trying again.'}` });
         }, ms);
         w.pending.set(id, { resolve, timer });
         w.child.stdin.write(JSON.stringify({ id, do: todo, args }) + '\n');
@@ -529,6 +529,12 @@ export function createFleet({ dir, quiet = () => {} }) {
     if (!/^[\w.-]{1,40}$/.test(args.profile) || !SESSION.test(args.sessionId)) return { ok: false, error: 'Pick a session.' };
     return onMachine(String(body?.machine ?? ''), 'peek', args, peekHere);
   }
+  /** One document a session wrote, from the machine it lives on: only a path in that session's own docs list is served. */
+  function doc(body) {
+    const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? ''), path: typeof body?.path === 'string' ? body.path.slice(0, 4096) : '' };
+    if (!/^[\w.-]{1,40}$/.test(args.profile) || !SESSION.test(args.sessionId) || !args.path) return { ok: false, error: 'Pick a document.' };
+    return onMachine(String(body?.machine ?? ''), 'doc', args, docHere);
+  }
   /** A message to a running background job. */
   async function send(body) {
     const args = { profile: String(body?.profile ?? ''), sessionId: String(body?.sessionId ?? ''), text: String(body?.text ?? '') };
@@ -664,5 +670,5 @@ export function createFleet({ dir, quiet = () => {} }) {
     return { ok: true, done, kept };
   }
 
-  return { snapshot, launch, peek, send, close, archive, archiveAll, hide: hideRow, resume, revive, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, profileDefaults, flush };
+  return { snapshot, launch, peek, doc, send, close, archive, archiveAll, hide: hideRow, resume, revive, label, adopt, fork, interject, config, codexBusy, onChange, tokenCounts, profileDefaults, flush };
 }
