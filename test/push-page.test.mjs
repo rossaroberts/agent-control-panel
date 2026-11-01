@@ -9,16 +9,16 @@ const SRC = fs.readFileSync(new URL('../public/push.js', import.meta.url), 'utf8
 const KEY = Buffer.alloc(65, 7); KEY[0] = 4;
 
 function page({ standalone = true, pushManager = true, permission = 'default', answer = 'granted', subscribed = false, subscribeOk = true } = {}) {
-  const log = { prompts: 0, posts: [], subscribeArgs: null, unsubscribed: 0 };
+  const log = { prompts: 0, posts: [], subscribeArgs: null, unsubscribed: 0, order: [] };
   const make = (endpoint, keyBuf) => ({ endpoint, options: { applicationServerKey: keyBuf }, toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'p', auth: 'a' } }; }, async unsubscribe() { log.unsubscribed++; sub = null; } });
   let sub = subscribed ? make('https://push.example.com/x', new Uint8Array(KEY).buffer) : null;
   const reg = { pushManager: {
-    getSubscription: async () => sub,
+    getSubscription: async () => { log.order.push('getSubscription'); return sub; },
     subscribe: async (opts) => { log.subscribeArgs = opts; sub = make('https://push.example.com/new', new Uint8Array(opts.applicationServerKey).buffer); return sub; },
   } };
   const refresh = { id: 'refresh' }, inserted = [];
   const nav = { insertBefore: (el, before) => { inserted.push(el); assert.equal(before, refresh); } };
-  const Notification = { permission, requestPermission: async () => { log.prompts++; Notification.permission = answer; return answer; } };
+  const Notification = { permission, requestPermission: async () => { log.order.push('requestPermission'); log.prompts++; Notification.permission = answer; return answer; } };
   const ctx = {
     TOKEN: 'tok', Notification,
     matchMedia: (q) => ({ matches: standalone && q.includes('standalone') }),
@@ -87,4 +87,21 @@ test('already on: a press turns it off, here and on the panel; loading re-posts 
   assert.deepEqual(p.log.posts, [['/api/push/unsubscribe', { endpoint: 'https://push.example.com/x' }, 'tok']]);
   assert.equal(p.log.unsubscribed, 1);
   assert.equal(p.inserted[0].textContent, 'Notify me');
+});
+
+test('the first press raises the permission prompt synchronously, before any await, so the tap still counts', async () => {
+  const p = page(); await p.tick();
+  p.log.order.length = 0;
+  const done = p.inserted[0].onclick();             // not awaited yet
+  assert.equal(p.log.prompts, 1, 'requestPermission was called inside the handler\'s synchronous part');
+  assert.deepEqual(p.log.order, ['requestPermission'], 'nothing was read first');
+  await done;
+  assert.equal(p.inserted[0].textContent, 'Notify: on');
+});
+
+test('a press while the phone has already granted permission asks nothing', async () => {
+  const p = page({ permission: 'granted' }); await p.tick();
+  await p.inserted[0].onclick();
+  assert.equal(p.log.prompts, 0);
+  assert.equal(p.inserted[0].textContent, 'Notify: on');
 });

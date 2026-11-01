@@ -28,11 +28,9 @@
       : sub ? 'This phone is told when a session needs you. Press to stop.' : 'Tell this phone when a session needs you';
   }
 
-  /** Subscribe this browser and tell the panel. Called from the press itself, so the permission prompt is allowed. */
+  /** Subscribe this browser and tell the panel. Permission is already granted by the time this runs (the press asked for it). */
   async function turnOn() {
-    if (Notification.permission !== 'granted') { // first: the prompt must come straight from the press, before any await
-      if (await Notification.requestPermission() !== 'granted') return;
-    }
+    if (Notification.permission !== 'granted') return;
     const k = await post('/api/push/key', {});
     if (!k.ok) throw new Error(k.error || 'the panel gave no key');
     const key = bytes(k.publicKey);
@@ -50,14 +48,25 @@
     await sub.unsubscribe();
   }
 
-  btn.onclick = async () => {
-    if (busy) return;
-    busy = true; btn.disabled = true;
+  /** What a press does once the permission question (if there was one) is answered. */
+  async function press(asked) {
     let problem = null;
-    try { (await reg.pushManager.getSubscription()) && Notification.permission === 'granted' ? await turnOff() : await turnOn(); }
-    catch (e) { problem = e?.message || e; }
+    try {
+      if (asked) await asked;                       // the prompt, if this press raised it
+      if (!asked && Notification.permission === 'granted' && await reg.pushManager.getSubscription()) await turnOff();
+      else await turnOn();
+    } catch (e) { problem = e?.message || e; }
     busy = false;
     await paint(problem);
+  }
+
+  // The permission prompt needs the tap itself: WebKit may drop the gesture across an await, so requestPermission() is the
+  // first call in the handler, before anything is read or awaited. Only a press ever asks; loading the page never does.
+  btn.onclick = () => {
+    if (busy) return undefined;
+    const asked = Notification.permission === 'default' ? Notification.requestPermission() : null;
+    busy = true; btn.disabled = true;
+    return press(asked);
   };
 
   // Once the service worker is running: show the button, and quietly hand the panel the subscription again (a panel that lost

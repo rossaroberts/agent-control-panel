@@ -47,7 +47,8 @@ self.addEventListener('notificationclick', (event) => {
   const url = typeof raw === 'string' && raw.startsWith('/') && !raw.startsWith('//') ? raw : '/'; // this origin only
   event.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    const open = wins[0];
+    // Only a window on the Fleet page itself (the root): another page of the panel (World, Board) or a stray tab is not navigated away.
+    const open = wins.find((w) => { try { return new URL(w.url).pathname === '/'; } catch { return false; } });
     if (open) {
       await open.focus();
       try { await open.navigate(url); } catch {}

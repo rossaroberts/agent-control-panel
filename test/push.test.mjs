@@ -43,7 +43,20 @@ test('vapidKeys creates a P-256 pair once, 0600, and reads the same pair back', 
   assert.ok(sig.length > 0);
 });
 
-test('a damaged key file is replaced, not trusted', () => {
+test('a key file that cannot be READ is an error, never overwritten with a new pair', (t) => {
+  if (process.getuid?.() === 0) return t.skip('root reads anything');
+  const dir = tmp(), file = path.join(dir, 'push-vapid.json');
+  const real = vapidKeys(dir);
+  const before = fs.readFileSync(file, 'utf8');
+  fs.chmodSync(file, 0o000);
+  t.after(() => fs.chmodSync(file, 0o600));
+  assert.throws(() => vapidKeys(dir), (e) => e.code === 'EACCES');
+  fs.chmodSync(file, 0o600);
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the real private key is still there');
+  assert.equal(vapidKeys(dir).publicKey, real.publicKey);
+});
+
+test('a missing key file is made; a damaged one is replaced, not trusted', () => {
   const dir = tmp();
   fs.writeFileSync(path.join(dir, 'push-vapid.json'), '{"publicKey":"x","privateKey":"y"}');
   assert.equal(unb64(vapidKeys(dir).publicKey).length, 65);
@@ -126,7 +139,7 @@ test('send() to a service that is not there is a failure, not a throw, and not g
 test('the store keeps valid subscriptions once per endpoint, 0600, and drops by endpoint', () => {
   const dir = tmp(), store = pushStore(dir);
   assert.deepEqual(store.list(), []);
-  const a = phone('https://push.example.com/a'), b = phone('https://push.example.com/b');
+  const a = phone('https://web.push.apple.com/a'), b = phone('https://fcm.googleapis.com/fcm/send/b');
   assert.equal(store.add(a.sub).ok, true);
   assert.equal(store.add(a.sub).ok, true);
   assert.equal(store.add(b.sub).ok, true);
@@ -136,14 +149,34 @@ test('the store keeps valid subscriptions once per endpoint, 0600, and drops by 
   assert.equal(pushStore(dir).list().length, 2, 'it survives a restart');
   assert.equal(store.remove(a.sub.endpoint), true);
   assert.equal(store.remove(a.sub.endpoint), false);
-  assert.deepEqual(store.list().map((s) => s.endpoint), ['https://push.example.com/b']);
+  assert.deepEqual(store.list().map((s) => s.endpoint), ['https://fcm.googleapis.com/fcm/send/b']);
 });
 
-test('the store refuses what is not a browser subscription: http, loopback, odd keys, extra fields do not get through', () => {
-  const store = pushStore(tmp()), ok = phone().sub;
-  for (const bad of [null, {}, { ...ok, endpoint: 'http://push.example.com/a' }, { ...ok, endpoint: 'https://localhost/a' }, { ...ok, endpoint: 'https://127.0.0.1/a' },
-    { ...ok, endpoint: 'https://[::1]/a' }, { ...ok, endpoint: 'https://user:pw@push.example.com/a' }, { ...ok, endpoint: 'x'.repeat(3000) },
-    { ...ok, keys: { p256dh: 'AAAA', auth: ok.keys.auth } }, { ...ok, keys: { p256dh: ok.keys.p256dh, auth: 'AA' } }]) {
+test('the store takes the four browser push services and nothing else', () => {
+  for (const ok of ['https://web.push.apple.com/x', 'https://fcm.googleapis.com/fcm/send/x', 'https://android.googleapis.com/gcm/send/x',
+    'https://updates.push.services.mozilla.com/wpush/v2/x', 'https://wns2-par02p.notify.windows.com/w/?token=x', 'https://notify.windows.com/x']) {
+    assert.equal(pushStore(tmp()).add(phone(ok).sub).ok, true, ok);
+  }
+  const keys = phone().sub.keys;
+  for (const bad of ['http://web.push.apple.com/x', 'https://localhost/a', 'https://localhost./a', 'https://127.0.0.1/a', 'https://[::1]/a', 'https://127.0.0.1.nip.io/a',
+    'https://localtest.me/a', 'https://printer.local/a', 'https://printer.local./a', 'https://router.home.arpa/a', 'https://push.example.com/a',
+    'https://web.push.apple.com.evil.example/a', 'https://evilweb.push.apple.com/a', 'https://fcm.googleapis.com./a', 'https://googleapis.com/a', 'https://storage.googleapis.com/a',
+    'https://user:pw@web.push.apple.com/a', 'https://web.push.apple.com:8443/a', `https://web.push.apple.com/${'x'.repeat(3000)}`, 'not a url']) {
+    const store = pushStore(tmp());
+    const r = store.add({ endpoint: bad, keys });
+    assert.equal(r.ok, false, bad);
+    assert.ok(r.error, `${bad} is refused with a reason`);
+    assert.deepEqual(store.list(), [], bad);
+  }
+  assert.match(pushStore(tmp()).add({ endpoint: 'https://127.0.0.1.nip.io/a', keys }).error, /not a browser push service/);
+});
+
+test('the store refuses what is not a well-formed subscription: wrong key shapes, non-strings, extra fields do not get through', () => {
+  const store = pushStore(tmp()), ok = phone('https://web.push.apple.com/x').sub;
+  for (const bad of [null, {}, [], 'x', { ...ok, keys: { p256dh: 'AAAA', auth: ok.keys.auth } }, { ...ok, keys: { p256dh: ok.keys.p256dh, auth: 'AA' } },
+    { ...ok, keys: null }, { ...ok, keys: [ok.keys.p256dh, ok.keys.auth] },
+    { ...ok, endpoint: [ok.endpoint] }, { ...ok, endpoint: { toString: () => ok.endpoint } }, { ...ok, endpoint: 5 },
+    { ...ok, keys: { p256dh: [ok.keys.p256dh], auth: ok.keys.auth } }, { ...ok, keys: { p256dh: ok.keys.p256dh, auth: [ok.keys.auth] } }]) {
     assert.equal(store.add(bad).ok, false, JSON.stringify(bad)?.slice(0, 80));
   }
   assert.deepEqual(store.list(), []);
@@ -151,11 +184,18 @@ test('the store refuses what is not a browser subscription: http, loopback, odd 
   assert.equal(store.list()[0].evil, undefined);
 });
 
+test('an array endpoint cannot fill the store: each try is refused, nothing is written', () => {
+  const dir = tmp(), store = pushStore(dir), ok = phone('https://web.push.apple.com/x').sub;
+  for (let i = 0; i < 30; i++) assert.equal(store.add({ ...ok, endpoint: [`https://web.push.apple.com/${i}`] }).ok, false);
+  assert.deepEqual(store.list(), []);
+  assert.equal(fs.existsSync(path.join(dir, 'push.json')), false);
+});
+
 test('the store holds a few phones, not an unbounded list', () => {
   const store = pushStore(tmp());
-  for (let i = 0; i < 30; i++) store.add(phone(`https://push.example.com/${i}`).sub);
+  for (let i = 0; i < 30; i++) store.add(phone(`https://web.push.apple.com/${i}`).sub);
   assert.equal(store.list().length, 20);
-  assert.equal(store.list().at(-1).endpoint, 'https://push.example.com/29', 'the newest stay');
+  assert.equal(store.list().at(-1).endpoint, 'https://web.push.apple.com/29', 'the newest stay');
 });
 
 test('pushAll() sends to every subscription and drops the ones the service says are gone', async (t) => {

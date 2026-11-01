@@ -293,7 +293,7 @@ test('/api/push/*: the VAPID key, subscribe and unsubscribe, for a paired page o
   assert.equal(fs.statSync(path.join(prefs, 'push-vapid.json')).mode & 0o777, 0o600);
 
   const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys();
-  const subscription = { endpoint: 'https://push.example.com/send/abc', keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') } };
+  const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') } };
   const bad = await call('/api/push/subscribe', { subscription: { ...subscription, endpoint: 'http://127.0.0.1:9/x' } });
   assert.equal(bad.status, 422);
   assert.equal((await call('/api/push/subscribe', {})).status, 422);

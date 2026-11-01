@@ -26,16 +26,22 @@ function writePrivate(file, text) {
 }
 
 /** This panel's VAPID pair: { publicKey (65-byte uncompressed point, base64url), privateKey (PKCS8 DER, base64url) }.
- *  Made on first use; a file that does not hold a usable pair is replaced (every phone then subscribes again). */
+ *  Made on first use, when there is no file. A file that is there but does not hold a usable pair (not JSON, wrong curve, halves
+ *  that do not match) is replaced, and every phone then subscribes again. A file that cannot be READ (permissions, too many open
+ *  files) is an error, not a missing key: writing a new pair over it would destroy the real private key and orphan every phone. */
 export function vapidKeys(dir) {
   const file = path.join(dir, 'push-vapid.json');
-  try {
-    const k = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const priv = crypto.createPrivateKey({ key: unb64(k.privateKey), format: 'der', type: 'pkcs8' });
-    const pub = unb64(k.publicKey);
-    const derived = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' }).subarray(-65);
-    if (priv.asymmetricKeyDetails?.namedCurve === 'prime256v1' && pub.length === 65 && pub.equals(derived)) return { publicKey: k.publicKey, privateKey: k.privateKey };
-  } catch {}
+  let text = null;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+  if (text !== null) {
+    try {
+      const k = JSON.parse(text);
+      const priv = crypto.createPrivateKey({ key: unb64(k.privateKey), format: 'der', type: 'pkcs8' });
+      const pub = unb64(k.publicKey);
+      const derived = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' }).subarray(-65);
+      if (priv.asymmetricKeyDetails?.namedCurve === 'prime256v1' && pub.length === 65 && pub.equals(derived)) return { publicKey: k.publicKey, privateKey: k.privateKey };
+    } catch {}
+  }
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const k = { publicKey: b64u(publicKey.export({ format: 'der', type: 'spki' }).subarray(-65)), privateKey: b64u(privateKey.export({ format: 'der', type: 'pkcs8' })) };
   fs.mkdirSync(dir, { recursive: true });
@@ -95,19 +101,26 @@ export async function send(sub, payload, keys, { subject, ttl = 3600, timeoutMs 
 }
 
 const MAX_SUBS = 20;
+// The only hosts the panel will POST a push to: the browsers' own push services (Safari/iOS, Chrome/Android, Firefox, Edge).
+// A subscription comes from a page, and the panel makes the request, so an endpoint the page chose must never be able to point
+// the panel at anything else (the loopback, the LAN, a name that resolves there). A suffix matches the name itself and its
+// subdomains, exactly: `localhost.`, `127.0.0.1.nip.io` and the like are not on this list, so they are refused.
+const PUSH_HOSTS = ['web.push.apple.com', 'fcm.googleapis.com', 'android.googleapis.com', 'updates.push.services.mozilla.com', 'notify.windows.com'];
+const onList = (h) => PUSH_HOSTS.some((d) => h === d || h.endsWith(`.${d}`));
 /** The phones that asked, in `<dir>/push.json`: [{ endpoint, keys: { p256dh, auth }, at }], newest last, at most MAX_SUBS.
- *  What a page posts is checked here: an https endpoint on a real host (the panel POSTs to it, so a page cannot aim it at
- *  the loopback or the LAN by name or by address) and keys of the right shape. */
+ *  What a page posts is checked here: strings of the right shape, an https endpoint (default port, no credentials) on one of
+ *  PUSH_HOSTS, and keys of the right shape. */
 export function pushStore(dir) {
   const file = path.join(dir, 'push.json');
   const list = () => { try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(v) ? v : []; } catch { return []; } };
   const save = (v) => { fs.mkdirSync(dir, { recursive: true }); writePrivate(file, JSON.stringify(v)); };
   function check(sub) {
+    if (!sub || typeof sub !== 'object' || typeof sub.endpoint !== 'string' || !sub.keys || typeof sub.keys !== 'object'
+      || typeof sub.keys.p256dh !== 'string' || typeof sub.keys.auth !== 'string') return 'not a push subscription: endpoint and keys must be strings';
     let u;
-    try { u = new URL(sub?.endpoint); } catch { return 'no endpoint'; }
-    if (String(sub.endpoint).length > 2048 || u.protocol !== 'https:' || u.username || u.password) return 'endpoint must be a plain https address';
-    const h = u.hostname.toLowerCase();
-    if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || !h.includes('.') || /^[\d.]+$/.test(h) || h.includes(':')) return 'endpoint must be a public host name';
+    try { u = new URL(sub.endpoint); } catch { return 'no endpoint'; }
+    if (sub.endpoint.length > 2048 || u.protocol !== 'https:' || u.username || u.password || u.port) return 'endpoint must be a plain https address';
+    if (!onList(u.hostname.toLowerCase())) return `endpoint host ${u.hostname.slice(0, 80)} is not a browser push service (${PUSH_HOSTS.join(', ')})`;
     try { subscriberKeys(sub); } catch (e) { return e.message; }
     return null;
   }
@@ -149,5 +162,5 @@ const tidy = (v, n) => String(v ?? '').replace(/[<>\x00-\x08\x0b-\x1f\x7f]/g, ''
 /** What a phone shows when session `x` on `machine` comes to need you; tapping it opens `/#<machine>:<sessionId>` (the page's own deep link). */
 export function needsYou(machine, x) {
   const what = tidy(typeof x.waitingFor === 'string' ? x.waitingFor : x.doing ?? 'It waits for you', 160) || 'It waits for you';
-  return { title: 'Fleet · needs you', body: `${what}\n${tidy(`${x.title ?? x.name ?? 'A session'} · ${machine}`, 120)}`, data: { url: `/#${encodeURIComponent(`${machine}:${x.sessionId ?? x.id}`)}` } };
+  return { title: 'Fleet · needs you', body: `${what}\n${tidy(`${x.title ?? x.name ?? 'A session'} · ${machine}`, 120)}`, data: { url: `/#${encodeURIComponent(`${machine}:${x.sessionId ?? x.id}`.toWellFormed())}` } };
 }
