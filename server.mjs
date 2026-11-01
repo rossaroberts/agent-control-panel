@@ -21,6 +21,9 @@ import { findRemoved } from './versions.mjs';
 import { readChat } from './history.mjs';
 import { UNTRUSTED, trustKey, isTrusted, trustScript } from './trust.mjs';
 import { prefsPath, pairKey } from './cli.mjs';
+import { publicHost } from './fleet/public-host.mjs';
+import { createPairCodes } from './fleet/pair-codes.mjs';
+import { swSource } from './fleet/sw-source.mjs';
 import { createHub } from './hub.mjs';
 import { createHubSync } from './hub-sync.mjs';
 import { createHubOrders } from './hub-orders.mjs';
@@ -74,6 +77,15 @@ const SPAWN_TOOLS = new Set(['Agent', 'Task']);
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ORIGINS = new Set([...HOSTS].map((h) => `http://${h}`));
+// One more name when the Mac is reached through `tailscale serve` (fleet/public-host.mjs): Host is the bare name, Origin is https.
+// The listener is still the loopback; only these two allow-lists widen.
+const PUBLIC = publicHost(prefsPath());
+if (PUBLIC) { HOSTS.add(PUBLIC); ORIGINS.add(`https://${PUBLIC}`); }
+// What the page's "Pair a phone" hands out instead of the key: codes good for one use (fleet/pair-codes.mjs). ACP_PAIR_CODE_MS is a test hook.
+const pairCodes = createPairCodes({ ttlMs: Number(process.env.ACP_PAIR_CODE_MS) || 120_000 });
+// A cookie set over https must be Secure: behind Tailscale Serve that is the forwarded proto, or the public Host itself.
+const secureCookie = (req) => req.headers['x-forwarded-proto'] === 'https' || (PUBLIC !== null && req.headers.host === PUBLIC);
+const pairCookie = (req) => `acp_k=${KEY}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${secureCookie(req) ? '; Secure' : ''}`;
 // Host and Origin stop a browser; they stop nothing that can open a loopback connection and set its own headers (a
 // container, another user of this Mac, a sandboxed app). So the token above is given only to a browser that is paired: one
 // that carries the key from a 0600 file beside prefs.json (cli.mjs pairKey) as an HttpOnly cookie, set once from the address
@@ -132,8 +144,11 @@ const satellite = createSatellite({ snapshot: () => fleet.snapshot(), testUrl: (
 const context = createContext({ home: HOME, fleet });
 const terms = createTerms({ config: () => fleet.config(), codexBusy: (machine, sessionId) => fleet.codexBusy(machine, sessionId) });
 // The terminal in Fleet's page: xterm.js, and marked (MIT, Context's markdown), kept here so the pages need no network for them.
-const VENDOR = { 'marked.umd.js': 'text/javascript; charset=utf-8', 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
+const VENDOR = { 'marked.umd.js': 'text/javascript; charset=utf-8', 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'qrcode.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
   'plex-mono-400.woff2': 'font/woff2', 'plex-mono-500.woff2': 'font/woff2', 'plex-mono-400-ext.woff2': 'font/woff2', 'plex-mono-500-ext.woff2': 'font/woff2' };
+// What makes Fleet installable on a phone. Served without the pairing cookie: a browser fetches the manifest, the icons and the
+// service worker without one (iOS does), and none of it carries the token or any session data.
+const ICONS = { 'icon-192.png': 'image/png', 'icon-512.png': 'image/png', 'apple-touch-icon.png': 'image/png' };
 const HOOK_URL = `127.0.0.1:${PORT}/hook/`;
 function listProfiles() {
   let names = [];
@@ -1756,10 +1771,16 @@ async function handle(req, res) {
     return send(res, 404, '');
   }
 
-  // Pairing: the key in the address once (see PAGES above) becomes the cookie, and the page is loaded again without it.
+  // Pairing: the key in the address once (see PAGES above) becomes the cookie, and the page is loaded again without it. A phone
+  // is paired with `?p=<code>` instead: a one-time code the page minted (/api/pair-url), spent on first use.
   if (req.method === 'GET' && PAGES.has(url.pathname) && url.searchParams.has('k')) {
     if (!same(url.searchParams.get('k'), KEY)) return send(res, 403, 'That is not this panel\'s key.', 'text/plain; charset=utf-8');
-    res.writeHead(303, { location: url.pathname, 'set-cookie': `acp_k=${KEY}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000`, 'cache-control': 'no-store' });
+    res.writeHead(303, { location: url.pathname, 'set-cookie': pairCookie(req), 'cache-control': 'no-store' });
+    return res.end();
+  }
+  if (req.method === 'GET' && PAGES.has(url.pathname) && url.searchParams.has('p')) {
+    if (!pairCodes.consume(url.searchParams.get('p'))) return send(res, 403, 'That pairing code has expired: press Pair a phone again.', 'text/plain; charset=utf-8');
+    res.writeHead(303, { location: url.pathname, 'set-cookie': pairCookie(req), 'cache-control': 'no-store' });
     return res.end();
   }
   if (req.method === 'GET' && PAGES.has(url.pathname) && !paired(req)) return send(res, 200, pairPage(), 'text/html; charset=utf-8');
@@ -1793,6 +1814,27 @@ async function handle(req, res) {
     const f = url.pathname.slice(8);
     res.writeHead(200, { 'content-type': VENDOR[f], 'cache-control': 'max-age=86400' });
     return res.end(fs.readFileSync(new URL(`./public/vendor/${f}`, import.meta.url)));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/manifest.webmanifest') {
+    return send(res, 200, fs.readFileSync(new URL('./public/manifest.webmanifest', import.meta.url), 'utf8'), 'application/manifest+json; charset=utf-8', { 'cache-control': 'no-cache' });
+  }
+  // no-cache: a new worker is picked up on the next start, and Service-Worker-Allowed lets it control the whole origin.
+  if (req.method === 'GET' && url.pathname === '/sw.js') {
+    // The offline cache is named for the offline page's content (fleet/sw-source.mjs).
+    return send(res, 200, swSource(fileURLToPath(new URL('./public/', import.meta.url))), 'text/javascript; charset=utf-8', { 'cache-control': 'no-cache', 'service-worker-allowed': '/' });
+  }
+  if (req.method === 'GET' && url.pathname === '/offline.html') {
+    return send(res, 200, fs.readFileSync(new URL('./public/offline.html', import.meta.url), 'utf8'), 'text/html; charset=utf-8');
+  }
+  if (req.method === 'GET' && url.pathname.startsWith('/icons/') && Object.hasOwn(ICONS, url.pathname.slice(7))) {
+    const f = url.pathname.slice(7);
+    res.writeHead(200, { 'content-type': ICONS[f], 'cache-control': 'max-age=86400' });
+    return res.end(fs.readFileSync(new URL(`./public/icons/${f}`, import.meta.url)));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/pair.js') {
+    return send(res, 200, fs.readFileSync(new URL('./public/pair.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8');
   }
 
   if (req.method === 'GET' && url.pathname === '/world.js') {
@@ -1845,7 +1887,7 @@ async function handle(req, res) {
                       '/api/answer-open': answerOpen, '/api/world/open': openWorld, '/api/world/buy': buyInWorld,
                       '/api/world/build': buildInWorld, '/api/world/probe': probeInWorld, '/api/world/probe-ready': probeReady,
                       '/api/world/found': foundGalaxies, '/api/history': history,
-                      '/api/trust-terminal': openTrustTerminal,
+                      '/api/trust-terminal': openTrustTerminal, '/api/pair-url': () => ({ ok: true, url: `${PUBLIC ? `https://${PUBLIC}` : `http://127.0.0.1:${PORT}`}/?p=${pairCodes.mint()}`, public: PUBLIC, expiresInMs: pairCodes.ttlMs }),
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
                       '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),
