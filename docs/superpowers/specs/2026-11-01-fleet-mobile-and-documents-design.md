@@ -118,7 +118,7 @@ A **Source** toggle shows the raw text. A re-render on each push keeps scroll po
 100 ms.
 
 **Stop Artifacts.** A second hook script, `fleet/artifact-guard.sh`, installed for `PreToolUse`
-with matcher `Artifact` by `install-hooks.mjs`: read/list/open/quickstart actions pass; a publish
+with matcher `Artifact` by `install-hooks.mjs`: read/list/open/quickstart/pin/unpin/delete actions pass; a publish
 passes if `ACP_ALLOW_ARTIFACT=1` is in the environment or the `url` is a line in
 `~/.fleet-panel/artifact-allow.txt`; anything else is denied with the reason: *"Fleet: Artifacts
 are off here. Write the document as a file in the repo (research and designs → docs/superpowers/specs/,
@@ -126,7 +126,8 @@ outbound drafts → pm/outbox/, reports where the skill says) and give the user 
 Documents pane renders .md and .html a session writes. To publish anyway, the user adds the URL to
 ~/.fleet-panel/artifact-allow.txt or sets ACP_ALLOW_ARTIFACT=1."* The one standing user-activity
 page goes on the allow-list by hand. **(call)** Block, not ask: Claude Code has no documented "ask"
-for Artifacts.
+for Artifacts. A missing `jq` makes the guard pass (fail open): a hook must never get in a session's way.
+Installed 2026-11-01 on the Mac (three profiles) and redbat (three profiles), with the installer's backups.
 
 ## Left to the builder
 
