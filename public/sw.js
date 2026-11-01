@@ -5,15 +5,17 @@
 // It caches nothing from /api/ and not the Fleet page itself: each start of the panel mints a token the page carries, so a
 // stored page would be a dead one. Every other request (api, scripts, the socket) is left to the browser untouched.
 const OFFLINE = '/offline.html';
+// The server replaces the placeholder with a hash of offline.html, so editing that page gives phones a new cache.
+const CACHE = 'fleet-offline-__OFFLINE_HASH__';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting?.();
-  event.waitUntil(caches.open('fleet-offline-v1').then((c) => c.addAll([OFFLINE])));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll([OFFLINE])));
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(Promise.all([
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== 'fleet-offline-v1').map((k) => caches.delete(k)))),
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))),
     self.clients.claim(),
   ]));
 });
