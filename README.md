@@ -240,6 +240,14 @@ its limits into each session's log. A session's weekly share is the account's we
 tokens this week, weighted as usage is priced; transcripts are read once from the week's start and then only their new
 lines (`~/.fleet-panel/usage.json`).
 
+Hooks. `node fleet/install-hooks.mjs "$PWD/fleet/hook.sh" <profile dir>... [--dry-run] [--remove]` gives each profile
+`fleet/hook.sh`, which writes a session's state the moment it changes and keeps every `.md`/`.html`/`.txt`/`.csv`/`.json`/`.svg` it
+writes in `<profile>/fleet-state/<session>.docs.jsonl` (the Documents list; `POST /api/fleet/doc` serves only those paths, files
+of 1 MiB or less, links refused). It also installs `fleet/artifact-guard.sh` on `PreToolUse` with the matcher `Artifact`: a
+session cannot publish a claude.ai Artifact and is told to write the file in the repo instead. Reading, listing and opening
+existing ones pass, as does a publish when `ACP_ALLOW_ARTIFACT=1` is set or its `url` is a line of
+`~/.fleet-panel/artifact-allow.txt`. Run it with `--dry-run` first; a copy of `settings.json` is kept beside it.
+
 Other machines, names and epics go in `fleet.json` beside `prefs.json`:
 
 ```json

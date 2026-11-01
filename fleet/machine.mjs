@@ -455,6 +455,52 @@ export function hookState(h) {
 }
 const hookFile = (p, sessionId) => path.join(p.dir, 'fleet-state', `${sessionId}.json`);
 const readHook = (p, sessionId) => (/^[\w-]{8,80}$/.test(sessionId ?? '') ? readJson(hookFile(p, sessionId), 65536) : null);
+const docsFile = (p, sessionId) => path.join(p.dir, 'fleet-state', `${sessionId}.docs.jsonl`);
+/** The documents a session wrote (hook.sh keeps one line per write in <session>.docs.jsonl): `[{ path, tool, at }]`, newest
+ *  first, one per path (its latest write), at most `limit`. A line that does not parse (a write in flight) is skipped. */
+export function readDocs(p, sessionId, limit = 50) {
+  if (!/^[\w-]{8,80}$/.test(sessionId ?? '')) return [];
+  let text;
+  try { const f = docsFile(p, sessionId); if (fs.statSync(f).size > 1 << 20) return []; text = fs.readFileSync(f, 'utf8'); } catch { return []; }
+  const byPath = new Map();
+  for (const line of text.split('\n')) {
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    if (typeof d?.p !== 'string' || !d.p || !Number.isFinite(d.at)) continue;
+    const had = byPath.get(d.p);
+    if (!had || d.at >= had.at) byPath.set(d.p, { path: d.p, tool: typeof d.t === 'string' ? d.t : null, at: d.at });
+  }
+  return [...byPath.values()].sort((a, b) => b.at - a.at).slice(0, limit);
+}
+const DOC_MAX = 1 << 20;
+const DOC_KINDS = { __proto__: null, md: 'md', markdown: 'md', html: 'html', htm: 'html' };
+/**
+ * One document a session wrote, for the Documents pane: `a = { profile, sessionId, path }` → `{ ok: true, kind, text, at, path }`
+ * or `{ ok: false, error }`. The only paths it serves are the ones that session's docs list holds, and each is checked on disk:
+ * absolute and already normal (no `..`), no symlink in it (the real path is the path, bar macOS's /private alias of /tmp and the like), a regular file, 1 MiB at most.
+ * The hook trusts the `file_path` Claude Code reports, so the list alone is not enough. `deps.profiles` is a seam for the tests.
+ */
+export async function doc(a, deps = {}) {
+  const { profiles = claudeProfiles } = deps;
+  const p = profiles().find((x) => x.id === a?.profile);
+  if (!p) return { ok: false, error: 'There is no such account here.' };
+  const want = typeof a.path === 'string' ? a.path : '';
+  const entry = want ? readDocs(p, a.sessionId, Infinity).find((d) => d.path === want) : null;
+  if (!entry) return { ok: false, error: 'Not one of this session\'s documents.' };
+  try {
+    // The real path is the path, bar the OS's own alias: macOS keeps /tmp, /var and /etc under /private. A link in the leaf is refused either way.
+    const real = fs.realpathSync(want);
+    if (!path.isAbsolute(want) || path.resolve(want) !== want || fs.lstatSync(want).isSymbolicLink()
+      || !(real === want || (process.platform === 'darwin' && real === '/private' + want))) return { ok: false, error: 'That path leads somewhere else (a link, or ..): not served.' };
+    const st = fs.statSync(want);
+    if (!st.isFile()) return { ok: false, error: 'Not a file.' };
+    if (st.size > DOC_MAX) return { ok: false, error: 'Larger than 1 MiB.' };
+    const text = fs.readFileSync(want, 'utf8');
+    return { ok: true, kind: DOC_KINDS[path.extname(want).slice(1).toLowerCase()] ?? 'text', text, at: entry.at, path: want };
+  } catch (e) {
+    return { ok: false, error: e?.code === 'ENOENT' ? 'The file is gone.' : oneLine(String(e?.message ?? e), 160) };
+  }
+}
 /** Every profile's hook files, watched: `on({ sessionId, hook })` as one changes (a burst gives its last). */
 export function watchHooks(on) {
   const timers = new Map();
@@ -463,6 +509,16 @@ export function watchHooks(on) {
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
     try {
       fs.watch(dir, (_, name) => {
+        const docs = /^[\w-]{8,80}\.docs\.jsonl$/.test(name ?? '');
+        if (docs) { // a document written: the session's list goes with the event (the panel has no other way to read it from here)
+          clearTimeout(timers.get(name));
+          timers.set(name, setTimeout(() => {
+            timers.delete(name);
+            const sessionId = name.slice(0, -'.docs.jsonl'.length);
+            on({ profile: p.id, sessionId, hook: null, docs: true, list: readDocs(p, sessionId) });
+          }, 120));
+          return;
+        }
         if (!name || !/^[\w-]{8,80}\.json$/.test(name)) return;
         clearTimeout(timers.get(name));
         timers.set(name, setTimeout(() => {
@@ -590,7 +646,8 @@ async function claudeProfile(p, learned, usage) {
              agents: live && file ? agentsOf(file, r.sessionId) : [],
              branch: branchOf(t.workdir ?? r.cwd) ?? branchOf(r.cwd), workdir: t.workdir ? tilde(t.workdir) : null,
              // What decides its state again when a hook event comes in between reads (fleet.mjs).
-             rs: { state: r.state ?? null, status: r.status ?? null, active: Boolean(r.active) }, writtenAt: t.writtenAt ?? null, hookAt: h?.at ?? null };
+             rs: { state: r.state ?? null, status: r.status ?? null, active: Boolean(r.active) }, writtenAt: t.writtenAt ?? null, hookAt: h?.at ?? null,
+             docs: readDocs(p, r.sessionId) };
   });
   // The newest limit stop any session met: the account-wide cap when its status line never reported.
   const limitHit = sessions.map((s) => s.limitHit).filter((h) => h?.at).sort((a, b) => b.at - a.at)[0] ?? null;
@@ -1544,7 +1601,7 @@ export function pickStep(rows, { pid, since, want, self = [], now = Date.now() }
 
 if (process.env.FLEET_DO) {
   const args = process.env.FLEET_ARGS ? JSON.parse(Buffer.from(process.env.FLEET_ARGS, 'base64').toString('utf8')) : {};
-  const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), send: () => send(args),
+  const todo = { collect: () => collect(), launch: () => launch(args), peek: () => peek(args), doc: () => doc(args), send: () => send(args),
                  close: () => close(args), archive: () => archive(args), adopt: () => adopt(args), fork: () => fork(args), interject: () => interject(args),
                  tokens: () => tokens(args), resume: () => resume(args), revive: () => revive(args), defaults: () => defaults() }[process.env.FLEET_DO];
   const r = todo ? await todo() : { ok: false, error: 'unknown FLEET_DO' };

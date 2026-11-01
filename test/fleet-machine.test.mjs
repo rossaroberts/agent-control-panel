@@ -337,3 +337,78 @@ test('no stray "claude process" rows: the desktop app\'s wrapper around a listed
   const { others } = sortProcesses(list, new Set([5799]), new Set());
   assert.deepEqual(others.map((o) => o.pid), [40000]);
 });
+
+// ---------------------------------------------------------------- a session's documents
+import { readDocs, doc } from '../fleet/machine.mjs';
+
+const docsProfile = (lines) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-docs-'))); // real: /var and /tmp are links on a Mac
+  fs.mkdirSync(path.join(dir, 'fleet-state'));
+  const p = { id: 'work', dir };
+  if (lines) fs.writeFileSync(path.join(dir, 'fleet-state', 'sess-0001.docs.jsonl'), lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n'));
+  return p;
+};
+
+test('readDocs: newest first, one entry per path (its latest write), a broken last line skipped', () => {
+  const p = docsProfile([{ p: 'a.md', t: 'Write', at: 1 }, { p: 'a.md', t: 'Edit', at: 3 }, { p: 'b.html', t: 'Write', at: 2 }, { p: 'a.md', t: 'Edit', at: 2 }, '{"p":"c.md","t":"Wri']);
+  assert.deepEqual(readDocs(p, 'sess-0001'), [{ path: 'a.md', tool: 'Edit', at: 3 }, { path: 'b.html', tool: 'Write', at: 2 }]);
+  assert.deepEqual(readDocs(p, 'sess-0001', 1).map((d) => d.path), ['a.md'], 'the limit');
+  assert.deepEqual(readDocs(p, 'sess-9999'), [], 'a session with none');
+  assert.deepEqual(readDocs(p, '../x'), [], 'a session id that is not one');
+});
+
+test('readDocs: 500 writes to one file are one entry, the newest time', () => {
+  const p = docsProfile(Array.from({ length: 500 }, (_, i) => ({ p: '/x/a.md', t: 'Edit', at: 1000 + i })));
+  assert.deepEqual(readDocs(p, 'sess-0001'), [{ path: '/x/a.md', tool: 'Edit', at: 1499 }]);
+});
+
+test('doc: serves a listed file, refuses a link, a path not listed, a .. path and a file over 1 MiB', async () => {
+  const p = docsProfile();
+  const w = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-docs-w-')));
+  fs.writeFileSync(path.join(w, 'brief.md'), '# Brief\n');
+  fs.writeFileSync(path.join(w, 'mock.html'), '<p>hi</p>');
+  fs.writeFileSync(path.join(w, 'notes.txt'), 'plain');
+  fs.writeFileSync(path.join(w, 'other.md'), 'not listed');
+  fs.writeFileSync(path.join(w, 'big.md'), 'x'.repeat((1 << 20) + 1));
+  fs.writeFileSync(path.join(w, 'secret.txt'), 'secret');
+  fs.symlinkSync(path.join(w, 'secret.txt'), path.join(w, 'link.md'));
+  fs.mkdirSync(path.join(w, 'sub'));
+  const dotted = `${w}/sub/../brief.md`; // not path.join: that would tidy the .. away
+  const listed = ['brief.md', 'mock.html', 'notes.txt', 'big.md', 'link.md'].map((n, i) => ({ p: path.join(w, n), t: 'Write', at: 10 + i }));
+  fs.writeFileSync(path.join(p.dir, 'fleet-state', 'sess-0001.docs.jsonl'), [...listed, { p: dotted, t: 'Write', at: 99 }, { p: 'brief.md', t: 'Write', at: 98 }].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const deps = { profiles: () => [p] };
+  const ask = (file, over = {}) => doc({ profile: 'work', sessionId: 'sess-0001', path: file, ...over }, deps);
+  assert.deepEqual(await ask(path.join(w, 'brief.md')), { ok: true, kind: 'md', text: '# Brief\n', at: 10, path: path.join(w, 'brief.md') });
+  assert.equal((await ask(path.join(w, 'mock.html'))).kind, 'html');
+  assert.equal((await ask(path.join(w, 'notes.txt'))).kind, 'text');
+  let r = await ask(path.join(w, 'link.md'));
+  assert.equal(r.ok, false); assert.ok(!JSON.stringify(r).includes('secret'), 'nothing of the target');
+  r = await ask(path.join(w, 'other.md'));
+  assert.equal(r.ok, false); assert.match(r.error, /Not one of this session/);
+  r = await ask(path.join(w, 'big.md'));
+  assert.equal(r.ok, false); assert.match(r.error, /1 MiB/);
+  r = await ask(dotted);
+  assert.equal(r.ok, false, 'a .. path is refused even though it is listed');
+  r = await ask('brief.md');
+  assert.equal(r.ok, false, 'a relative path is refused even though it is listed');
+  assert.equal((await ask(path.join(w, 'brief.md'), { sessionId: 'sess-9999' })).ok, false, 'another session\'s list does not serve it');
+  assert.equal((await ask(path.join(w, 'brief.md'), { profile: 'nope' })).ok, false);
+  assert.equal((await ask(undefined)).ok, false);
+  fs.rmSync(path.join(w, 'brief.md'));
+  assert.match((await ask(path.join(w, 'brief.md'))).error, /gone/);
+});
+
+test('doc: a file under the real /tmp is served (macOS keeps /tmp under /private), a link there is still refused', async () => {
+  const p = docsProfile();
+  const stem = `/tmp/fleet-docs-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    fs.writeFileSync(`${stem}.md`, '# In tmp\n');
+    fs.writeFileSync(`${stem}-target.txt`, 'target');
+    fs.symlinkSync(`${stem}-target.txt`, `${stem}-link.md`);
+    fs.writeFileSync(path.join(p.dir, 'fleet-state', 'sess-0001.docs.jsonl'), [`${stem}.md`, `${stem}-link.md`].map((f, i) => JSON.stringify({ p: f, t: 'Write', at: 5 + i })).join('\n') + '\n');
+    const ask = (file) => doc({ profile: 'work', sessionId: 'sess-0001', path: file }, { profiles: () => [p] });
+    assert.deepEqual(await ask(`${stem}.md`), { ok: true, kind: 'md', text: '# In tmp\n', at: 5, path: `${stem}.md` });
+    const r = await ask(`${stem}-link.md`);
+    assert.equal(r.ok, false); assert.ok(!JSON.stringify(r).includes('target'));
+  } finally { for (const f of [`${stem}.md`, `${stem}-target.txt`, `${stem}-link.md`]) fs.rmSync(f, { force: true }); }
+});
