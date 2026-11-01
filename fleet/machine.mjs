@@ -455,6 +455,23 @@ export function hookState(h) {
 }
 const hookFile = (p, sessionId) => path.join(p.dir, 'fleet-state', `${sessionId}.json`);
 const readHook = (p, sessionId) => (/^[\w-]{8,80}$/.test(sessionId ?? '') ? readJson(hookFile(p, sessionId), 65536) : null);
+const docsFile = (p, sessionId) => path.join(p.dir, 'fleet-state', `${sessionId}.docs.jsonl`);
+/** The documents a session wrote (hook.sh keeps one line per write in <session>.docs.jsonl): `[{ path, tool, at }]`, newest
+ *  first, one per path (its latest write), at most `limit`. A line that does not parse (a write in flight) is skipped. */
+export function readDocs(p, sessionId, limit = 50) {
+  if (!/^[\w-]{8,80}$/.test(sessionId ?? '')) return [];
+  let text;
+  try { const f = docsFile(p, sessionId); if (fs.statSync(f).size > 1 << 20) return []; text = fs.readFileSync(f, 'utf8'); } catch { return []; }
+  const byPath = new Map();
+  for (const line of text.split('\n')) {
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    if (typeof d?.p !== 'string' || !d.p || !Number.isFinite(d.at)) continue;
+    const had = byPath.get(d.p);
+    if (!had || d.at >= had.at) byPath.set(d.p, { path: d.p, tool: typeof d.t === 'string' ? d.t : null, at: d.at });
+  }
+  return [...byPath.values()].sort((a, b) => b.at - a.at).slice(0, limit);
+}
 /** Every profile's hook files, watched: `on({ sessionId, hook })` as one changes (a burst gives its last). */
 export function watchHooks(on) {
   const timers = new Map();
@@ -463,6 +480,16 @@ export function watchHooks(on) {
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
     try {
       fs.watch(dir, (_, name) => {
+        const docs = /^[\w-]{8,80}\.docs\.jsonl$/.test(name ?? '');
+        if (docs) { // a document written: the session's list goes with the event (the panel has no other way to read it from here)
+          clearTimeout(timers.get(name));
+          timers.set(name, setTimeout(() => {
+            timers.delete(name);
+            const sessionId = name.slice(0, -'.docs.jsonl'.length);
+            on({ profile: p.id, sessionId, hook: null, docs: true, list: readDocs(p, sessionId) });
+          }, 120));
+          return;
+        }
         if (!name || !/^[\w-]{8,80}\.json$/.test(name)) return;
         clearTimeout(timers.get(name));
         timers.set(name, setTimeout(() => {
@@ -590,7 +617,8 @@ async function claudeProfile(p, learned, usage) {
              agents: live && file ? agentsOf(file, r.sessionId) : [],
              branch: branchOf(t.workdir ?? r.cwd) ?? branchOf(r.cwd), workdir: t.workdir ? tilde(t.workdir) : null,
              // What decides its state again when a hook event comes in between reads (fleet.mjs).
-             rs: { state: r.state ?? null, status: r.status ?? null, active: Boolean(r.active) }, writtenAt: t.writtenAt ?? null, hookAt: h?.at ?? null };
+             rs: { state: r.state ?? null, status: r.status ?? null, active: Boolean(r.active) }, writtenAt: t.writtenAt ?? null, hookAt: h?.at ?? null,
+             docs: readDocs(p, r.sessionId) };
   });
   // The newest limit stop any session met: the account-wide cap when its status line never reported.
   const limitHit = sessions.map((s) => s.limitHit).filter((h) => h?.at).sort((a, b) => b.at - a.at)[0] ?? null;

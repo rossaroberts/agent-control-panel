@@ -337,3 +337,27 @@ test('no stray "claude process" rows: the desktop app\'s wrapper around a listed
   const { others } = sortProcesses(list, new Set([5799]), new Set());
   assert.deepEqual(others.map((o) => o.pid), [40000]);
 });
+
+// ---------------------------------------------------------------- a session's documents
+import { readDocs } from '../fleet/machine.mjs';
+
+const docsProfile = (lines) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-docs-'))); // real: /var and /tmp are links on a Mac
+  fs.mkdirSync(path.join(dir, 'fleet-state'));
+  const p = { id: 'work', dir };
+  if (lines) fs.writeFileSync(path.join(dir, 'fleet-state', 'sess-0001.docs.jsonl'), lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n'));
+  return p;
+};
+
+test('readDocs: newest first, one entry per path (its latest write), a broken last line skipped', () => {
+  const p = docsProfile([{ p: 'a.md', t: 'Write', at: 1 }, { p: 'a.md', t: 'Edit', at: 3 }, { p: 'b.html', t: 'Write', at: 2 }, { p: 'a.md', t: 'Edit', at: 2 }, '{"p":"c.md","t":"Wri']);
+  assert.deepEqual(readDocs(p, 'sess-0001'), [{ path: 'a.md', tool: 'Edit', at: 3 }, { path: 'b.html', tool: 'Write', at: 2 }]);
+  assert.deepEqual(readDocs(p, 'sess-0001', 1).map((d) => d.path), ['a.md'], 'the limit');
+  assert.deepEqual(readDocs(p, 'sess-9999'), [], 'a session with none');
+  assert.deepEqual(readDocs(p, '../x'), [], 'a session id that is not one');
+});
+
+test('readDocs: 500 writes to one file are one entry, the newest time', () => {
+  const p = docsProfile(Array.from({ length: 500 }, (_, i) => ({ p: '/x/a.md', t: 'Edit', at: 1000 + i })));
+  assert.deepEqual(readDocs(p, 'sess-0001'), [{ path: '/x/a.md', tool: 'Edit', at: 1499 }]);
+});

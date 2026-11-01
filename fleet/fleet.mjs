@@ -341,13 +341,23 @@ export function createFleet({ dir, quiet = () => {} }) {
     Object.assign(x, { state, live, hookAt: hook.at });
     return true;
   }
-  function onHook(machine, { sessionId, hook }) {
+  function onHook(machine, { sessionId, hook, docs, list }) {
+    if (docs) { documentsChanged(machine, sessionId, list); return; } // a document written, not a state change
     const k = `${machine}:${sessionId}`;
     if (!((hooked.get(k)?.at ?? 0) > hook.at)) hooked.set(k, hook);
     if (hooked.size > 400) for (const [kk, h] of hooked) if (Date.now() - h.at > 120_000) hooked.delete(kk);
     const x = last?.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'claude' ? a.sessions ?? [] : [])).find((y) => y.sessionId === sessionId);
     if (!x || !x.live) { soon(); return; } // not listed yet (just started), or listed closed: a read says
     if (patch(x, hook)) looked();
+  }
+  /** A session wrote a document: its row carries the new list at once and the pages are told (the list comes with the event,
+   *  from the machine it lives on). A session the last read does not have waits for the next read. */
+  function documentsChanged(machine, sessionId, list) {
+    const x = last?.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'claude' ? a.sessions ?? [] : [])).find((y) => y.sessionId === sessionId);
+    if (!x) return;
+    if (Array.isArray(list)) x.docs = list;
+    clearTimeout(tellT);
+    tellT = setTimeout(() => { for (const fn of listeners) try { fn(); } catch {} }, 50);
   }
   /** A read soon, for a session the last read does not have: only while a page looks, never while the panel rests after a
    *  failed read, and at most one every few seconds (a `claude -p` run, or a session the roster has yet to list, fires hooks

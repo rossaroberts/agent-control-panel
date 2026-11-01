@@ -139,3 +139,41 @@ test('the hook keeps the event small: a tool\'s error text is not stored, and a 
     assert.deepEqual(fs.readdirSync(path.join(d, 'fleet-state')).filter((n) => n.startsWith('.')), []);
   } finally { fs.chmodSync(path.join(d, 'fleet-state'), 0o700); }
 });
+
+// ---------------------------------------------------------------------------------------------- documents capture
+
+test('the hook keeps a session\'s document writes: .md/.html etc. from the main conversation only, one line each', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-hook-docs-'));
+  const run = (o) => spawnSync('sh', [new URL('../fleet/hook.sh', import.meta.url).pathname], { input: JSON.stringify({ session_id: 's1', hook_event_name: 'PostToolUse', ...o }), encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: d } });
+  const file = path.join(d, 'fleet-state', 's1.docs.jsonl');
+  const lines = () => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+  let r = run({ tool_name: 'Write', tool_input: { file_path: '/tmp/x/brief.md', content: 'x' } });
+  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+  assert.equal(lines().length, 1);
+  assert.equal(lines()[0].p, '/tmp/x/brief.md'); assert.equal(lines()[0].t, 'Write'); assert.equal(typeof lines()[0].at, 'number');
+  run({ tool_name: 'Write', tool_input: { file_path: '/tmp/x/code.ts' } });
+  run({ tool_name: 'Write', tool_input: { file_path: '/tmp/x/other.md' }, agent_id: 'a1' });
+  run({ tool_name: 'Bash', tool_input: { command: 'echo > /tmp/x/b.md' } });
+  run({ tool_name: 'Write', tool_input: 'not an object' });
+  run({ hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: '/tmp/x/pre.md' } });
+  assert.equal(lines().length, 1, 'code, subagent writes, other tools, odd input and PreToolUse add nothing');
+  run({ tool_name: 'Edit', tool_input: { file_path: '/tmp/x/Page.HTML' } });
+  run({ tool_name: 'NotebookEdit', tool_input: { notebook_path: '/tmp/x/n.json' } });
+  assert.deepEqual(lines().map((l) => l.p), ['/tmp/x/brief.md', '/tmp/x/Page.HTML', '/tmp/x/n.json']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(d, 'fleet-state', 's1.json'), 'utf8')).e, 'PostToolUse', 'the state file is still written');
+  assert.deepEqual(fs.readdirSync(path.join(d, 'fleet-state')).sort(), ['s1.docs.jsonl', 's1.json']);
+});
+
+test('the docs file is trimmed to its last 200 lines once it passes 64 KB', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-hook-docs-'));
+  fs.mkdirSync(path.join(d, 'fleet-state'));
+  const file = path.join(d, 'fleet-state', 's1.docs.jsonl');
+  fs.writeFileSync(file, Array.from({ length: 1000 }, (_, i) => JSON.stringify({ p: `/tmp/${'x'.repeat(60)}/${i}.md`, t: 'Write', at: i })).join('\n') + '\n');
+  assert.ok(fs.statSync(file).size > 65536);
+  const r = spawnSync('sh', [new URL('../fleet/hook.sh', import.meta.url).pathname], { input: JSON.stringify({ session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: '/tmp/new.md' } }), encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: d } });
+  assert.equal(r.status, 0);
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  assert.equal(lines.length, 200);
+  assert.equal(JSON.parse(lines.at(-1)).p, '/tmp/new.md');
+  assert.deepEqual(fs.readdirSync(path.join(d, 'fleet-state')).filter((n) => n.startsWith('.')), []);
+});
