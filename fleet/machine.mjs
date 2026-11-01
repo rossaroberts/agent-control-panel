@@ -477,7 +477,7 @@ const DOC_KINDS = { __proto__: null, md: 'md', markdown: 'md', html: 'html', htm
 /**
  * One document a session wrote, for the Documents pane: `a = { profile, sessionId, path }` → `{ ok: true, kind, text, at, path }`
  * or `{ ok: false, error }`. The only paths it serves are the ones that session's docs list holds, and each is checked on disk:
- * absolute and already normal (no `..`), no symlink anywhere in it (the real path is the path), a regular file, 1 MiB at most.
+ * absolute and already normal (no `..`), no symlink in it (the real path is the path, bar macOS's /private alias of /tmp and the like), a regular file, 1 MiB at most.
  * The hook trusts the `file_path` Claude Code reports, so the list alone is not enough. `deps.profiles` is a seam for the tests.
  */
 export async function doc(a, deps = {}) {
@@ -488,7 +488,10 @@ export async function doc(a, deps = {}) {
   const entry = want ? readDocs(p, a.sessionId, Infinity).find((d) => d.path === want) : null;
   if (!entry) return { ok: false, error: 'Not one of this session\'s documents.' };
   try {
-    if (!path.isAbsolute(want) || path.resolve(want) !== want || fs.realpathSync(want) !== want) return { ok: false, error: 'That path leads somewhere else (a link, or ..): not served.' };
+    // The real path is the path, bar the OS's own alias: macOS keeps /tmp, /var and /etc under /private. A link in the leaf is refused either way.
+    const real = fs.realpathSync(want);
+    if (!path.isAbsolute(want) || path.resolve(want) !== want || fs.lstatSync(want).isSymbolicLink()
+      || !(real === want || (process.platform === 'darwin' && real === '/private' + want))) return { ok: false, error: 'That path leads somewhere else (a link, or ..): not served.' };
     const st = fs.statSync(want);
     if (!st.isFile()) return { ok: false, error: 'Not a file.' };
     if (st.size > DOC_MAX) return { ok: false, error: 'Larger than 1 MiB.' };

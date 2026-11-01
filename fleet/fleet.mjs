@@ -355,7 +355,7 @@ export function createFleet({ dir, quiet = () => {} }) {
   function documentsChanged(machine, sessionId, list) {
     const x = last?.machines.find((m) => m.name === machine)?.accounts?.flatMap((a) => (a.engine === 'claude' ? a.sessions ?? [] : [])).find((y) => y.sessionId === sessionId);
     if (!x) return;
-    if (Array.isArray(list)) x.docs = list;
+    if (Array.isArray(list)) x.docs = list.slice(0, 50);
     clearTimeout(tellT);
     tellT = setTimeout(() => { for (const fn of listeners) try { fn(); } catch {} }, 50);
   }

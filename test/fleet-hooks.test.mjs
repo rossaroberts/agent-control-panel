@@ -178,6 +178,20 @@ test('the docs file is trimmed to its last 200 lines once it passes 64 KB', () =
   assert.deepEqual(fs.readdirSync(path.join(d, 'fleet-state')).filter((n) => n.startsWith('.')), []);
 });
 
+test('the hook keeps an extension only when it is the last one (.md.bak is not a document), and a tab or newline in a path lands escaped', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-hook-docs-'));
+  const run = (file_path) => spawnSync('sh', [new URL('../fleet/hook.sh', import.meta.url).pathname], { input: JSON.stringify({ session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path } }), encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: d } });
+  const file = path.join(d, 'fleet-state', 's1.docs.jsonl');
+  assert.equal(run('/tmp/x/brief.md.bak').status, 0);
+  assert.equal(fs.existsSync(file), false, '.md.bak is not kept');
+  const odd = '/tmp/x/a\tb\nc.md';
+  assert.equal(run(odd).status, 0);
+  const raw = fs.readFileSync(file, 'utf8');
+  assert.equal(raw.split('\n').filter(Boolean).length, 1, 'one line: the newline is escaped, not a line break');
+  assert.ok(!raw.slice(0, -1).includes('\t'), 'and the tab is escaped');
+  assert.equal(JSON.parse(raw).p, odd);
+});
+
 // ---------------------------------------------------------------------------------------------- the Artifact guard
 
 const GUARD = new URL('../fleet/artifact-guard.sh', import.meta.url).pathname;

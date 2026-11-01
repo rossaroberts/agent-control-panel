@@ -397,3 +397,18 @@ test('doc: serves a listed file, refuses a link, a path not listed, a .. path an
   fs.rmSync(path.join(w, 'brief.md'));
   assert.match((await ask(path.join(w, 'brief.md'))).error, /gone/);
 });
+
+test('doc: a file under the real /tmp is served (macOS keeps /tmp under /private), a link there is still refused', async () => {
+  const p = docsProfile();
+  const stem = `/tmp/fleet-docs-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    fs.writeFileSync(`${stem}.md`, '# In tmp\n');
+    fs.writeFileSync(`${stem}-target.txt`, 'target');
+    fs.symlinkSync(`${stem}-target.txt`, `${stem}-link.md`);
+    fs.writeFileSync(path.join(p.dir, 'fleet-state', 'sess-0001.docs.jsonl'), [`${stem}.md`, `${stem}-link.md`].map((f, i) => JSON.stringify({ p: f, t: 'Write', at: 5 + i })).join('\n') + '\n');
+    const ask = (file) => doc({ profile: 'work', sessionId: 'sess-0001', path: file }, { profiles: () => [p] });
+    assert.deepEqual(await ask(`${stem}.md`), { ok: true, kind: 'md', text: '# In tmp\n', at: 5, path: `${stem}.md` });
+    const r = await ask(`${stem}-link.md`);
+    assert.equal(r.ok, false); assert.ok(!JSON.stringify(r).includes('target'));
+  } finally { for (const f of [`${stem}.md`, `${stem}-target.txt`, `${stem}-link.md`]) fs.rmSync(f, { force: true }); }
+});
