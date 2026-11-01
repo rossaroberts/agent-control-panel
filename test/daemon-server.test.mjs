@@ -112,3 +112,43 @@ test('pairing over https sets a Secure cookie; loopback over http does not', asy
   assert.equal(r2.statusCode, 303);
   assert.doesNotMatch(r2.headers['set-cookie'][0], /; Secure/, 'loopback over http keeps a non-Secure cookie');
 });
+
+test('the manifest, service worker, offline page and icons are served without pairing; nothing else is under /icons', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const get = (p) => fetch(`http://127.0.0.1:${port}${p}`);
+  const m = await get('/manifest.webmanifest');
+  assert.equal(m.status, 200);
+  assert.match(m.headers.get('content-type'), /^application\/manifest\+json/);
+  const manifest = await m.json();
+  assert.equal(manifest.display, 'standalone');
+  const w = await get('/sw.js');
+  assert.equal(w.status, 200);
+  assert.match(w.headers.get('content-type'), /^text\/javascript/);
+  assert.equal(w.headers.get('cache-control'), 'no-cache');
+  assert.equal(w.headers.get('service-worker-allowed'), '/');
+  assert.equal((await get('/offline.html')).status, 200);
+  for (const icon of manifest.icons) {
+    const r = await get(icon.src);
+    assert.equal(r.status, 200, icon.src);
+    assert.equal(r.headers.get('content-type'), 'image/png');
+    assert.deepEqual([...new Uint8Array(await r.arrayBuffer()).slice(1, 4)], [0x50, 0x4e, 0x47], 'a PNG');
+  }
+  assert.equal((await get('/icons/apple-touch-icon.png')).status, 200);
+  assert.equal((await get('/icons/nope.png')).status, 404);
+  assert.equal((await get('/icons/..%2Fserver.mjs')).status, 404);
+});
+
+test('the Fleet page is installable: manifest, touch icon and viewport-fit in its head', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const key = fs.readFileSync(path.join(prefs, 'key'), 'utf8').trim();
+  const html = await fetch(`http://127.0.0.1:${port}/`, { headers: { cookie: `acp_k=${key}` } }).then((r) => r.text());
+  const head = html.slice(0, html.indexOf('</head>'));
+  assert.match(head, /rel="manifest" href="\/manifest\.webmanifest"/);
+  assert.match(head, /rel="apple-touch-icon" href="\/icons\/apple-touch-icon\.png"/);
+  assert.match(head, /viewport-fit=cover/);
+  assert.match(html, /serviceWorker\.register\('\/sw\.js'\)/);
+});

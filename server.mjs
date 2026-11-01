@@ -139,6 +139,9 @@ const terms = createTerms({ config: () => fleet.config(), codexBusy: (machine, s
 // The terminal in Fleet's page: xterm.js, and marked (MIT, Context's markdown), kept here so the pages need no network for them.
 const VENDOR = { 'marked.umd.js': 'text/javascript; charset=utf-8', 'xterm.js': 'text/javascript; charset=utf-8', 'addon-fit.js': 'text/javascript; charset=utf-8', 'addon-webgl.js': 'text/javascript; charset=utf-8', 'xterm.css': 'text/css; charset=utf-8',
   'plex-mono-400.woff2': 'font/woff2', 'plex-mono-500.woff2': 'font/woff2', 'plex-mono-400-ext.woff2': 'font/woff2', 'plex-mono-500-ext.woff2': 'font/woff2' };
+// What makes Fleet installable on a phone. Served without the pairing cookie: a browser fetches the manifest, the icons and the
+// service worker without one (iOS does), and none of it carries the token or any session data.
+const ICONS = { 'icon-192.png': 'image/png', 'icon-512.png': 'image/png', 'apple-touch-icon.png': 'image/png' };
 const HOOK_URL = `127.0.0.1:${PORT}/hook/`;
 function listProfiles() {
   let names = [];
@@ -1798,6 +1801,22 @@ async function handle(req, res) {
     const f = url.pathname.slice(8);
     res.writeHead(200, { 'content-type': VENDOR[f], 'cache-control': 'max-age=86400' });
     return res.end(fs.readFileSync(new URL(`./public/vendor/${f}`, import.meta.url)));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/manifest.webmanifest') {
+    return send(res, 200, fs.readFileSync(new URL('./public/manifest.webmanifest', import.meta.url), 'utf8'), 'application/manifest+json; charset=utf-8', { 'cache-control': 'no-cache' });
+  }
+  // no-cache: a new worker is picked up on the next start, and Service-Worker-Allowed lets it control the whole origin.
+  if (req.method === 'GET' && url.pathname === '/sw.js') {
+    return send(res, 200, fs.readFileSync(new URL('./public/sw.js', import.meta.url), 'utf8'), 'text/javascript; charset=utf-8', { 'cache-control': 'no-cache', 'service-worker-allowed': '/' });
+  }
+  if (req.method === 'GET' && url.pathname === '/offline.html') {
+    return send(res, 200, fs.readFileSync(new URL('./public/offline.html', import.meta.url), 'utf8'), 'text/html; charset=utf-8');
+  }
+  if (req.method === 'GET' && url.pathname.startsWith('/icons/') && Object.hasOwn(ICONS, url.pathname.slice(7))) {
+    const f = url.pathname.slice(7);
+    res.writeHead(200, { 'content-type': ICONS[f], 'cache-control': 'max-age=86400' });
+    return res.end(fs.readFileSync(new URL(`./public/icons/${f}`, import.meta.url)));
   }
 
   if (req.method === 'GET' && url.pathname === '/world.js') {
