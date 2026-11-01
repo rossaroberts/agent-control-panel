@@ -276,16 +276,105 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 #p-tools:empty { display: none; }
 
 
+/* the phone: two screens that slide. The queues are the page; the session is the pane, full width, sliding in over them.
+   Everything that wants a pointer or a keyboard (groups, drag, rename, Satellite, Board, the fold rail) is left to the desktop.
+   `body.phone` is kept in step with this very query by the script (matchMedia), so the two never disagree. */
+.age, .last, #sum, #compose, .sheet-x, .p-back, .p-do { display: none; }
 @media (max-width: 720px) {
-  main { width: calc(100% - 32px); padding-top: 28px; }
-  .top { flex-wrap: wrap; gap: 4px 20px; }
-  .top .tabs { flex-wrap: wrap; gap: 4px 20px; }
-  :root { --pane: 100vw; }
-  body.has-pane main { display: none; }
-  body.has-pane.pane-min main { display: block; width: calc(100% - var(--rail) - 32px); margin-left: 16px; }
-  .line { width: 36px; }
-  .write textarea { font-size: 18px; }
-  #p-head, #p-body, #p-foot { padding-left: 18px; padding-right: 18px; }
+  :root { --safe-b: env(safe-area-inset-bottom, 0px); --safe-t: env(safe-area-inset-top, 0px); }
+  html { -webkit-text-size-adjust: 100%; }
+  body.phone { touch-action: manipulation; -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
+  body.phone.has-pane, body.phone.compose { overflow: hidden; }
+  body.phone main, body.phone.has-pane main, body.phone.has-pane.pane-min main { width: 100%; margin: 0; padding: 0 16px calc(32px + var(--safe-b)); overflow-x: hidden; display: block; }
+
+  /* the top bar: Fleet, then + and refresh as 44 px targets */
+  body.phone .top { position: sticky; top: 0; z-index: 3; margin: 0 -16px 8px; padding: calc(8px + var(--safe-t)) 16px 4px; gap: 0; background: var(--paper); }
+  body.phone .top .tabs { flex: 1; gap: 0; }
+  body.phone .top .tabs a { font-size: 20px; font-weight: 500; color: var(--ink); line-height: 44px; }
+  body.phone .top .tabs a:not([href="/"]), body.phone .top > a { display: none; }
+  body.phone .top button { width: 44px; height: 44px; justify-content: center; color: var(--grey); }
+  body.phone .top button svg.i, body.phone #compose svg.i { width: 20px; height: 20px; }
+  body.phone #compose { display: inline-flex; color: var(--blue); }
+  body.phone #sum { display: flex; }
+  body.phone .err { margin: 0 0 12px; font-size: 14px; }
+
+  /* the tally of the whole fleet sits in the bar; accounts and machines show only when something is wrong (at its limit, no answer) */
+  body.phone #sum { flex-wrap: wrap; justify-content: flex-end; gap: 0 10px; margin-right: 4px; font-size: 13px; white-space: normal; text-align: right; }
+  body.phone #sum .st.ready { display: none; }
+  body.phone .acct:not(:has(.cap)), body.phone .mline:not(:has(.vitals.hi)) { display: none; }
+  body.phone .acct, body.phone .mline { grid-template-columns: minmax(0, 1fr); margin: 0; padding: 0; min-height: 36px; align-items: center; border-radius: 0; }
+  body.phone .acct .room { display: flex; flex-wrap: wrap; gap: 0 12px; } body.phone .acct .tally, body.phone .mline .tally { display: none; }
+  body.phone .acct .room > :not(.cap) { display: none; }
+  body.phone .acct.on { background: none; }
+  body.phone .mline .vitals.hi { white-space: normal; }
+  body.phone .machines { margin-top: 4px; }
+  body.phone .only-bar { padding: 8px 0; }
+  body.phone .only-bar button { padding: 10px 0 10px 12px; }
+  body.phone .tally { flex-wrap: wrap; }
+
+  /* the queues */
+  body.phone .epic { margin-top: 24px; }
+  body.phone .epic header { margin: 0 0 2px; }
+  body.phone .epic header .tally { display: none; }
+  body.phone .epic h2 { font-size: 13px; color: var(--grey); }
+  body.phone .epic.urgent h2 { color: var(--orange); }
+  body.phone .none { color: var(--grey); font-size: 14px; margin: 24px 0 0; }
+  body.phone .fold-sec { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 56px; color: var(--grey); border-top: 1px solid var(--rule); }
+  body.phone .epic.fold { margin-top: 0; }
+  body.phone .fold-sec[aria-expanded="true"] { color: var(--ink); }
+  body.phone .s, body.phone .c { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "ttl st age" "last last last"; gap: 0 12px; align-items: baseline;
+    padding: 10px 16px; margin: 0 -16px; min-height: 56px; border-radius: 0; }
+  body.phone .s:hover, body.phone .c:hover { background: none; color: inherit; }
+  body.phone .s:active, body.phone .c:active { background: var(--tint); }
+  body.phone .s > .ttl, body.phone .c > .ttl { grid-area: ttl; font-size: 16px; line-height: 1.5; white-space: nowrap; color: var(--ink); }
+  body.phone .s > .st, body.phone .c > .st { grid-area: st; }
+  body.phone .s > .age, body.phone .c > .age { display: block; grid-area: age; font-size: 13px; color: var(--grey); text-align: right; min-width: 3ch; }
+  body.phone .s > .last, body.phone .c > .last { display: -webkit-box; grid-area: last; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+    font-size: 14px; line-height: 1.45; color: var(--grey); white-space: normal; overflow-wrap: anywhere; margin-top: 2px; }
+  body.phone .s > .last:empty, body.phone .c > .last:empty { display: none; }
+  body.phone .s > :is(.stage, .at, .who, .start, .eff, .ctx, .use, .what, .why), body.phone .c > :is(.stage, .at, .who, .start, .eff, .ctx, .use, .what, .why) { display: none; }
+
+  /* the prompt: a sheet that comes up over the queues from the + */
+  body.phone .write { position: fixed; inset: 0; z-index: 15; margin: 0; overflow-y: auto; background: var(--paper);
+    padding: calc(12px + var(--safe-t)) 16px calc(16px + max(var(--safe-b), var(--kb, 0px)));
+    transform: translateY(100%); visibility: hidden; transition: transform 180ms ease-out, visibility 0s linear 180ms; }
+  body.phone.compose .write { transform: none; visibility: visible; transition: transform 180ms ease-out, visibility 0s; }
+  body.phone .write textarea:focus-visible { outline: none; }
+  body.phone .sheet-x { display: inline-flex; align-items: center; min-height: 44px; color: var(--grey); }
+  body.phone .write textarea { font-size: 18px; min-height: 120px; margin-top: 8px; }
+  body.phone .how { gap: 0 20px; margin-top: 8px; }
+  body.phone .how select, body.phone .how input { font-size: 16px; min-height: 44px; border-bottom: 0; color: var(--grey); max-width: 100%; }
+  body.phone .how #name { display: none; }
+  body.phone .how #cwd { flex: 1 1 100%; border-bottom: 1px dotted var(--quiet); }
+  body.phone .how .fire { min-height: 44px; padding-left: 16px; font-size: 16px; }
+  body.phone .fired { font-size: 14px; }
+
+  /* the session: the pane, full width, sliding in over the queues in 180 ms */
+  body.phone #pane { inset: 0; width: 100%; border-left: 0; font-size: 15px; transform: translateX(100%); visibility: hidden;
+    transition: transform 180ms ease-out, visibility 0s linear 180ms; }
+  body.phone #pane[hidden] { display: flex; }
+  body.phone.has-pane #pane { transform: none; visibility: visible; transition: transform 180ms ease-out, visibility 0s; }
+  body.phone #p-grip, body.phone #p-rail, body.phone .p-fold, body.phone .p-x, body.phone .p-group, body.phone .p-acts .p-group { display: none; }
+  body.phone #p-head { padding: calc(4px + var(--safe-t)) 4px 6px 4px; }
+  body.phone .p-top { gap: 0; min-height: 44px; }
+  body.phone .p-top > * { flex: none; }
+  body.phone .p-top .p-title { flex: 1 1 0; min-width: 0; font-size: 16px; padding: 0 8px; }
+  body.phone .p-top .st { font-size: 13px; padding: 0 8px; }
+  body.phone .p-back, body.phone .p-top .p-more { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; color: var(--grey); }
+  body.phone .p-back svg.i, body.phone .p-more svg.i { width: 20px; height: 20px; }
+  body.phone .p-top .act { font-size: 14px; min-height: 44px; padding: 0 10px; }
+  body.phone .p-do { display: flex; flex-wrap: wrap; padding: 0 12px 4px; }
+  body.phone .p-do .p-err { max-width: 100%; white-space: normal; padding: 4px 0; }
+  body.phone .p-run, body.phone .p-agents { padding-left: 14px; padding-right: 12px; font-size: 14px; }
+  body.phone .p-meta, body.phone .p-acts { padding: 0 14px; font-size: 14px; }
+  body.phone .p-acts .act { min-height: 44px; align-items: center; }
+  body.phone #p-body { padding: 12px 16px 20px; font-size: 15px; line-height: 1.6; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  body.phone #p-body .it code, body.phone #p-body .it pre { font-size: 13px; }
+  body.phone #p-term { padding-left: 6px; overscroll-behavior: contain; }
+  body.phone #p-foot { padding: 10px 16px calc(12px + max(var(--safe-b), var(--kb, 0px))); }
+  body.phone #p-reply { font-size: 16px; line-height: 1.5; min-height: 1.5em; max-height: 40vh; }
+  body.phone #p-tools { font-size: 14px; }
+  body.phone #keys, body.phone #finder { display: none; }
 }
 </style>
 </head>
@@ -336,6 +425,9 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 <script>
 const TOKEN = '__ACP_TOKEN__';
 const $ = (id) => document.getElementById(id);
+/** Under 720 px the page is two screens that slide (the queues, the session); `body.phone` follows this query. */
+const phone = matchMedia('(max-width: 720px)');
+document.body.classList.toggle('phone', phone.matches);
 const store = { get(k) { try { return localStorage.getItem('fleet.' + k); } catch { return null; } }, set(k, v) { try { localStorage.setItem('fleet.' + k, v); } catch {} } };
 /** Elements are built with textContent only: session text comes from transcripts. */
 function h(tag, attrs = {}, ...kids) {
@@ -349,7 +441,7 @@ function h(tag, attrs = {}, ...kids) {
   return e;
 }
 const ICONS = { more: ['M3.5 8h.01', 'M8 8h.01', 'M12.5 8h.01'], ext: ['M6.5 3.5h-3v9h9v-3', 'M9 3h4v4', 'M13 3 7.5 8.5'], x: ['M4 4l8 8', 'M12 4l-8 8'],
-                fold: ['M4 4l4 4-4 4', 'M9 4l4 4-4 4'], unfold: ['M12 4 8 8l4 4', 'M7 4 3 8l4 4'] };
+                fold: ['M4 4l4 4-4 4', 'M9 4l4 4-4 4'], unfold: ['M12 4 8 8l4 4', 'M7 4 3 8l4 4'], back: ['M10 3 5 8l5 5'], plus: ['M8 3v10', 'M3 8h10'] };
 /** A drawn icon (stroke 1.5, currentColor). */
 function icon(name) {
   const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
@@ -633,7 +725,7 @@ const keyOf = (x) => `${x.machine}:${x.sessionId ?? x.id ?? x.pid}`;
 // ---------------------------------------------------------------- the session open on the right
 // One session at a time, full height on the right: its conversation scrolls, the message box stays at the bottom. The
 // panel's parts are built once and updated in place, so a refresh never takes the caret or a half-typed message.
-const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null, codexOn: null };
+const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null, codexOn: null, phoneTerm: false };
 const drafts = new Map(); // what you had typed to each session, kept when you switch away
 let everything = [];
 const current = () => everything.find((x) => keyOf(x) === pane.key) ?? (pane.trust && keyOf(pane.trust) === pane.key ? pane.trust : null);
@@ -651,7 +743,9 @@ const movable = (x) => x?.engine === 'claude' && x.live && Boolean(x.sessionId) 
 // A Codex session opens as `codex resume` once you ask for it, and stays so: only one that is closed and whose last turn
 // finished. Resuming a thread that is live (open in the Codex app) or ended mid-turn takes it over and carries the work on.
 const codexTerm = (x) => x?.engine === 'codex' && /^[0-9a-f-]{36}$/.test(x.sessionId ?? '') && Boolean(x.cwd) && !x.live;
-const termView = (x) => attachable(x) || x?.via === 'trust' || (x?.engine === 'codex' && (terms.has(keyOf(x)) || (codexTerm(x) && pane.codexOn === keyOf(x))));
+// On the phone a session opens as its conversation; its terminal only once you ask for it (the Terminal toggle), except a
+// folder's trust prompt, which has nothing else to show.
+const termView = (x) => (!phone.matches || pane.phoneTerm || x?.via === 'trust') && (attachable(x) || x?.via === 'trust' || (x?.engine === 'codex' && (terms.has(keyOf(x)) || (codexTerm(x) && pane.codexOn === keyOf(x)))));
 // What each session last said, kept for when you come back to it or hover it first: the pane shows it at once and reads
 // again behind it.
 const seen = new Map();
@@ -697,8 +791,14 @@ function select(x) {
   if (paneUi.min) fold(false);
   if (pane.key === key) return;
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
-  Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, armStop: false, moving: false, more: false, view: null });
+  const was = pane.key;
+  Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, armStop: false, moving: false, more: false, view: null, phoneTerm: false });
   $('p-reply').value = drafts.get(key) ?? '';
+  // The phone's back gesture closes the session: opening it is one step forward in the history. A session already open (or
+  // one whose step this is) is replaced, so picking sessions in the list never stacks steps. Links into sessions (`#<key>`) do:
+  // the browser adds an entry per hash change, fromHash empties its hash but the History API cannot delete it, so A, link to B,
+  // link to C, back leaves one dead step behind (a second back skips it; it is not a clean landing).
+  if (phone.matches) history[history.state?.fleetPane || was ? 'replaceState' : 'pushState']({ fleetPane: key }, '');
   inPlace(key, () => { document.body.classList.add('has-pane'); renderMachines(); renderPane(true); });
   peek();
 }
@@ -708,6 +808,10 @@ function deselect() {
   const was = pane.key;
   pane.key = null;
   inPlace(was, () => { document.body.classList.remove('has-pane'); renderMachines(); renderPane(); });
+  // Closed some other way than back (an archive, /exit): take its history step off too, a tick later, so a select right
+  // after (continue) keeps the step. The popstate that causes finds nothing open; a deselect that came from popstate
+  // finds the step already gone.
+  if (phone.matches && history.state?.fleetPane) setTimeout(() => { if (!pane.key && history.state?.fleetPane) history.back(); }, 0);
 }
 /** The pane opening or closing narrows or widens the list (rows wrap differently): the row you pressed stays where it
  *  was on the screen, under your pointer. */
@@ -779,7 +883,7 @@ const wire = { ws: null, open: null, next: 1, refs: new Map(), tries: 0, bye: fa
 /** The connection, opened if need be: a promise of it, open. */
 function wired() {
   if (wire.ws && wire.ws.readyState <= WebSocket.OPEN) return wire.open;
-  const ws = new WebSocket(`ws://${location.host}/api/term/ws?t=${encodeURIComponent(TOKEN)}`);
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/term/ws?t=${encodeURIComponent(TOKEN)}`);
   ws.binaryType = 'arraybuffer';
   wire.ws = ws;
   wire.open = new Promise((ok, no) => { ws.onopen = () => { wire.tries = 0; wire.bye = false; ok(ws); }; ws.onerror = () => no(new Error('no connection to the panel')); });
@@ -965,8 +1069,8 @@ function showTerm(x, focus = !keyNav && x.state !== 'needs-you') {
   T.used = Date.now();
 }
 function fitShown(focus = false) {
-  const T = terms.get(shown);
-  if (!T || $('p-term').hidden) return;
+  const T = terms.get(shown), el = $('p-term');
+  if (!T || el.hidden || !el.clientWidth || !el.clientHeight) return; // out of sight (a screen that is off to the side): a zero-size xterm throws
   try { T.fit.fit(); } catch {}
   lastSize = { cols: T.term.cols, rows: T.term.rows };
   T.term.refresh(0, T.term.rows - 1);
@@ -1018,7 +1122,7 @@ async function saveLabel(x, change) {
 }
 function titleField(x) {
   const text = x.title ?? x.name ?? x.id ?? x.engine;
-  if (!x.sessionId || x.via === 'trust') return h('div', { class: 'p-title', text, title: x.name ?? '' });
+  if (!x.sessionId || x.via === 'trust' || phone.matches) return h('div', { class: 'p-title', text, title: x.name ?? '' }); // rename is the desktop's: a tap here must not raise the keyboard
   return h('div', { class: 'p-title', contenteditable: 'plaintext-only', spellcheck: 'false', role: 'textbox', 'aria-label': 'Name', title: 'Rename · empty puts the written one back', text,
     onfocus: (e) => { e.target.dataset.was = e.target.textContent; },
     onkeydown: (e) => {
@@ -1086,7 +1190,7 @@ function renderPane(toEnd = false) {
     // Passing through with j/k: the terminal (a process on the panel) is attached once you have settled on a row, not for
     // every row on the way; the focus stays in the list.
     clearTimeout(pane.attachT);
-    if (keyNav) { for (const o of terms.values()) o.el.hidden = true; pane.attachT = setTimeout(() => { if (pane.key === keyOf(x)) showTerm(x, false); }, 400); } else showTerm(x);
+    if (keyNav) { for (const o of terms.values()) o.el.hidden = true; pane.attachT = setTimeout(() => { if (pane.key === keyOf(x)) showTerm(x, false); }, 400); } else showTerm(x, phone.matches ? false : undefined); // the phone's keyboard comes up when you tap the terminal, not when it opens
     return;
   }
   hideTerms();
@@ -1148,7 +1252,7 @@ function renderHead(x, term) {
     title: 'Open it in Codex here (codex resume), every permission allowed' + (x.turnOver === false ? '; it stopped mid-turn, and carries that turn on' : ''),
     onclick: () => {
       if (x.turnOver === false && !pane.armMove) { pane.armMove = true; renderPane(); clearTimeout(pane.armT); pane.armT = setTimeout(() => { if (pane.armMove) { pane.armMove = false; renderPane(); } }, 4000); return; }
-      pane.armMove = false; pane.codexOn = keyOf(x); renderPane(true);
+      pane.armMove = false; pane.codexOn = keyOf(x); if (phone.matches) pane.phoneTerm = true; renderPane(true);
     } }) : null;
   const state = pane.moving ? h('span', { class: 'p-err', style: 'color:var(--grey)', text: '…' })
     : pane.said?.cls === 'no' ? h('span', { class: 'p-err', text: pane.said.text, title: pane.said.text }) : null;
@@ -1166,11 +1270,21 @@ function renderHead(x, term) {
   // The agents it has going, one line each: what it was asked, its last step, how long since it moved.
   const agents = x.live && x.agents?.length ? h('div', { class: 'p-agents' }, x.agents.map((a) => h('div', { class: 'ag', title: [a.type, a.model, a.since ? `started ${new Date(a.since).toLocaleTimeString()}` : null].filter(Boolean).join(' · ') },
     h('span', { class: 'dot working' }), h('b', { text: a.what ?? a.type ?? 'agent' }), h('span', { text: a.step ? `${a.step} · ${ago(a.lastAt)}` : ago(a.lastAt) })))) : null;
-  const parts = [
-    h('div', { class: 'p-top' }, word(x.state), titleField(x), state, cont, move, copy, codexOpen,
-      h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more')),
+  const more = h('button', { class: `p-more${pane.more ? ' on' : ''}`, title: 'More', 'aria-label': 'More', 'aria-expanded': String(pane.more), onclick: () => { pane.more = !pane.more; renderPane(); } }, icon('more'));
+  // The phone's bar: back, its name and state, the Terminal toggle (conversation is the default view), more. What would crowd
+  // the name (continue, move, an error) goes on a line under it.
+  const toggle = phone.matches && (attachable(x) || (x.engine === 'codex' && terms.has(keyOf(x))))
+    ? h('button', { class: 'act term-toggle', text: pane.phoneTerm ? 'Chat' : 'Terminal', onclick: () => { pane.phoneTerm = !pane.phoneTerm; renderPane(true); if (!pane.phoneTerm) peek(); } }) : null;
+  const barButtons = [state, cont, move, copy, codexOpen].filter(Boolean);
+  const top = phone.matches
+    ? [h('div', { class: 'p-top' }, h('button', { class: 'p-back', 'aria-label': 'Back to the queues', onclick: () => (history.state?.fleetPane ? history.back() : deselect()) }, icon('back')),
+        titleField(x), word(x.state), toggle, more),
+       barButtons.length ? h('div', { class: 'p-top p-do' }, ...barButtons) : null]
+    : [h('div', { class: 'p-top' }, word(x.state), titleField(x), state, cont, move, copy, codexOpen, more,
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
-      h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x'))),
+      h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x')))];
+  const parts = [
+    ...top,
     run, agents,
     pane.more ? h('div', { class: 'p-meta', title: [x.name, x.cwd, x.model].filter(Boolean).join('\n') },
       [WORD[x.state], x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx (${ctxWords(c)})`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
@@ -1333,7 +1447,7 @@ function rowActs(x) {
   const plain = (e) => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
   // A row with a session id can be dragged onto a group. So a press opens it only if it lets go where it was pressed (a
   // drag that moves away opens nothing); the release is listened for on the page, so a redraw meanwhile still opens it.
-  const drag = x.sessionId && x.via !== 'trust' ? {
+  const drag = x.sessionId && x.via !== 'trust' && !phone.matches ? { // no drag on the phone: a long press must not lift the row out of a scroll
     draggable: 'true',
     ondragstart: (e) => { press = null; dragKey = key; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', key); e.currentTarget.classList.add('dragging'); showNewGroup(true); },
     ondragend: () => { dragKey = null; showNewGroup(false); renderMachines(); } } : {};
@@ -1372,7 +1486,10 @@ function row(x) {
     h('span', { class: `use ${x.shareWeek != null ? level(x.shareWeek * 3) : ''}`, text: x.shareWeek != null && x.shareWeek >= 0.5 ? `${Math.round(x.shareWeek)}%` : '',
       title: x.shareWeek != null ? `about ${Math.round(x.shareWeek)}% of ${x.sub}'s weekly limit` : '' }),
     h('span', { class: 'what', text: what }),
-    why ? h('span', { class: 'why', text: why, title: why }) : null);
+    why ? h('span', { class: 'why', text: why, title: why }) : null,
+    // The phone's row is the name, its state word and its age, and its last words under them.
+    phone.matches ? h('span', { class: 'age', text: ago(x.lastAt ?? x.since ?? x.startedAt) }) : null,
+    phone.matches ? h('span', { class: 'last', text: why || what || x.said || x.doing || '' }) : null);
 }
 /** A closed session, as one quiet line: what it was, where, whose, and when it last moved. */
 function gone(x) {
@@ -1380,7 +1497,9 @@ function gone(x) {
     word('closed'), h('span', { class: 'ttl', text: x.title ?? x.name ?? x.id ?? x.engine, title: x.sessionId ? 'Double-click to rename' : '',
       ondblclick: (e) => { e.stopPropagation(); renameInList(x, e.currentTarget); } }), h('span', { class: 'stage' }), h('span', { class: 'at', text: x.machine }),
     h('span', { class: 'who', text: x.sub ?? '' }), startCell(x), h('span', { class: 'eff' }), h('span', { class: 'ctx', text: ago(x.lastAt ?? x.startedAt ?? x.since), title: 'last active' }),
-    h('span', { class: 'use' }), h('span', { class: 'what' }));
+    h('span', { class: 'use' }), h('span', { class: 'what' }),
+    phone.matches ? h('span', { class: 'age', text: ago(x.lastAt ?? x.startedAt ?? x.since) }) : null,
+    phone.matches ? h('span', { class: 'last', text: x.said ?? '' }) : null);
 }
 // ---------------------------------------------------------------- dragging a row onto a group
 let press = null, dragKey = null;
@@ -1396,7 +1515,7 @@ addEventListener('pointerup', (e) => {
 let lastOpen = { key: null, at: 0 };
 /** Double-click a row's name to rename it there: Enter keeps it, Esc puts it back, empty puts the written one back. */
 function renameInList(x, el) {
-  if (!x.sessionId || x.via === 'trust') return;
+  if (!x.sessionId || x.via === 'trust' || phone.matches) return;
   const was = el.textContent, row = el.closest('[draggable]');
   row?.setAttribute('draggable', 'false'); // a draggable row would take the caret's drags as its own
   el.contentEditable = 'plaintext-only'; el.spellcheck = false; el.focus();
@@ -1443,6 +1562,22 @@ function showNewGroup(on) {
 }
 
 let armedEpic = null, epicT = null;
+// The phone's queues: what needs you, always open; then Working, Idle and Finished, each folded to one line until you open it
+// (the groups are the desktop's). Which are open is remembered.
+const phoneOpen = new Set((() => { try { return JSON.parse(store.get('phone-open') ?? '[]'); } catch { return []; } })());
+function phoneSections(list, urgent) {
+  const rest = list.filter((x) => !urgent.includes(x)), latest = (a, b) => (b.lastAt ?? b.startedAt ?? b.since ?? 0) - (a.lastAt ?? a.startedAt ?? a.since ?? 0);
+  const out = [urgent.length ? h('section', { class: 'epic urgent' }, h('header', {}, h('h2', { text: 'Needs you' })), urgent.map(row)) : h('p', { class: 'none', text: 'Nothing needs you.' })];
+  for (const [name, sessions, draw] of [['Working', rest.filter((x) => x.live && x.state === 'working'), row], ['Idle', rest.filter((x) => x.live && x.state !== 'working'), row], ['Finished', rest.filter((x) => !x.live), gone]]) {
+    if (!sessions.length) continue;
+    const open = phoneOpen.has(name);
+    out.push(h('section', { class: 'epic fold' },
+      h('button', { class: 'fold-sec', 'aria-expanded': String(open), onclick: () => { if (open) phoneOpen.delete(name); else phoneOpen.add(name); store.set('phone-open', JSON.stringify([...phoneOpen])); renderMachines(); } },
+        h('span', { text: `${open ? '▾' : '▸'} ${name}` }), h('span', { text: String(sessions.length) })),
+      open ? sessions.sort(latest).map(draw) : null));
+  }
+  return out;
+}
 // The groups whose closed sessions you opened; the rest stay folded under their one line.
 const openShut = new Set((() => { try { return JSON.parse(store.get('open-closed') ?? '[]'); } catch { return []; } })());
 function renderMachines() {
@@ -1470,6 +1605,7 @@ function renderMachines() {
   // the longest wait first. The tab's title carries the count.
   const urgent = list.filter((x) => x.live && (x.state === 'needs-you' || x.state === 'capped'))
     .sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || ((a.lastAt ?? a.since ?? 0) - (b.lastAt ?? b.since ?? 0)));
+  $('sum').replaceChildren(...tally(everything).childNodes);
   document.title = urgent.length ? `(${urgent.length}) Fleet` : 'Fleet';
   const top = urgent.length ? h('section', { class: 'epic urgent' }, h('header', {}, h('h2', { text: 'Needs you' }), tally(urgent)), urgent.map(row)) : null;
   // Then by group: the epics in the order fleet.json lists them, then the groups you made; open ones first, then closed,
@@ -1477,7 +1613,7 @@ function renderMachines() {
   const names = [...(snap.epics ?? []).map((e) => e.name), ...(snap.groups ?? []), 'Other'];
   $('fleet-groups').replaceChildren(...names.filter((n) => n !== 'Other').map((n) => h('option', { value: n })));
   const epicOf = (x) => (names.includes(x.epic) ? x.epic : 'Other');
-  const blocks = names.map((name) => {
+  const blocks = phone.matches ? phoneSections(list, urgent) : names.map((name) => {
     const shown = list.filter((x) => epicOf(x) === name && !urgent.includes(x)).sort((a, b) => (ORDER[a.state] - ORDER[b.state]) || ((b.lastAt ?? b.startedAt ?? b.since ?? 0) - (a.lastAt ?? a.startedAt ?? a.since ?? 0)));
     if (!shown.length) return null;
     const test = (snap.epics ?? []).find((e) => e.name === name)?.test;
@@ -1499,7 +1635,7 @@ function renderMachines() {
           onclick: () => { if (openShut.has(name)) openShut.delete(name); else openShut.add(name); store.set('open-closed', JSON.stringify([...openShut])); renderMachines(); } }), sweep),
         openShut.has(name) ? closed.map(gone) : null) : null), name === 'Other' ? '' : name);
   }).filter(Boolean);
-  const box = h('div', {}, ...[top, ...blocks].filter(Boolean));
+  const box = h('div', {}, ...[phone.matches ? null : top, ...blocks].filter(Boolean));
   if (box.innerHTML === $('machines').innerHTML) return;
   const had = document.activeElement?.closest?.('#machines [data-key]')?.dataset.key, x = scrollX, y = scrollY;
   $('machines').replaceChildren(...box.childNodes);
@@ -1544,6 +1680,41 @@ async function reload() {
   } catch (e) { if (e.message !== 'reloading') { $('err').hidden = false; $('err').textContent = String(e.message); } }
 }
 $('refresh').addEventListener('click', load);
+// ---------------------------------------------------------------- the phone
+// The back gesture closes the session (or the prompt sheet) the way the page opened it: select() pushed a history step.
+addEventListener('popstate', () => {
+  if (location.hash.length > 1) return; // a link into a session (`#<key>`) also fires popstate: hashchange opens it, and nothing closes
+  if (document.body.classList.contains('compose')) { document.body.classList.remove('compose'); return; }
+  if (pane.key) deselect();
+});
+function openCompose() {
+  if (document.body.classList.contains('compose')) return;
+  document.body.classList.add('compose');
+  history.pushState({ fleetCompose: true }, '');
+  $('prompt').focus(); // inside the tap, so the keyboard comes up with the sheet
+}
+function closeCompose() {
+  document.body.classList.remove('compose');
+  document.activeElement?.blur?.();
+  if (history.state?.fleetCompose) history.back();
+}
+$('refresh').before(h('span', { id: 'sum', class: 'tally' }), h('button', { id: 'compose', 'aria-label': 'Start a session', title: 'Start a session', onclick: openCompose }, icon('plus')));
+$('mlines').closest('main').querySelector('.write').prepend(h('button', { class: 'sheet-x', text: 'Cancel', onclick: closeCompose }));
+// A start that took closes the sheet: the session is in the queues a moment later.
+new MutationObserver(() => { if ($('said').classList.contains('ok') && document.body.classList.contains('compose')) closeCompose(); }).observe($('said'), { attributes: true, attributeFilter: ['class'] });
+$('p-reply').setAttribute('enterkeyhint', 'send');
+// The reply box and the prompt sheet ride above the keyboard: its height is what the visual viewport lost.
+const lift = () => { const v = visualViewport; document.documentElement.style.setProperty('--kb', `${v ? Math.max(0, Math.round(innerHeight - v.height - v.offsetTop)) : 0}px`); };
+visualViewport?.addEventListener('resize', lift); visualViewport?.addEventListener('scroll', lift);
+// Pressing a row reads what it last said, ahead of the tap that opens it (the hover of the desktop). Passive: never holds up a scroll.
+$('machines').addEventListener('touchstart', (e) => { const y = byKey(e.target.closest?.('[data-key]')?.dataset.key); if (y) prefetch(y); }, { passive: true });
+$('machines').addEventListener('touchmove', () => clearTimeout(hoverTimer), { passive: true });
+phone.addEventListener('change', () => {
+  document.body.classList.toggle('phone', phone.matches); document.body.classList.remove('compose'); headSig = '';
+  // A session opened at desktop width has no history step; the phone's back gesture needs one.
+  if (phone.matches && pane.key && history.state?.fleetPane !== pane.key) history.pushState({ fleetPane: pane.key }, '');
+  if (snap) { renderMachines(); renderPane(); }
+});
 // A link into one session (`/#<machine>:<sessionId>`, the way Satellite's agent cell points here): it opens once the list has it.
 let wanted = null;
 function openWanted() {
@@ -1553,7 +1724,17 @@ function openWanted() {
   if (pane.key !== keyOf(y)) select(y);
   document.querySelector(`#machines [data-key="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'center' });
 }
-const fromHash = () => { let k = ''; try { k = decodeURIComponent(location.hash.slice(1)); } catch {} if (!k) return; wanted = k; history.replaceState(null, '', location.pathname + location.search); if (snap) openWanted(); };
+// A reload keeps the history step of the session that was open, but the page boots with none open: take it off, or the first
+// back press would go nowhere.
+if (history.state?.fleetPane && !pane.key) history.replaceState(null, '', location.pathname + location.search);
+const fromHash = () => {
+  if (location.hash.length <= 1) return;
+  let k = ''; try { k = decodeURIComponent(location.hash.slice(1)); } catch {}
+  // The hash goes whether or not it made sense (`/#mac%3`, cut short): the popstate guard ignores a popstate while one is set.
+  history.replaceState(history.state, '', location.pathname + location.search);
+  if (!k) return;
+  wanted = k; if (snap) openWanted();
+};
 addEventListener('hashchange', fromHash);
 fromHash();
 load();
