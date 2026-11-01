@@ -2,6 +2,9 @@
 //
 //   node fleet/install-hooks.mjs <hook.sh path> <profile dir>... [--cap-http] [--remove] [--dry-run]
 //
+// Beside hook.sh it installs artifact-guard.sh (from the same folder) as a PreToolUse hook with the matcher "Artifact": a
+// session may not publish claude.ai Artifacts unless ACP_ALLOW_ARTIFACT=1 or the URL is in ~/.fleet-panel/artifact-allow.txt.
+//
 // Every running session picks a settings change up at once (Claude Code watches the file), so this is careful: what is
 // there already stays as it is, a copy is kept beside it first (settings.json.before-fleet-hooks-<time>), the new file is
 // written whole and swapped in, and it is read back and checked before this says it is done. Run again, it changes
@@ -15,7 +18,13 @@ import { fileURLToPath } from 'node:url';
 export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied',
   'Notification', 'Elicitation', 'ElicitationResult', 'Stop', 'StopFailure', 'PreCompact', 'PostCompact', 'SessionEnd'];
 // Ours: `sh '<path>'` where the path ends in fleet-panel/hook.sh or fleet/hook.sh (someone else's hook.sh under another name is theirs).
-const OURS = (h) => typeof h?.command === 'string' && /^sh '[^']*\/\.?(fleet-panel|fleet)\/hook\.sh'$/.test(h.command);
+const isHook = (h) => typeof h?.command === 'string' && /^sh '[^']*\/\.?(fleet-panel|fleet)\/hook\.sh'$/.test(h.command);
+// The Artifact guard, the same way: `sh '<…>/fleet/artifact-guard.sh'`, on PreToolUse with the matcher "Artifact".
+const isGuard = (h) => typeof h?.command === 'string' && /^sh '[^']*\/\.?(fleet-panel|fleet)\/artifact-guard\.sh'$/.test(h.command);
+const OURS = (h) => isHook(h) || isGuard(h);
+export const GUARD_MATCHER = 'Artifact';
+/** Where the guard sits: beside the hook. */
+export const guardOf = (hookPath) => path.join(path.dirname(hookPath), 'artifact-guard.sh');
 
 /** The settings with Fleet's hook in (or out): a new object, and what changed. Pure, for the tests. */
 export function withHook(settings, hookPath, { capHttp = false, remove = false } = {}) {
@@ -23,19 +32,29 @@ export function withHook(settings, hookPath, { capHttp = false, remove = false }
   if (s.hooks != null && (typeof s.hooks !== 'object' || Array.isArray(s.hooks))) throw new Error('its "hooks" setting is not an object');
   s.hooks ??= {};
   if (!remove && /'/.test(hookPath)) throw new Error('the hook path holds a quote, which sh would read as the end of the command');
+  const guardPath = guardOf(hookPath);
+  if (!remove && /'/.test(guardPath)) throw new Error('the guard path holds a quote, which sh would read as the end of the command');
   const changes = [];
   for (const event of EVENTS) {
     if (s.hooks[event] != null && !Array.isArray(s.hooks[event])) throw new Error(`its hooks.${event} is not a list`);
     const list = Array.isArray(s.hooks[event]) ? s.hooks[event].filter((m) => m && typeof m === 'object') : null;
-    const has = (list ?? []).some((m) => (m?.hooks ?? []).some(OURS));
+    const has = (list ?? []).some((m) => (m?.hooks ?? []).some(isHook));
+    const hasGuard = event === 'PreToolUse' && (list ?? []).some((m) => (m?.hooks ?? []).some(isGuard));
     if (remove) {
-      if (!has) continue;
+      if (!has && !hasGuard) continue;
       s.hooks[event] = list.map((m) => ({ ...m, hooks: (m.hooks ?? []).filter((h) => !OURS(h)) })).filter((m) => m.hooks.length);
       if (!s.hooks[event].length) delete s.hooks[event];
-      changes.push(`- ${event}`);
-    } else if (!has) {
-      (s.hooks[event] = list ?? []).push({ hooks: [{ type: 'command', command: `sh '${hookPath}'`, timeout: 5 }] });
-      changes.push(`+ ${event}`);
+      if (has) changes.push(`- ${event}`);
+      if (hasGuard) changes.push(`- ${event} (${GUARD_MATCHER} guard)`);
+    } else {
+      if (!has) {
+        (s.hooks[event] = list ?? []).push({ hooks: [{ type: 'command', command: `sh '${hookPath}'`, timeout: 5 }] });
+        changes.push(`+ ${event}`);
+      }
+      if (event === 'PreToolUse' && !hasGuard) {
+        (s.hooks[event] = list ?? s.hooks[event] ?? []).push({ matcher: GUARD_MATCHER, hooks: [{ type: 'command', command: `sh '${guardPath}'`, timeout: 5 }] });
+        changes.push(`+ ${event} (${GUARD_MATCHER} guard)`);
+      }
     }
   }
   if (capHttp) for (const [event, list] of Object.entries(s.hooks)) for (const m of Array.isArray(list) ? list : []) for (const h of m?.hooks ?? []) {
@@ -70,6 +89,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   if (!hookPath || !dirs.length || !path.isAbsolute(hookPath)) { console.error('usage: install-hooks.mjs <absolute hook.sh path> <profile dir>... [--cap-http] [--remove] [--dry-run]'); process.exit(2); }
   // The hook must be there to run: a path with a typo would make every event of every session fail (exit 127).
   if (!flags.has('--remove') && !fs.existsSync(hookPath)) { console.error(`${hookPath}: no such file`); process.exit(2); }
+  // The same for the guard it installs beside it: a missing one would fail every Artifact call with a hook error.
+  if (!flags.has('--remove') && !fs.existsSync(guardOf(hookPath))) { console.error(`${guardOf(hookPath)}: no such file (artifact-guard.sh goes beside hook.sh)`); process.exit(2); }
   let failed = false;
   for (const d of dirs) {
     try { console.log(install(d, hookPath, { capHttp: flags.has('--cap-http'), remove: flags.has('--remove'), dryRun: flags.has('--dry-run') })); }

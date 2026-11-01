@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { withHook, EVENTS } from '../fleet/install-hooks.mjs';
+import { withHook, EVENTS, guardOf } from '../fleet/install-hooks.mjs';
 
 const HOOK = '/Users/x/.fleet-panel/hook.sh';
 const REAL = new URL('../fleet/hook.sh', import.meta.url).pathname; // the installer wants a hook that exists
@@ -22,7 +22,7 @@ test('adds the hook for every event, sync with a short timeout, and keeps what w
   assert.equal(settings.hooks.SessionStart[0].hooks[0].command, 'catchup.sh', 'its own hooks stay first and as they were');
   assert.equal(settings.hooks.PreToolUse[0].hooks[0].url, 'http://127.0.0.1:4747/hook/event');
   assert.equal(settings.hooks.PreToolUse[0].hooks[0].timeout, undefined, 'the panel\'s HTTP hooks only get a timeout when asked');
-  assert.equal(changes.length, EVENTS.length);
+  assert.equal(changes.length, EVENTS.length + 1, 'every event, and the Artifact guard on PreToolUse');
   assert.deepEqual(before.hooks.SessionStart.length, 1, 'the settings it was given are not changed');
 });
 
@@ -176,4 +176,78 @@ test('the docs file is trimmed to its last 200 lines once it passes 64 KB', () =
   assert.equal(lines.length, 200);
   assert.equal(JSON.parse(lines.at(-1)).p, '/tmp/new.md');
   assert.deepEqual(fs.readdirSync(path.join(d, 'fleet-state')).filter((n) => n.startsWith('.')), []);
+});
+
+// ---------------------------------------------------------------------------------------------- the Artifact guard
+
+const GUARD = new URL('../fleet/artifact-guard.sh', import.meta.url).pathname;
+const REASON = 'Fleet: Artifacts are off here. Write the document as a file in the repo (research and designs → docs/superpowers/specs/, outbound drafts → pm/outbox/, reports where the skill says) and give the user its path; the Fleet Documents pane renders .md and .html a session writes. To publish anyway, the user adds the URL to ~/.fleet-panel/artifact-allow.txt or sets ACP_ALLOW_ARTIFACT=1.';
+const DENY = JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: REASON } }) + '\n';
+const guard = (tool_input, { home = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-guard-')), env = {}, input } = {}) =>
+  spawnSync('sh', [GUARD], { input: input ?? JSON.stringify({ session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Artifact', tool_input }), encoding: 'utf8', env: { ...process.env, ACP_ALLOW_ARTIFACT: '', HOME: home, ...env } });
+
+test('the guard denies a publish (no action) with the instruction as its reason, and passes read/list/open/quickstart', () => {
+  for (const input of [{ file_path: '/tmp/x/a.html' }, { file_path: '/tmp/x/a.html', title: 'T' }, { action: 'publish', file_path: '/tmp/x/a.html' }, { url: 'https://claude.ai/artifact/new' }, {}]) {
+    const r = guard(input);
+    assert.equal(r.status, 0); assert.equal(r.stdout, DENY, JSON.stringify(input));
+  }
+  for (const action of ['read', 'list', 'open', 'quickstart', 'pin', 'unpin', 'delete']) {
+    const r = guard({ action, url: 'https://claude.ai/artifact/abc' });
+    assert.equal(r.status, 0); assert.equal(r.stdout, '', action);
+  }
+});
+
+test('the guard lets a publish through when ACP_ALLOW_ARTIFACT=1, or when its url is a line of ~/.fleet-panel/artifact-allow.txt', () => {
+  assert.equal(guard({ file_path: '/tmp/x/a.html' }, { env: { ACP_ALLOW_ARTIFACT: '1' } }).stdout, '');
+  assert.equal(guard({ file_path: '/tmp/x/a.html' }, { env: { ACP_ALLOW_ARTIFACT: '0' } }).stdout, DENY, 'only 1 allows');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-guard-'));
+  fs.mkdirSync(path.join(home, '.fleet-panel'));
+  fs.writeFileSync(path.join(home, '.fleet-panel', 'artifact-allow.txt'), '\n# the standing page\nhttps://claude.ai/artifact/standing\n');
+  assert.equal(guard({ url: 'https://claude.ai/artifact/standing', file_path: '/tmp/x/a.html' }, { home }).stdout, '');
+  assert.equal(guard({ url: 'https://claude.ai/artifact/other', file_path: '/tmp/x/a.html' }, { home }).stdout, DENY, 'another url is not on the list');
+  assert.equal(guard({ url: 'https://claude.ai/artifact/stand', file_path: '/tmp/x/a.html' }, { home }).stdout, DENY, 'a whole line, not a part of one');
+  assert.equal(guard({ file_path: '/tmp/x/a.html' }, { home }).stdout, DENY, 'no url: nothing to match, not an empty line');
+});
+
+test('the guard never fails: unreadable input prints nothing and exits 0', () => {
+  for (const input of ['not json', '']) {
+    const r = guard(null, { input }); assert.equal(r.status, 0, input); assert.equal(r.stdout, '', input);
+  }
+  assert.equal(guard(null, { input: '{}' }).stdout, DENY, 'an event with no tool_input is a publish with nothing named');
+});
+
+test('the installer adds the Artifact guard once on PreToolUse, keeps what is there, and --remove takes both out', () => {
+  const start = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'theirs.sh' }] }] } };
+  const once = withHook(start, HOOK).settings;
+  const guardCmd = `sh '${guardOf(HOOK)}'`;
+  assert.match(guardCmd, /\/artifact-guard\.sh'$/);
+  const guards = (s) => (s.hooks.PreToolUse ?? []).filter((m) => m.hooks.some((h) => h.command === guardCmd));
+  assert.deepEqual(guards(once), [{ matcher: 'Artifact', hooks: [{ type: 'command', command: guardCmd, timeout: 5 }] }]);
+  assert.equal(once.hooks.PreToolUse[0].hooks[0].command, 'theirs.sh');
+  assert.equal(ours(once, 'PreToolUse').length, 1, 'hook.sh is there once, apart from the guard');
+  const twice = withHook(once, HOOK);
+  assert.deepEqual(twice.changes, [], 'a second run changes nothing');
+  assert.equal(guards(twice.settings).length, 1);
+  const out = withHook(once, HOOK, { remove: true });
+  assert.deepEqual(out.settings.hooks.PreToolUse, start.hooks.PreToolUse, 'only theirs is left');
+  assert.ok(out.changes.some((c) => /guard/.test(c)));
+  // a guard that is the only thing on PreToolUse: the event goes with it
+  const only = withHook({ hooks: { PreToolUse: [{ matcher: 'Artifact', hooks: [{ type: 'command', command: guardCmd }] }] } }, HOOK, { remove: true }).settings;
+  assert.deepEqual(only, {});
+});
+
+test('the installer CLI: --dry-run shows the guard and writes nothing; a guard missing beside the hook is refused', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-hooks-'));
+  const prof = path.join(d, 'prof'); fs.mkdirSync(prof);
+  fs.writeFileSync(path.join(prof, 'settings.json'), JSON.stringify({ model: 'opus' }));
+  const installer = new URL('../fleet/install-hooks.mjs', import.meta.url).pathname;
+  const dry = spawnSync(process.execPath, [installer, REAL, prof, '--dry-run'], { encoding: 'utf8' });
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /\+ PreToolUse \(Artifact guard\)/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(prof, 'settings.json'), 'utf8')), { model: 'opus' });
+  assert.deepEqual(fs.readdirSync(prof), ['settings.json'], 'no copy, no temp file');
+  const lone = path.join(d, 'fleet'); fs.mkdirSync(lone); fs.copyFileSync(REAL, path.join(lone, 'hook.sh'));
+  const bad = spawnSync(process.execPath, [installer, path.join(lone, 'hook.sh'), prof], { encoding: 'utf8' });
+  assert.equal(bad.status, 2); assert.match(bad.stderr, /artifact-guard\.sh: no such file/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(prof, 'settings.json'), 'utf8')), { model: 'opus' });
 });
