@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { atPrompt, jobFresh, jobOpen, sessionState } from '../fleet/machine.mjs';
+import { atPrompt, jobFresh, jobOpen, resume, sessionState } from '../fleet/machine.mjs';
 import { easeMs } from '../fleet/fleet.mjs';
 
 test('a permission prompt: the roster says so, or the last hook event was the request itself', () => {
@@ -67,4 +67,32 @@ test('a job with a process but a record that says stopped is closed, and continu
   assert.equal(jobOpen({ ...row, state: 'blocked', status: 'idle' }), true, 'idle with no prompt yet is open');
   assert.equal(jobOpen({ ...row, pid: undefined, state: 'working' }), false, 'no process is not open, whatever the record says');
   assert.equal(jobOpen(null), false);
+});
+
+test('continue on that row respawns it, and a respawn that fails never starts a copy beside the stale host', async () => {
+  const row = { kind: 'background', id: 'e0d17ae7', pid: 86137, status: 'idle', state: 'stopped', sessionId: 'e0d17ae7-c11f-4956-9c08-e201827066b9', cwd: '/tmp' };
+  const a = { profile: 'p', sessionId: row.sessionId, id: row.id };
+  const calls = [];
+  const fake = (roster, respawn) => async (_cmd, args) => {
+    calls.push(args.join(' '));
+    if (args[0] === 'agents') return { stdout: JSON.stringify(roster), stderr: '', err: null };
+    if (args[0] === 'respawn') return respawn;
+    return { stdout: '', stderr: `unexpected: ${args.join(' ')}`, err: new Error('unexpected') };
+  };
+  const profiles = () => [{ id: 'p', dir: '/nonexistent/profile' }];
+  // 1. respawn works: the job comes back under its own record, and nothing else is started
+  let r = await resume(a, { profiles, run: fake([row], { stdout: 'respawned e0d17ae7\n', stderr: '', err: null }) });
+  assert.deepEqual(r, { ok: true, id: 'e0d17ae7' });
+  assert.deepEqual(calls, ['agents --json --all', 'respawn e0d17ae7']);
+  // 2. respawn fails while the stale host lives: an error, not a `--bg --resume` copy beside it
+  calls.length = 0;
+  r = await resume(a, { profiles, run: fake([row], { stdout: '', stderr: 'host busy', err: new Error('exit 1') }) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /host busy/);
+  assert.ok(!calls.some((c) => c.includes('--bg --resume')), 'no copy: ' + calls.join(' | '));
+  // 3. a row Claude Code calls live is left as it is
+  calls.length = 0;
+  r = await resume(a, { profiles, run: fake([{ ...row, state: 'working' }], null) });
+  assert.deepEqual(r, { ok: true, id: 'e0d17ae7', running: true });
+  assert.deepEqual(calls, ['agents --json --all']);
 });

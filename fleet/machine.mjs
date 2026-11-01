@@ -1238,7 +1238,9 @@ export async function archive(a) {
   let row = null, running = [];
   try { row = JSON.parse(all.stdout).find((r) => r.id === a.id); running = JSON.parse(active.stdout); } catch { return { ok: false, error: 'Could not read its jobs just now: try again in a moment.' }; }
   if (row && running.some((r) => r.id === a.id || (row.sessionId && r.sessionId === row.sessionId)) && !(await gone(p, profileEnv(p), a.id))) row.active = true;
-  if (row && (row.pid || sessionState(row, null).live)) return { ok: false, error: 'It is running again: close it first.' };
+  if (row && (jobOpen(row) || sessionState(row, null).live)) return { ok: false, error: 'It is running again: close it first.' };
+  // A respawn that half-landed (record `stopped`, host idle beside it): the host goes first, as close() would, then the record.
+  if (row?.pid) { const s = await run(bin('claude'), ['stop', a.id], { env: profileEnv(p) }); if (s.err) return { ok: false, error: oneLine(s.stderr || s.err.message, 300) }; }
   const r = await run(bin('claude'), ['rm', a.id], { env: profileEnv(p) });
   return r.err && !/not found|no such|no job matching/i.test(r.stderr) ? { ok: false, error: oneLine(r.stderr || r.err.message, 300) } : { ok: true }; // a record already gone is archived all the same
 }
@@ -1289,10 +1291,11 @@ export async function adopt(a) {
 /** Continue a closed session as a background job, conversation kept: a background job's record (`claude respawn <id>`,
  *  under its own id and flags), else `claude --bg --resume <sessionId>` in its folder, on its model, every permission
  *  allowed. One that runs is left as it is. */
-export async function resume(a) {
-  const p = claudeProfiles().find((x) => x.id === a?.profile);
+export async function resume(a, deps = {}) {
+  const { run: exec = run, profiles = claudeProfiles } = deps; // a seam for the tests: the commands it would run
+  const p = profiles().find((x) => x.id === a?.profile);
   if (!p) return { ok: false, error: 'There is no such account here.' };
-  const roster = await run(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) });
+  const roster = await exec(bin('claude'), ['agents', '--json', '--all'], { env: profileEnv(p) });
   let rows = [];
   try { rows = JSON.parse(roster.stdout); } catch {}
   const row = rowOf(rows, a.sessionId) ?? (a.id ? rows.find((r) => r?.id === a.id) : null);
@@ -1302,10 +1305,11 @@ export async function resume(a) {
   if (jobOpen(row)) return { ok: true, id: row.id ?? null, running: true };
   const id = /^[0-9a-f]{8}$/.test(row?.id ?? '') ? row.id : /^[0-9a-f]{8}$/.test(a?.id ?? '') ? a.id : null;
   if (id && row?.kind === 'background') {
-    const r = await run(bin('claude'), ['respawn', id], { env: profileEnv(p), timeout: 30_000 });
+    const r = await exec(bin('claude'), ['respawn', id], { env: profileEnv(p), timeout: 30_000 });
     if (!r.err) return { ok: true, id };
     const why = oneLine(r.stderr || r.stdout || r.err.message, 240);
-    if (!row.sessionId) return { ok: false, error: why || 'claude respawn failed' };
+    // Its old host still runs (a respawn that half-landed): a copy beside it would double the job. Say so; retry is yours.
+    if (row.pid || !row.sessionId) return { ok: false, error: why || 'claude respawn failed' };
     // A record respawn won't take (its worktree gone, say): the conversation itself goes on under a new record.
   }
   const sid = row?.sessionId ?? a.sessionId;
@@ -1316,7 +1320,7 @@ export async function resume(a) {
   const t = readTranscript(file);
   const args = ['--bg', '--resume', sid, ...ALLOW_ALL];
   if (/^claude-[\w.-]+(\[1m\])?$/.test(t.model ?? '')) args.push('--model', t.model);
-  const r = await run(bin('claude'), args, { cwd, env: profileEnv(p), timeout: 30_000 });
+  const r = await exec(bin('claude'), args, { cwd, env: profileEnv(p), timeout: 30_000 });
   const nid = `${r.stdout}\n${r.stderr}`.match(/backgrounded · (\w+)/)?.[1];
   if (nid) return { ok: true, id: nid };
   const why = oneLine(r.stderr || r.stdout || r.err?.message, 300) || 'claude --bg --resume failed';
