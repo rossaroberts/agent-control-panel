@@ -132,7 +132,9 @@ export async function main(argv) {
     return 0;
   }
   if (cmd === 'pair' && argv.length === 1) {
-    // Pairs a phone: the same key as `open`, but on the public host, drawn as a QR to scan with the phone's camera.
+    // Pairs a phone: the same key as `open`, but on the public host, drawn as a QR to scan with the phone's camera. Unlike the
+    // page's button (one-time codes, /api/pair-url), this reads the key file directly, as `open` does: this terminal is the
+    // owner's and the file is theirs to read anyway, and there is no running server in this process to ask for a code.
     const host = publicHost(prefsPath());
     const port = Number(process.env.ACP_PORT ?? 4747);
     if (!host) {

@@ -88,7 +88,7 @@ test('with no public host configured, a tailnet name is still a wrong host', asy
   assert.equal(r, 421);
 });
 
-test('ACP_PUBLIC_HOST overrides fleet.json, and an invalid value is ignored', async (t) => {
+test('ACP_PUBLIC_HOST overrides fleet.json', async (t) => {
   const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
   fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'a.example-tailnet.ts.net' }));
   const s = start(port, prefs, { ACP_PUBLIC_HOST: 'b.example-tailnet.ts.net' }); t.after(s.stop);
@@ -96,6 +96,17 @@ test('ACP_PUBLIC_HOST overrides fleet.json, and an invalid value is ignored', as
   const status = (host) => new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: '/', headers: { host } }, (res) => { res.resume(); resolve(res.statusCode); }); q.on('error', reject); q.end(); });
   assert.equal(await status('b.example-tailnet.ts.net'), 200);
   assert.equal(await status('a.example-tailnet.ts.net'), 421);
+});
+
+test('an invalid ACP_PUBLIC_HOST is ignored: the allow-list does not widen', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs, { ACP_PUBLIC_HOST: 'bad host!' }); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const status = (host) => new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: '/', headers: { host } }, (res) => { res.resume(); resolve(res.statusCode); }); q.on('error', reject); q.end(); });
+  assert.equal(await status('bad host!'), 421);
+  assert.equal(await status('bad'), 421);
+  assert.equal(await status('mac.example-tailnet.ts.net'), 421);
+  assert.equal(await status(`127.0.0.1:${port}`), 200);
 });
 
 test('pairing over https sets a Secure cookie; loopback over http does not', async (t) => {
@@ -153,22 +164,113 @@ test('the Fleet page is installable: manifest, touch icon and viewport-fit in it
   assert.match(html, /serviceWorker\.register\('\/sw\.js'\)/);
 });
 
-test('/api/pair-url hands the pairing address to a paired page only', async (t) => {
+// A paired page, over the loopback: its cookie and the token this start's page carries.
+async function paired(port, prefs) {
+  const key = fs.readFileSync(path.join(prefs, 'key'), 'utf8').trim();
+  const base = `http://127.0.0.1:${port}`;
+  const html = await fetch(`${base}/`, { headers: { cookie: `acp_k=${key}` } }).then((r) => r.text());
+  const token = /const TOKEN = '([0-9a-f]+)'/.exec(html)?.[1];
+  assert.ok(token, 'the page carries its token');
+  return { key, base, token, mint: () => fetch(`${base}/api/pair-url`, { method: 'POST', headers: { origin: base, cookie: `acp_k=${key}`, 'x-acp-token': token, 'content-type': 'application/json' }, body: '{}' }) };
+}
+
+test('/api/pair-url hands a one-time code to a paired page, never the key, and only to a paired page', async (t) => {
   const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
   fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
   const s = start(port, prefs); t.after(s.stop);
   assert.ok(await until(() => answers(port)), s.log());
-  const key = fs.readFileSync(path.join(prefs, 'key'), 'utf8').trim();
-  const base = `http://127.0.0.1:${port}`;
-  const post = (headers) => fetch(`${base}/api/pair-url`, { method: 'POST', headers: { origin: base, 'content-type': 'application/json', ...headers }, body: '{}' });
-  assert.equal((await post({})).status, 403, 'no cookie, no token');
-  const html = await fetch(`${base}/`, { headers: { cookie: `acp_k=${key}` } }).then((r) => r.text());
-  const token = /const TOKEN = '([0-9a-f]+)'/.exec(html)?.[1];
-  assert.ok(token, 'the page carries its token');
-  const r = await post({ cookie: `acp_k=${key}`, 'x-acp-token': token });
+  const p = await paired(port, prefs);
+  const bare = (headers) => fetch(`${p.base}/api/pair-url`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
+  assert.equal((await bare({ origin: p.base })).status, 403, 'no cookie, no token');
+  assert.equal((await bare({ origin: p.base, cookie: `acp_k=${p.key}` })).status, 403, 'no token');
+  assert.equal((await bare({ cookie: `acp_k=${p.key}`, 'x-acp-token': p.token })).status, 403, 'no origin');
+  assert.equal((await bare({ origin: 'http://mac.example-tailnet.ts.net', cookie: `acp_k=${p.key}`, 'x-acp-token': p.token })).status, 403, 'wrong origin');
+  const r = await p.mint();
   assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.equal(j.url, `https://mac.example-tailnet.ts.net/?k=${key}`);
+  const raw = await r.text();
+  assert.ok(!raw.includes(p.key), 'the key is not in the answer');
+  const j = JSON.parse(raw);
+  assert.match(j.url, /^https:\/\/mac\.example-tailnet\.ts\.net\/\?p=[0-9a-f]{48}$/);
   assert.equal(j.public, 'mac.example-tailnet.ts.net');
-  assert.equal((await fetch(`${base}/vendor/qrcode.js`)).status, 200);
+  assert.equal(j.expiresInMs, 120000);
+  assert.equal((await fetch(`${p.base}/vendor/qrcode.js`)).status, 200);
+});
+
+test('without a public host the code address is the loopback', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const j = await (await (await paired(port, prefs)).mint()).json();
+  assert.match(j.url, new RegExp(`^http://127\\.0\\.0\\.1:${port}/\\?p=[0-9a-f]{48}$`));
+  assert.equal(j.public, null);
+});
+
+test('a pairing code is spent by its first use: the cookie once, a 403 after', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const code = new URL((await (await p.mint()).json()).url).searchParams.get('p');
+  const use = (c) => fetch(`${p.base}/?p=${c}`, { redirect: 'manual' });
+  const first = await use(code);
+  assert.equal(first.status, 303);
+  assert.match(first.headers.get('set-cookie'), new RegExp(`^acp_k=${p.key}; Path=/; HttpOnly; SameSite=Strict`));
+  const second = await use(code);
+  assert.equal(second.status, 403);
+  assert.equal(await second.text(), 'That pairing code has expired: press Pair a phone again.');
+  assert.equal(second.headers.get('set-cookie'), null);
+  assert.equal((await use('f'.repeat(48))).status, 403, 'a code that was never minted');
+  assert.equal((await use('')).status, 403);
+});
+
+test('an expired pairing code is refused', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs, { ACP_PAIR_CODE_MS: '250' }); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const code = new URL((await (await p.mint()).json()).url).searchParams.get('p');
+  await new Promise((r) => setTimeout(r, 450));
+  const r = await fetch(`${p.base}/?p=${code}`, { redirect: 'manual' });
+  assert.equal(r.status, 403);
+  assert.match(await r.text(), /expired/);
+});
+
+test('a code used on the public host gets a Secure cookie even without X-Forwarded-Proto', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const code = new URL((await (await p.mint()).json()).url).searchParams.get('p');
+  const r = await new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: `/?p=${code}`, headers: { host: 'mac.example-tailnet.ts.net' } }, (res) => { res.resume(); resolve(res); }); q.on('error', reject); q.end(); });
+  assert.equal(r.statusCode, 303);
+  assert.match(r.headers['set-cookie'][0], /; Secure/);
+});
+
+test('the terminal socket upgrades on the public host with an https Origin, and not with an http one', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const upgrade = (origin) => new Promise((resolve) => {
+    const q = http.request({ host: '127.0.0.1', port, path: `/api/term/ws?t=${p.token}`, headers: {
+      host: 'mac.example-tailnet.ts.net', origin, cookie: `acp_k=${p.key}`, connection: 'Upgrade', upgrade: 'websocket',
+      'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } });
+    q.on('upgrade', (res, socket) => { socket.destroy(); resolve(res.statusCode); });
+    q.on('response', (res) => { res.resume(); resolve(res.statusCode); });
+    q.on('error', () => resolve('error'));
+    q.end();
+  });
+  assert.equal(await upgrade('https://mac.example-tailnet.ts.net'), 101);
+  assert.equal(await upgrade('http://mac.example-tailnet.ts.net'), 403);
+});
+
+test('/sw.js carries a cache name made from the offline page, with no placeholder left', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-'));
+  const s = start(port, prefs); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const body = await fetch(`http://127.0.0.1:${port}/sw.js`).then((r) => r.text());
+  assert.match(body, /'fleet-offline-[0-9a-f]{12}'/);
+  assert.doesNotMatch(body, /__OFFLINE_HASH__/);
 });

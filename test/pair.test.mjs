@@ -4,6 +4,8 @@ import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'
 import { spawn } from 'node:child_process';
 import { pairUrl, main } from '../cli.mjs';
 import { loadQr, qrLines } from '../fleet/qr.mjs';
+import { createPairCodes } from '../fleet/pair-codes.mjs';
+import { swSource } from '../fleet/sw-source.mjs';
 
 const KEY = 'a'.repeat(48);
 
@@ -65,4 +67,40 @@ test('pair without a public host says how to set one and still prints the loopba
   });
   assert.match(out, /"public"/);
   assert.match(out, new RegExp(`http://127\\.0\\.0\\.1:${port}/\\?k=[0-9a-f]{48}`));
+});
+
+test('pairing codes: single use, two minutes, five alive at most, expired ones pruned on mint', () => {
+  let t = 1000;
+  const c = createPairCodes({ now: () => t });
+  assert.equal(c.ttlMs, 120000);
+  const a = c.mint();
+  assert.match(a, /^[0-9a-f]{48}$/);
+  assert.equal(c.consume(a), true);
+  assert.equal(c.consume(a), false, 'spent');
+  assert.equal(c.consume('nope'), false);
+  assert.equal(c.consume(undefined), false);
+  const b = c.mint();
+  t += 119_999; assert.equal(c.consume(b), true, 'still live just inside two minutes');
+  const d = c.mint();
+  t += 120_000; assert.equal(c.consume(d), false, 'expired at two minutes');
+  const live = [1, 2, 3, 4, 5, 6].map(() => c.mint());
+  assert.equal(c.size(), 5);
+  assert.equal(c.consume(live[0]), false, 'the oldest made room');
+  assert.equal(c.consume(live[5]), true);
+  t += 200_000;
+  c.mint();
+  assert.equal(c.size(), 1, 'expired codes are pruned on the next mint');
+});
+
+test('the served service worker names its cache for the offline page: a changed page, a new name', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-sw-'));
+  fs.copyFileSync(new URL('../public/sw.js', import.meta.url), path.join(dir, 'sw.js'));
+  fs.writeFileSync(path.join(dir, 'offline.html'), '<p>one</p>');
+  const name = (src) => /'(fleet-offline-[0-9a-f]{12})'/.exec(src)?.[1];
+  const first = swSource(dir), again = swSource(dir);
+  assert.ok(name(first));
+  assert.equal(name(again), name(first), 'stable while the page is unchanged');
+  fs.writeFileSync(path.join(dir, 'offline.html'), '<p>two</p>');
+  assert.notEqual(name(swSource(dir)), name(first));
+  assert.doesNotMatch(first, /__OFFLINE_HASH__/);
 });

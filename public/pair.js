@@ -13,7 +13,6 @@
     #pair-dlg p { margin: 0 0 12px; font-size: 13px; color: var(--grey); }
     #pair-dlg .qr { background: #fff; padding: 12px; width: 264px; height: 264px; margin: 0 0 12px; }
     #pair-dlg .qr svg { display: block; width: 100%; height: 100%; }
-    #pair-dlg code { display: block; font: inherit; font-size: 12px; word-break: break-all; color: var(--grey); margin: 0 0 12px; user-select: all; }
     #pair-dlg .acts { display: flex; justify-content: flex-end; }
     #pair-dlg button { color: var(--blue); }
     #pair-dlg .err { color: var(--red); }`;
@@ -56,9 +55,11 @@
       }
       if (!window.qrcode) await load('/vendor/qrcode.js');
       const tile = document.createElement('div'); tile.className = 'qr'; tile.innerHTML = svgOf(r.url);
-      const link = document.createElement('code'); link.textContent = r.url;
-      note.textContent = 'Scan this with the phone\'s camera, once. It signs that phone in to this panel, so do not share the code or the address.';
-      dlg.insertBefore(tile, acts); dlg.insertBefore(link, acts);
+      // The QR only: the address is deliberately not printed (it would sit in screenshots and the clipboard). It is a one-time code, not the panel's key.
+      const mins = Math.max(1, Math.round((r.expiresInMs || 120000) / 60000));
+      note.textContent = 'Scan this with the phone\'s camera, once. It signs that phone in to this panel, so do not share the code.';
+      const valid = document.createElement('p'); valid.textContent = `Valid for ${mins} minute${mins === 1 ? '' : 's'}, one use. Press Pair a phone again for another.`;
+      dlg.insertBefore(tile, acts); dlg.insertBefore(valid, acts);
     } catch (e) {
       note.className = 'err'; note.textContent = String(e.message || e);
     }
