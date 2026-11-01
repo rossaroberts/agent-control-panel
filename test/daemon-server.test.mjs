@@ -445,3 +445,60 @@ test('the last board page going does not hand a request back while a Fleet page 
   await sleep(1000); // well past the 300 ms a board page is given to come back
   assert.equal(await hook.answeredWithin(10), null, 'still held: someone is looking on Fleet');
 });
+
+test('/api/fleet/decide answers a request whichever local profile it belongs to; the board refuses that one, and a second answer finds it gone', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const page = await fleetPage(port, p); t.after(page.close);
+  // Its session runs under another profile than the one on the board: the transcript says which folder it is under.
+  const other = path.join(job.home, '.claude-other');
+  const hook = holdRequest(port, { transcript_path: path.join(other, 'projects', '-x', 's1-fixture.jsonl') });
+  assert.equal(await hook.answeredWithin(300), null);
+  const { row } = await fleetRow(p, 's1-fixture');
+  assert.ok(row.pending?.id, 'Fleet\'s row has it whichever profile it is under');
+  const board = await apiCall(p, '/api/decide', { id: row.pending.id, behavior: 'allow' });
+  assert.equal(board.status, 409);
+  assert.match((await board.json()).error, /belongs to a profile that is not on the board/);
+  assert.equal(await hook.answeredWithin(100), null, 'the board\'s refusal answered nothing');
+  const first = await apiCall(p, '/api/fleet/decide', { id: row.pending.id, behavior: 'allow', always: true });
+  assert.deepEqual(await first.json(), { ok: true });
+  const answer = JSON.parse((await hook.answeredWithin(2000)).text).hookSpecificOutput.decision;
+  assert.equal(answer.behavior, 'allow');
+  assert.equal(answer.updatedPermissions?.[0]?.rules?.[0]?.ruleContent, 'ls:*', '"always" adopts the request\'s own suggestions');
+  // Two pages pressing Allow: the second finds it gone, and nothing is sent twice.
+  const second = await apiCall(p, '/api/fleet/decide', { id: row.pending.id, behavior: 'allow' });
+  const gone = await second.json();
+  assert.equal(gone.ok, false);
+  assert.match(gone.error, /gone/);
+});
+
+test('/api/fleet/decide keeps the board\'s answers: deny with a reason, a question\'s answers, and refuses what decide() refuses', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const page = await fleetPage(port, p); t.after(page.close);
+  const decide = async (route, body) => (await apiCall(p, route, body)).json();
+  const idOf = async () => (await fleetRow(p, 's1-fixture')).row.pending.id;
+  // A bare allow of a question is not an answer: only `answer` is, and it must answer every question it asked.
+  const asked = holdRequest(port, { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Which?', options: [{ label: 'A' }, { label: 'B' }], multiSelect: true }] } });
+  assert.equal(await asked.answeredWithin(300), null);
+  const qid = await idOf();
+  assert.match((await decide('/api/fleet/decide', { id: qid, behavior: 'answer', answers: { 'Not asked': 'A' } })).error, /Answer each question/);
+  assert.deepEqual(await decide('/api/fleet/decide', { id: qid, behavior: 'answer', answers: { 'Which?': 'A, B' } }), { ok: true });
+  const got = JSON.parse((await asked.answeredWithin(2000)).text).hookSpecificOutput.decision;
+  assert.deepEqual(got.updatedInput.answers, { 'Which?': 'A, B' });
+  const denied = holdRequest(port);
+  assert.equal(await denied.answeredWithin(300), null);
+  assert.deepEqual(await decide('/api/fleet/decide', { id: await idOf(), behavior: 'deny', message: 'not that one' }), { ok: true });
+  assert.deepEqual(JSON.parse((await denied.answeredWithin(2000)).text).hookSpecificOutput.decision, { behavior: 'deny', message: 'not that one' });
+  // Not a request at all, and an open one (read from a transcript) that is not open any more: the Board's own words.
+  assert.match((await decide('/api/fleet/decide', { id: 'nope', behavior: 'allow' })).error, /That request is gone/);
+  assert.match((await decide('/api/fleet/decide', { id: 'open:no-such-session:toolu_1', behavior: 'approve-plan', mode: 'auto' })).error, /That session is gone/);
+  assert.match((await decide('/api/fleet/decide', { id: 'open:s1-fixture:toolu_1', behavior: 'approve-plan', mode: 'auto' })).error, /not asking that any more/);
+  assert.match((await decide('/api/fleet/decide', { id: 'open:', behavior: 'allow' })).error, /gone/);
+  const bare = await fetch(`${p.base}/api/fleet/decide`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(bare.status, 403, 'only for a paired page with its token');
+});

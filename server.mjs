@@ -472,10 +472,11 @@ function settle(id, decision, why) {
   return true;
 }
 
-function decide(body) {
+/** `anyProfile`: Fleet's card answers a request of any local profile, not only the one on the board. */
+function decide(body, { anyProfile = false } = {}) {
   const p = pending.get(body?.id);
   if (!p) return { ok: false, error: 'That request is gone: answered in the terminal or expired.' };
-  if (p.profileDir !== configDir) return { ok: false, error: 'That request belongs to a profile that is not on the board.' };
+  if (!anyProfile && p.profileDir !== configDir) return { ok: false, error: 'That request belongs to a profile that is not on the board.' };
   let decision;
   if (body.behavior === 'deny') {
     decision = { behavior: 'deny', message: String(body.message || 'Denied from the agent control panel.') };
@@ -514,6 +515,13 @@ function decide(body) {
   } else return { ok: false, error: 'behavior must be allow, deny, answer or approve-plan' };
   settle(p.id, decision, body.behavior);
   return { ok: true };
+}
+
+/** Fleet's card answers a held request whichever local profile it is under. One the panel no longer holds (`open:<session>:<tool use>`,
+ *  read from a transcript) goes in on its own screen, the way the board answers it. */
+function decideFromFleet(body) {
+  const open = /^open:([^:]+):(.+)$/.exec(String(body?.id ?? ''));
+  return open ? answerOpen({ ...body, sessionId: open[1], toolUseId: open[2] }) : decide(body, { anyProfile: true });
 }
 
 // ---------------------------------------------------------------- launch + stop
@@ -1883,6 +1891,10 @@ async function handle(req, res) {
     try { body = await readBody(req); } catch { return send(res, 400, { error: 'bad body' }); }
     if (url.pathname === '/api/decide') {
       const r = decide(body);
+      return send(res, r.ok ? 200 : 409, r);
+    }
+    if (url.pathname === '/api/fleet/decide') {
+      const r = await decideFromFleet(body);
       return send(res, r.ok ? 200 : 409, r);
     }
     if (url.pathname === '/api/launch') {
