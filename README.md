@@ -293,6 +293,14 @@ session cannot publish a claude.ai Artifact and is told to write the file in the
 existing ones pass, as does a publish when `ACP_ALLOW_ARTIFACT=1` is set or its `url` is a line of
 `~/.fleet-panel/artifact-allow.txt`. Run it with `--dry-run` first; a copy of `settings.json` is kept beside it.
 
+The Documents list shows under the session's name in Fleet, newest first, with a dot while a write is under way; a tap opens
+the file beside the session: markdown rendered (raw HTML in it is shown as text), HTML in a frame that runs its own scripts and
+can reach nothing of the panel (`sandbox="allow-scripts"`, no `allow-same-origin`), anything else as text, and **Source** for the
+text as written. A write while it is open shows at once, in place. It is a column at the right edge from 1100 px wide (its width
+is yours, kept as `fleet.doc.width`), over the session between 720 and 1100 px (a `Documents`/`Session` toggle in each head), and
+a sheet on the phone (back closes it, and is a history step of its own). `node tools/phone-shot.mjs --doc` checks all of it in a
+browser against a fixture world of its own; it never touches the panel on `:4747`.
+
 Other machines, names and epics go in `fleet.json` beside `prefs.json`:
 
 ```json
