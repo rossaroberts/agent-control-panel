@@ -275,6 +275,55 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 #p-tools { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; font-size: 13px; min-height: 1.4em; color: var(--grey); }
 #p-tools:empty { display: none; }
 
+/* a held request: its card sits above the reply box on the phone, at the top of the pane on a desktop, and answers the way the
+   Board does. Words, not boxes: a tint, a rule above and below, text buttons. */
+.card { flex: none; max-height: 55%; overflow-y: auto; overscroll-behavior: contain; padding: 10px 14px 6px; background: var(--tint); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 13px; line-height: 1.5; }
+.card [hidden] { display: none !important; }
+.card .hd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; }
+.card .tool { color: var(--orange); font-weight: 500; }
+.card .from, .card .hint, .card small { color: var(--grey); }
+.card pre.in { margin: 4px 0 6px; padding: 6px 8px; max-height: 40vh; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--paper); border-radius: 3px; font: inherit; font-size: 13px; line-height: 1.45; } /* what a yes is for, whole: it scrolls, it is never clamped */
+.card .path { margin: 2px 0 0; color: var(--grey); overflow-wrap: anywhere; }
+.card .warn { margin: 4px 0 6px; color: var(--orange); }
+.card[data-settling] > :not(.sent) { display: none; } /* a beat after the next request takes the place of the one answered */
+.card .acts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 20px; }
+.card .b { color: var(--grey); min-height: 32px; padding: 0; text-align: left; }
+.card .b:hover:not(:disabled) { color: var(--ink); }
+.card .b.go { color: var(--blue); font-weight: 500; }
+.card .b.no { color: var(--red); }
+.card .b:disabled { color: var(--quiet); cursor: default; }
+.card .reason, .card .other, .card .fb { display: block; width: 100%; margin: 2px 0 4px; padding: 4px 0; font-size: 13px; line-height: 1.5; border-bottom: 1px dotted var(--quiet); caret-color: var(--blue); }
+.card .reason:focus, .card .other:focus, .card .fb:focus { outline: none; border-bottom-color: var(--ink); }
+.card .reason::placeholder, .card .other::placeholder, .card .fb::placeholder { color: var(--grey); }
+.card .fb { resize: none; min-height: 3em; }
+.card fieldset.q { border: 0; margin: 6px 0 0; padding: 0; min-width: 0; }
+.card legend { padding: 0; font-weight: 500; }
+.card legend .tag { color: var(--grey); font-weight: 400; margin-right: 10px; }
+.card .opts { display: flex; flex-direction: column; align-items: flex-start; }
+.card .opt { display: block; width: 100%; padding: 3px 0; min-height: 32px; text-align: left; color: var(--ink); }
+.card .opt::before { content: '○ '; color: var(--quiet); }
+.card .opt[aria-pressed="true"], .card .opt[aria-pressed="true"]::before { color: var(--blue); }
+.card .opt[aria-pressed="true"]::before { content: '● '; }
+.card .opt small { display: block; padding-left: 2ch; }
+.card .opt:disabled { color: var(--quiet); }
+.card .plan { max-height: 30vh; overflow-y: auto; margin: 4px 0 8px; }
+.card .plan p { margin: 0 0 .5em; } .card .plan ul, .card .plan ol { margin: 0 0 .5em; padding-left: 2.4ch; }
+.card .plan pre { margin: 0 0 .5em; padding: 6px 8px; background: var(--paper); border-radius: 3px; overflow-x: auto; }
+.card .plan code { background: var(--paper); border-radius: 3px; padding: 0 4px; }
+.card .plan .hd { font-weight: 500; display: block; }
+.card .hint { margin: 2px 0 0; }
+.card .acts.stick { position: sticky; bottom: 0; background: var(--tint); padding-top: 2px; } /* a long question scrolls under its Send */
+.card .err { margin: 4px 0 0; color: var(--red); }
+.card .err .b { margin-left: 12px; min-height: 0; }
+.card .sent { margin: 0; color: var(--green); }
+.card[aria-busy="true"] { opacity: .6; pointer-events: none; }
+body.phone .card { padding: 12px 16px 6px; font-size: 15px; }
+body.phone .card pre.in { font-size: 14px; }
+body.phone .card .b, body.phone .card .opt { min-height: 44px; font-size: 15px; }
+body.phone .card .reason, body.phone .card .other, body.phone .card .fb { font-size: 16px; min-height: 44px; }
+body.phone .card .fb { min-height: 4.5em; }
+body.phone .card:has(+ #p-foot[hidden]) { padding-bottom: calc(8px + max(var(--safe-b, 0px), var(--kb, 0px))); }
+
 
 /* the phone: two screens that slide. The queues are the page; the session is the pane, full width, sliding in over them.
    Everything that wants a pointer or a keyboard (groups, drag, rename, Satellite, Board, the fold rail) is left to the desktop.
@@ -693,6 +742,179 @@ function md(text) {
     blocks.push(h('p', {}, inline(para.join(' '))));
   }
   return blocks;
+}
+
+// ---------------------------------------------------------------- the card for a held request
+// A session that waits at a permission prompt, a question or a plan shows a card, answered with the Board's own payloads through
+// /api/fleet/decide. The panel on this Mac holds the request; `x.pending` is on this Mac's rows alone, so a remote session's
+// prompt never gets a card. A card is built once per request and kept through the redraws, so a half-typed reason survives them;
+// `pane.cardBusy` is the id being sent, which guards a double tap.
+let heldCard = null; // { sig, key, el }
+let lastSend = null; // { key, at }: the last answer this page sent, and for which row
+const cardKind = (p) => (p.toolName === 'AskUserQuestion' ? 'question' : p.toolName === 'ExitPlanMode' ? 'plan' : p.open ? null : 'permission');
+const hasCard = (x) => Boolean(x?.pending && cardKind(x.pending));
+const TOO_BIG = 'input too large to show here; answer on the Mac';
+/** Anything of the input the panel had to cut (a string over 4,000 characters, or nesting too deep to carry) is not shown whole: the
+ *  yes would be for text that is not on the card, whatever the tool (a command, a file's content, an MCP call). */
+const cutInput = (p) => Array.isArray(p.clipped) && p.clipped.length > 0;
+/** Whether the card may offer an Allow: only for an input it shows whole. A cut or oversize input gets Deny and "answer on the Mac". */
+const canAllow = (p) => !p.toolInput?._truncated && !cutInput(p);
+/** Whether "Allow and remember" may be offered: the rules it saves are the ones the card shows, whole. */
+const remembers = (p) => Array.isArray(p.suggestions) && p.suggestions.length > 0;
+const CUT = 'input too long to show in full; answer on the Mac';
+/** What a yes is for, as the card shows it: the command whole, a file's path and what goes in it, each edit as before → after, else
+ *  the input as JSON. In a box that scrolls, never a clamp. The panel cut any string over 4,000 characters and says so in the
+ *  text ("… N more chars"); an input over 16 kB is not sent, and the card says to answer on the Mac. */
+function inputView(p) {
+  const i = p.toolInput ?? {}, pre = (text) => h('pre', { class: 'in', tabindex: '0', text });
+  if (i._truncated) return [h('p', { class: 'warn', role: 'note', text: TOO_BIG })];
+  let parts;
+  if (p.toolName === 'Bash' && typeof i.command === 'string') {
+    // What it says it is for, under it, and the two switches that change what it may do, in plain words.
+    const flags = [i.dangerouslyDisableSandbox === true ? 'sandbox off' : null, i.run_in_background === true ? 'in background' : null].filter(Boolean);
+    parts = [pre(i.command), typeof i.description === 'string' && i.description ? h('p', { class: 'hint', text: i.description }) : null, flags.length ? h('p', { class: 'warn', text: flags.join(' · ') }) : null];
+  } else if (p.toolName === 'Write') parts = [h('p', { class: 'path', text: String(i.file_path ?? '') }), pre(String(i.content ?? ''))];
+  else if (p.toolName === 'Edit' || p.toolName === 'MultiEdit') {
+    const edits = Array.isArray(i.edits) ? i.edits : [{ old_string: i.old_string, new_string: i.new_string }];
+    parts = [h('p', { class: 'path', text: String(i.file_path ?? '') }), ...edits.map((e) => pre(`${e?.old_string ?? ''}\n→\n${e?.new_string ?? ''}`))];
+  } else parts = [pre(JSON.stringify(i, null, 2))];
+  return [...parts, cutInput(p) ? h('p', { class: 'warn', role: 'note', text: CUT }) : null];
+}
+const DEST = { session: 'for this session', localSettings: 'in local settings', projectSettings: 'in project settings', userSettings: 'in your user settings' };
+/** What "Allow and remember" would save, in words: the rules the request itself suggests. */
+function rememberLine(suggestions) {
+  const lines = suggestions.flatMap((u) => (u.type === 'addRules' ? (u.rules ?? []).map((r) => (r.ruleContent ? `${r.toolName}(${r.ruleContent})` : r.toolName))
+    : u.type === 'addDirectories' ? (u.directories ?? []).map((d) => `access to ${d}`) : u.type === 'setMode' ? [`switch to ${u.mode} mode`] : [u.type]));
+  return `Remember saves ${lines.join(', ')} ${DEST[suggestions[0]?.destination] ?? ''}`.trim() + '.';
+}
+/** What every card shares: the head, the error line, and sending (one at a time; the answer, "Sent", or why not). */
+function cardShell(x, p, name) {
+  const el = h('section', { class: 'card', 'data-kind': cardKind(p), 'data-id': p.id, 'aria-label': `${name} waiting for you` });
+  const err = h('p', { class: 'err', role: 'alert', hidden: true });
+  const lock = (on) => { for (const c of el.querySelectorAll('button, input, textarea')) if (!c.closest('.err')) c.disabled = on; if (!on) el._sync?.(); };
+  el._lock = lock;
+  const head = h('div', { class: 'hd' }, h('span', { class: 'tool', text: name }), p.agentId ? h('span', { class: 'from', text: `from its subagent${p.agentType ? ` ${p.agentType}` : ''}` }) : null,
+    h('span', { class: 'from of', hidden: !(p.of > 1), text: `1 of ${p.of}` }));
+  async function send(payload) {
+    if (pane.cardBusy === p.id) return;
+    pane.cardBusy = p.id; err.hidden = true; el.setAttribute('aria-busy', 'true');
+    const r = await api('/api/fleet/decide', { id: p.id, ...payload }).catch((e) => ({ ok: false, error: String(e.message), retry: true }));
+    pane.cardBusy = null; el.removeAttribute('aria-busy');
+    if (r.ok) { el.dataset.sent = 'true'; lastSend = { key: keyOf(x), at: Date.now() }; el.replaceChildren(h('p', { class: 'sent', text: 'Sent' })); load(); return; }
+    // What the panel said ("That request is gone": answered in the terminal, or expired). Nothing is armed after it.
+    lock(true);
+    const again = r.retry || !/gone|not asking/i.test(r.error ?? '') ? h('button', { class: 'b', type: 'button', text: 'Try again', onclick: () => { err.hidden = true; lock(false); } }) : null;
+    err.replaceChildren(...[r.error || 'That did not go through.', again].filter(Boolean));
+    err.hidden = false;
+  }
+  return { el, err, send, head };
+}
+/** Deny with a reason: the field folds open on the first tap, the second sends. */
+function denier(send, { label, placeholder, fallback }) {
+  const go = () => { if (input.hidden) { input.hidden = false; input.focus(); return; } send({ behavior: 'deny', message: input.value.trim() || fallback }); };
+  const input = h('input', { class: 'reason', type: 'text', hidden: true, placeholder, 'aria-label': placeholder, enterkeyhint: 'send', onkeydown: (e) => { if (e.key === 'Enter') go(); } });
+  return { input, button: h('button', { class: 'b no', type: 'button', 'data-act': 'deny', text: label, onclick: go }) };
+}
+function permissionCard(x, p) {
+  const { el, err, send, head } = cardShell(x, p, p.toolName);
+  const no = denier(send, { label: 'Deny', placeholder: 'Reason for Claude (optional)', fallback: undefined });
+  const may = canAllow(p);
+  el.append(...[head, ...inputView(p),
+    h('div', { class: 'acts' },
+      may ? h('button', { class: 'b go', type: 'button', 'data-act': 'allow', text: 'Allow', onclick: () => send({ behavior: 'allow', always: false }) }) : null,
+      may && remembers(p) ? h('button', { class: 'b', type: 'button', 'data-act': 'always', text: 'Allow and remember', onclick: () => send({ behavior: 'allow', always: true }) }) : null,
+      no.button),
+    no.input, may && remembers(p) ? h('p', { class: 'hint', text: rememberLine(p.suggestions) }) : null, err].filter(Boolean));
+  return el;
+}
+function questionCard(x, p) {
+  const { el, err, send, head } = cardShell(x, p, 'Question');
+  if (p.toolInput?._truncated) { el.append(head, h('p', { class: 'warn', role: 'note', text: TOO_BIG })); return el; }
+  const qs = Array.isArray(p.toolInput?.questions) ? p.toolInput.questions : [];
+  // The panel no longer holds an open one: the answers go in on its own screen, and that screen can't press several picks.
+  const many = p.open && qs.some((q) => q.multiSelect);
+  const reads = []; // one per question: its answer, '' while there is none
+  const sendBtn = h('button', { class: 'b go', type: 'button', 'data-act': 'send', text: qs.length > 1 ? 'Send answers' : 'Send answer', disabled: true });
+  const sync = () => { sendBtn.disabled = many || reads.some((r) => !r()); };
+  el._sync = sync;
+  const sets = qs.map((q) => {
+    const multi = Boolean(q.multiSelect), picked = new Set(), options = Array.isArray(q.options) ? q.options : [];
+    let useOther = false;
+    const paint = () => buttons.forEach((b, i) => b.setAttribute('aria-pressed', String(picked.has(i))));
+    const buttons = options.map((o, i) => h('button', { class: 'opt', type: 'button', 'aria-pressed': 'false', 'data-label': o.label, onclick: () => {
+      if (multi) { if (picked.has(i)) picked.delete(i); else picked.add(i); } else { picked.clear(); picked.add(i); useOther = false; }
+      paint(); sync();
+    } }, o.label, o.description ? h('small', { text: o.description }) : null));
+    const other = h('input', { class: 'other', type: 'text', placeholder: 'Something else', 'aria-label': `Your own answer to: ${q.question}`, enterkeyhint: 'send',
+      oninput: () => { const t = other.value.trim(); if (multi) useOther = Boolean(t); else { useOther = Boolean(t); if (t) picked.clear(); } paint(); sync(); },
+      onkeydown: (e) => { if (e.key === 'Enter') submit(); } });
+    // The Board's join: the picked labels in the order they are offered, then your own words, with ", " between.
+    reads.push(() => [...options.flatMap((o, i) => (picked.has(i) ? [o.label] : [])), ...(useOther && other.value.trim() ? [other.value.trim()] : [])].join(', '));
+    return h('fieldset', { class: 'q' },
+      h('legend', {}, q.header ? h('span', { class: 'tag', text: q.header }) : null, q.question, multi ? h('span', { class: 'hint', text: ' Pick any that apply.' }) : null),
+      h('div', { class: 'opts' }, buttons), other);
+  });
+  const submit = () => { if (!sendBtn.disabled) send({ behavior: 'answer', answers: Object.fromEntries(qs.map((q, i) => [q.question, reads[i]()])) }); };
+  sendBtn.onclick = submit;
+  const no = p.open ? null : denier(send, { label: 'Don\'t answer', placeholder: 'Why not (optional)', fallback: 'The user chose not to answer this question.' });
+  el.append(...[head,
+    p.open ? h('p', { class: 'hint', text: many ? 'It asks for several picks at once, which the panel can\'t press for it: answer it in its terminal.'
+      : 'The panel stopped holding this question, so your answers go in on its own screen, as if you picked them there.' }) : null,
+    ...sets, no?.input, err, h('div', { class: 'acts stick' }, sendBtn, no?.button)].filter(Boolean));
+  sync();
+  return el;
+}
+function planCard(x, p) {
+  const { el, err, send, head } = cardShell(x, p, 'Plan');
+  if (p.toolInput?._truncated) { el.append(head, h('p', { class: 'warn', role: 'note', text: TOO_BIG })); return el; }
+  const i = p.toolInput ?? {};
+  const fb = h('textarea', { class: 'fb', rows: '2', placeholder: 'Tell Claude what to change', 'aria-label': 'What to change in the plan' });
+  const back = h('button', { class: 'b', type: 'button', 'data-act': 'back', text: 'Send back', disabled: true, onclick: () => send({ behavior: 'deny', message: fb.value.trim() }) });
+  const sync = () => { back.disabled = !fb.value.trim(); };
+  el._sync = sync;
+  fb.addEventListener('input', sync);
+  el.append(...[head,
+    h('p', { class: 'hint', text: p.open ? 'The panel stopped holding this plan, so your choice goes in on its own screen, as if you picked it there.' : 'It is ready to start. Approve the plan, or send it back with what to change.' }),
+    h('div', { class: 'plan', tabindex: '0', role: 'region', 'aria-label': 'The plan' }, md(i.plan || 'The plan is empty.')),
+    i.planFilePath ? h('p', { class: 'hint', text: `Saved at ${i.planFilePath}` }) : null,
+    h('div', { class: 'acts' },
+      h('button', { class: 'b go', type: 'button', 'data-act': 'approve-auto', text: 'Approve, use auto mode', onclick: () => send({ behavior: 'approve-plan', mode: 'auto' }) }),
+      h('button', { class: 'b', type: 'button', 'data-act': 'approve-ask', text: 'Approve, ask before edits', onclick: () => send({ behavior: 'approve-plan', mode: 'default' }) })),
+    fb, h('div', { class: 'acts' }, back), err].filter(Boolean));
+  return el;
+}
+/** The card for the session open in the pane, or null. The same element comes back while the request is the same. */
+function renderCard(x) {
+  const p = x?.pending, kind = p && cardKind(p);
+  if (!kind) return null;
+  const sig = `${keyOf(x)}|${p.id}`;
+  if (heldCard?.sig === sig) {
+    const of = heldCard.el.querySelector('.hd .of'); // another request of this session arrived (or this one's neighbour went): "1 of 2" follows
+    if (of) { of.textContent = `1 of ${p.of}`; of.hidden = !(p.of > 1); }
+    return heldCard.el;
+  }
+  // The next request of the same session takes the place of the one just answered, a few ms later, under the finger that pressed
+  // it: a second tap would answer a request nobody has read. The new card says so for a beat and takes no tap in it. That holds
+  // whether the answered card is still there when the next arrives, or the next comes a moment after it went (a push or two apart).
+  const recent = lastSend?.key === keyOf(x) && Date.now() - lastSend.at < BEAT_MS;
+  const next = heldCard?.key === keyOf(x) || recent, sent = heldCard?.el.dataset.sent === 'true' || recent;
+  heldCard?.el.remove();
+  heldCard = { sig, key: keyOf(x), el: { permission: permissionCard, question: questionCard, plan: planCard }[kind](x, p) };
+  if (next) beat(heldCard.el, sent);
+  return heldCard.el;
+}
+const BEAT_MS = 700;
+function beat(el, sent) {
+  const note = h('p', { class: 'sent', text: sent ? 'Sent' : 'Next request' });
+  el.dataset.settling = 'true'; el.prepend(note); el._lock(true);
+  setTimeout(() => { note.remove(); delete el.dataset.settling; el._lock(false); }, BEAT_MS);
+}
+/** The card goes above the reply box on the phone (inside the keyboard's lift) and at the top of the pane on a desktop. */
+function placeCard(x) {
+  const el = renderCard(x), aside = $('pane');
+  if (!el) { heldCard?.el.remove(); heldCard = null; return; }
+  const before = phone.matches ? $('p-foot') : $('p-body');
+  if (el.parentNode !== aside || el.nextElementSibling !== before) aside.insertBefore(el, before);
 }
 
 // ---------------------------------------------------------------- TEST, to try it yourself
@@ -1178,6 +1400,7 @@ function renderPane(toEnd = false) {
     hideTerms();
     $('p-head').replaceChildren(h('div', { class: 'p-title faint', text: 'It is no longer listed.' })); headSig = '';
     $('p-body').hidden = false; $('p-body').replaceChildren(); $('p-foot').hidden = true;
+    placeCard(null);
     return;
   }
   const term = termView(x);
@@ -1185,6 +1408,7 @@ function renderPane(toEnd = false) {
   $('p-rail').title = 'Unfold (⌘\\)';
   // Never rebuilt under your caret: a name or group being typed stays as it is.
   if (!document.activeElement?.matches?.('.p-title, .p-group')) renderHead(x, term);
+  placeCard(x);
   if (term) {
     $('p-body').hidden = true; $('p-foot').hidden = true;
     // Passing through with j/k: the terminal (a process on the panel) is attached once you have settled on a row, not for
@@ -1264,7 +1488,7 @@ function renderHead(x, term) {
     h('span', { class: 'p-step', text: `${atPrompt(x) ? 'needs your yes for: ' : ''}${x.running.step} · ${ago(x.running.since)}`,
       title: `${atPrompt(x) ? 'Waiting for your yes since' : 'Running since'} ${new Date(x.running.since).toLocaleTimeString()}${x.running.cmd ? `\n${x.running.cmd}` : ''}` }),
     x.queued?.length ? h('span', { class: 'p-wait', text: `${x.queued.length} of yours waiting`, title: x.queued.join('\n') }) : null,
-    atPrompt(x) ? h('span', { class: 'p-wait', text: attachable(x) ? 'answer in its terminal' : movable(x) ? 'move it here and it goes on' : 'answer it on claude.ai' })
+    atPrompt(x) ? h('span', { class: 'p-wait', text: hasCard(x) ? 'answer below' : attachable(x) ? 'answer in its terminal' : movable(x) ? 'move it here and it goes on' : 'answer it on claude.ai' })
       : x.running.tool === 'Bash' && x.state !== 'needs-you' ? h('button', { class: `act${pane.armStop ? ' armed' : ''}`, text: pane.armStop ? 'stop it and read?' : 'interject',
       title: 'Stop the command this step runs (only that: the session goes on), so it reads what you sent now (i)', onclick: interjectNow }) : null) : null;
   // The agents it has going, one line each: what it was asked, its last step, how long since it moved.

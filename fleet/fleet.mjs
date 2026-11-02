@@ -65,7 +65,9 @@ export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED 
 export const easeMs = (ratio) => (ratio > 4 ? 60_000 : ratio > 2 ? 30_000 : 0);
 
 // `notifier` replaces what notify() calls out to (tests only): the push sender, the payload builder, osascript, the platform.
-export function createFleet({ dir, quiet = () => {}, notifier = {} }) {
+// `phonesChanged` is called when a push service says a phone is gone (404/410: its subscription is dropped), so the panel can look at
+// whether any phone can still be reached.
+export function createFleet({ dir, quiet = () => {}, notifier = {}, phonesChanged = () => {} }) {
   const { push = pushAll, build = needsYou, exec = execFile, platform = process.platform } = notifier;
   const file = path.join(dir, 'fleet.json');
   const titlesFile = path.join(dir, 'fleet-titles.json');
@@ -95,7 +97,7 @@ export function createFleet({ dir, quiet = () => {}, notifier = {} }) {
     // The account a profile's login really is, where its config file says another (`machine:profile` → email).
     const logins = c.logins && typeof c.logins === 'object'
       ? Object.fromEntries(Object.entries(c.logins).filter(([k, v]) => /^[\w .-]{1,40}:[\w.-]{1,40}$/.test(k) && /^[^\s@]+@[^\s@]+$/.test(String(v))).map(([k, v]) => [k, String(v)])) : {};
-    return { machines, names, self, epics, logins, public: publicHost(file), file };
+    return { machines, names, self, epics, logins, notify: c.notify !== false, public: publicHost(file), file };
   }
 
   // Each machine has one worker for the panel's life: through the machine's open connection, one `node` that has
@@ -404,7 +406,11 @@ export function createFleet({ dir, quiet = () => {}, notifier = {} }) {
     // The phone is its own failure domain: building or sending the push can throw (a lone surrogate in a title breaks the link
     // encoding), and that must neither skip the Mac notification nor abort looked()'s loop over the other sessions.
     if (pub) {
-      try { Promise.resolve(push({ dir, payload: build(machine, x), subject: `https://${pub}` })).catch((e) => console.error('fleet: push failed:', e?.message ?? e)); }
+      try {
+        Promise.resolve(push({ dir, payload: build(machine, x), subject: `https://${pub}` }))
+          .then((r) => { if (r?.dropped > 0) phonesChanged(); })
+          .catch((e) => console.error('fleet: push failed:', e?.message ?? e));
+      }
       catch (e) { console.error('fleet: push failed:', e?.message ?? e); }
     }
     if (!mac) return;

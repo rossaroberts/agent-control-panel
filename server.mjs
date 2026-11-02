@@ -31,6 +31,7 @@ import { admit, takeBuild } from './web-orders.mjs';
 import { workerOf, markStarted, rolledBack, checkForUpdate, recordCheck, lastCheck } from './update.mjs';
 import { checkClone, updateClone, appFor } from './clone-update.mjs';
 import { createFleet } from './fleet/fleet.mjs';
+import { heldIndex, withHeld } from './fleet/held.mjs';
 import { vapidKeys, pushStore } from './fleet/push.mjs';
 import { createTerms } from './fleet/term.mjs';
 import { accept as acceptWs, refuse as refuseWs } from './fleet/ws.mjs';
@@ -119,9 +120,18 @@ const stops = new Map();
 /** Sessions removed or hidden from the panel. One comes back only if it runs again (a resumed terminal session). */
 const dismissed = new Set();
 const clients = new Set();
+/** Fleet's pages, one WebSocket each (the same socket carries its terminals). A page that is open is a page that is looking. */
+const pages = new Set();
 /** Set while no page is connected but one may still come back (RECONNECT_MS). */
 let releaseTimer = null;
-const watched = () => clients.size > 0 || releaseTimer !== null;
+/** Whether a phone can be told and can answer with no page open on this Mac: the panel has a public name to be reached by, a phone asked
+ *  for push, and notifications are on (`"notify": false` in fleet.json turns the phone's push off, so nobody is being told). A request
+ *  is held for it (the terminal's own dialog still shows, and HOLD_MS still expires it). */
+const phoneReachable = () => PUBLIC !== null && fleet.config().notify && pushStore(path.dirname(PREFS)).list().length > 0;
+/** The phones changed (the last one unsubscribed, or a push service said one is gone): with no page and no phone left, a held request
+ *  is handed back after the reconnect time, as if the last page had just gone. */
+function phonesChanged() { if (!phoneReachable()) lookerWent(); }
+const watched = () => clients.size > 0 || pages.size > 0 || releaseTimer !== null || phoneReachable();
 let armed = true;
 let rosterError = null;
 
@@ -138,7 +148,7 @@ const HOME = os.homedir();
 const PREFS = prefsPath();
 const KEY = pairKey(PREFS);
 // Every machine's agents and accounts in one view (fleet/); its machines are listed in fleet.json beside prefs.json.
-const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
+const fleet = createFleet({ dir: path.dirname(PREFS), phonesChanged, quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
 // Satellite: the delivery pipeline on GitHub, every PR from agent to production (fleet/satellite.mjs), read-only.
 const satellite = createSatellite({ snapshot: () => fleet.snapshot(), testUrl: () => (fleet.config().epics ?? []).find((e) => e.test)?.test ?? null });
 // Context: the documents that shape how a session starts, read-only (fleet/context.mjs).
@@ -447,7 +457,10 @@ function holdPermission(e, res) {
   pending.set(id, p);
   if (e.session_id && profileDir === configDir) session(e.session_id).lastEventAt = Date.now();
   broadcast({ type: 'new-request', id });
+  tellPages();
 }
+/** Fleet's pages read the list again at once: a held request opened or settled, so a card appears or goes without a poll. */
+function tellPages() { for (const ws of pages) try { ws.send('{"op":"fleet"}'); } catch {} }
 /** The held requests of the profile on the board. */
 const shownPending = () => [...pending.values()].filter((p) => p.profileDir === configDir);
 
@@ -462,13 +475,15 @@ function settle(id, decision, why) {
     p.res.end(decision ? JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } }) : '');
   }
   broadcast({ type: 'settled', id, why });
+  tellPages();
   return true;
 }
 
-function decide(body) {
+/** `anyProfile`: Fleet's card answers a request of any local profile, not only the one on the board. */
+function decide(body, { anyProfile = false } = {}) {
   const p = pending.get(body?.id);
   if (!p) return { ok: false, error: 'That request is gone: answered in the terminal or expired.' };
-  if (p.profileDir !== configDir) return { ok: false, error: 'That request belongs to a profile that is not on the board.' };
+  if (!anyProfile && p.profileDir !== configDir) return { ok: false, error: 'That request belongs to a profile that is not on the board.' };
   let decision;
   if (body.behavior === 'deny') {
     decision = { behavior: 'deny', message: String(body.message || 'Denied from the agent control panel.') };
@@ -507,6 +522,13 @@ function decide(body) {
   } else return { ok: false, error: 'behavior must be allow, deny, answer or approve-plan' };
   settle(p.id, decision, body.behavior);
   return { ok: true };
+}
+
+/** Fleet's card answers a held request whichever local profile it is under. One the panel no longer holds (`open:<session>:<tool use>`,
+ *  read from a transcript) goes in on its own screen, the way the board answers it. */
+function decideFromFleet(body) {
+  const open = /^open:([^:]+):(.+)$/.exec(String(body?.id ?? ''));
+  return open ? answerOpen({ ...body, sessionId: open[1], toolUseId: open[2] }) : decide(body, { anyProfile: true });
 }
 
 // ---------------------------------------------------------------- launch + stop
@@ -1851,21 +1873,12 @@ async function handle(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     res.write(`retry: 2000\ndata: ${JSON.stringify(snapshot())}\n\n`);
     clients.add(res);
-    if (DAEMON && setRosterPace(true)) pollRoster().then(checkVersions); // back from idle: catch up at once
-    clearTimeout(releaseTimer);
-    releaseTimer = null;
+    lookerCame();
     const ping = setInterval(() => res.write(': ping\n\n'), 20_000);
     req.on('close', () => {
       clearInterval(ping);
       clients.delete(res);
-      // Last tab gone and not back in time: hand every held request back to the terminal, and (under the daemon) slow
-      // the roster down. Not before: until then a held request still needs the fast polls to see a terminal answer.
-      if (clients.size === 0 && releaseTimer === null) releaseTimer = setTimeout(() => {
-        releaseTimer = null;
-        if (clients.size > 0) return;
-        for (const id of [...pending.keys()]) settle(id, null, 'panel closed');
-        if (DAEMON) setRosterPace(false);
-      }, RECONNECT_MS);
+      lookerWent();
     });
     return;
   }
@@ -1877,6 +1890,10 @@ async function handle(req, res) {
     if (url.pathname === '/api/decide') {
       const r = decide(body);
       return send(res, r.ok ? 200 : 409, r);
+    }
+    if (url.pathname === '/api/fleet/decide') {
+      const r = await decideFromFleet(body);
+      return send(res, r.ok ? 200 : 422, r);
     }
     if (url.pathname === '/api/launch') {
       const r = await launch(body);
@@ -1896,10 +1913,10 @@ async function handle(req, res) {
                       // Push: the page asks for the panel's VAPID public key, then hands over the subscription its browser made.
                       '/api/push/key': () => ({ ok: true, publicKey: vapidKeys(path.dirname(PREFS)).publicKey, public: PUBLIC }),
                       '/api/push/subscribe': (b) => pushStore(path.dirname(PREFS)).add(b?.subscription),
-                      '/api/push/unsubscribe': (b) => ({ ok: true, removed: pushStore(path.dirname(PREFS)).remove(String(b?.endpoint ?? '')) }),
+                      '/api/push/unsubscribe': (b) => { const removed = pushStore(path.dirname(PREFS)).remove(String(b?.endpoint ?? '')); phonesChanged(); return { ok: true, removed }; },
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
-                      '/api/update': updateApp, '/api/fleet': () => fleet.snapshot(), '/api/fleet/launch': (b) => fleet.launch(b),
+                      '/api/update': updateApp, '/api/fleet': async () => withHeld(await fleet.snapshot(), heldIndex([...pending.values(), ...openRequests()])), '/api/fleet/launch': (b) => fleet.launch(b),
                       '/api/fleet/peek': (b) => fleet.peek(b), '/api/fleet/doc': (b) => fleet.doc(b), '/api/fleet/send': (b) => fleet.send(b),
                       '/api/fleet/close': (b) => fleet.close(b), '/api/fleet/archive': (b) => fleet.archive(b),
                       '/api/fleet/archive-all': (b) => fleet.archiveAll(b), '/api/fleet/hide': (b) => fleet.hide(b), '/api/fleet/resume': (b) => fleet.resume(b),
@@ -1919,6 +1936,25 @@ async function handle(req, res) {
     }
   }
   send(res, 404, { error: 'not found' });
+}
+
+/** A page (a board tab, or Fleet) is looking: the roster goes fast again, and a release waiting on the last one is called off. */
+function lookerCame() {
+  clearTimeout(releaseTimer);
+  releaseTimer = null;
+  if (DAEMON && setRosterPace(true)) pollRoster().then(checkVersions); // back from idle: catch up at once
+}
+/** A page went. The last one gone and not back in time: hand every held request back to the terminal (unless a phone can still
+ *  answer it), and (under the daemon) slow the roster down. Not before: until then a held request still needs the fast polls to
+ *  see a terminal answer. */
+function lookerWent() {
+  if (clients.size > 0 || pages.size > 0 || releaseTimer !== null) return;
+  releaseTimer = setTimeout(() => {
+    releaseTimer = null;
+    if (clients.size > 0 || pages.size > 0) return;
+    if (!phoneReachable()) for (const id of [...pending.keys()]) settle(id, null, 'panel closed');
+    if (DAEMON) setRosterPace(false);
+  }, RECONNECT_MS);
 }
 
 // Under launchd a server that quit on a taken port would be relaunched every 10 s forever. Wait instead: an app-started
@@ -1978,7 +2014,7 @@ function setRosterPace(fast) {
   return true;
 }
 /** Whether someone may be looking: always outside the daemon, and under it while a page is connected. */
-const looking = () => !DAEMON || clients.size > 0;
+const looking = () => !DAEMON || clients.size > 0 || pages.size > 0;
 
 // Fleet's terminals: one WebSocket per tab (fleet/ws.mjs), checked as the API is: this host, this page, this start's token.
 server.on('upgrade', (req, socket, head) => {
@@ -1990,11 +2026,11 @@ server.on('upgrade', (req, socket, head) => {
   if (!ws) return;
   terms.serve(ws);
   pages.add(ws);
-  ws.on('close', () => pages.delete(ws));
+  lookerCame();
+  ws.on('close', () => { pages.delete(ws); lookerWent(); });
 });
 // Each page's socket also hears when Fleet's list changed between its reads (a hook event): it reads again at once.
-const pages = new Set();
-fleet.onChange(() => { for (const ws of pages) ws.send('{"op":"fleet"}'); });
+fleet.onChange(tellPages);
 
 // A stop (launchd's SIGTERM at a restart or an update, ^C in a terminal): every page is told first, so its terminals say the
 // panel is restarting rather than going quiet, what Fleet holds in memory is written, and the process goes within a second.
