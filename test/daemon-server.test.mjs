@@ -613,3 +613,29 @@ test('a push subscription with no public host holds nothing: the phone could not
   assert.equal((await apiCall(p, '/api/push/subscribe', { subscription: subscription() })).status, 200);
   assert.equal((await holdRequest(port).answeredWithin(2000))?.text, '');
 });
+
+test('"notify": false in fleet.json: a public host and a subscription hold nothing, the phone is not being told', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net', notify: false }));
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  assert.equal((await apiCall(p, '/api/push/subscribe', { subscription: subscription() })).status, 200);
+  assert.equal((await holdRequest(port).answeredWithin(2000))?.text, '');
+});
+
+test('the last subscription going while a request is held (no page, no phone any more) hands it back after the reconnect time, not after an hour', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
+  const s = start(port, prefs, { ...job.env, ACP_RECONNECT_MS: '300' }); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const sub = subscription(), other = { ...subscription(), endpoint: 'https://fcm.googleapis.com/fcm/send/def' };
+  for (const x of [sub, other]) assert.equal((await apiCall(p, '/api/push/subscribe', { subscription: x })).status, 200);
+  const hook = holdRequest(port);
+  assert.equal(await hook.answeredWithin(400), null, 'held for the phones');
+  assert.deepEqual(await (await apiCall(p, '/api/push/unsubscribe', { endpoint: sub.endpoint })).json(), { ok: true, removed: true });
+  assert.equal(await hook.answeredWithin(1200), null, 'one phone is still there');
+  assert.deepEqual(await (await apiCall(p, '/api/push/unsubscribe', { endpoint: other.endpoint })).json(), { ok: true, removed: true });
+  assert.equal((await hook.answeredWithin(3000))?.text, '', 'the last one gone: handed back');
+});

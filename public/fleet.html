@@ -749,28 +749,36 @@ function md(text) {
 // /api/fleet/decide. The panel on this Mac holds the request; `x.pending` is on this Mac's rows alone, so a remote session's
 // prompt never gets a card. A card is built once per request and kept through the redraws, so a half-typed reason survives them;
 // `pane.cardBusy` is the id being sent, which guards a double tap.
-let heldCard = null; // { sig, el }
+let heldCard = null; // { sig, key, el }
+let lastSend = null; // { key, at }: the last answer this page sent, and for which row
 const cardKind = (p) => (p.toolName === 'AskUserQuestion' ? 'question' : p.toolName === 'ExitPlanMode' ? 'plan' : p.open ? null : 'permission');
 const hasCard = (x) => Boolean(x?.pending && cardKind(x.pending));
 const TOO_BIG = 'input too large to show here; answer on the Mac';
-/** A command the panel had to cut is not one to say yes to from here: the yes would be for text that is not on the card. */
-const cutCommand = (p) => p.toolName === 'Bash' && Array.isArray(p.clipped) && p.clipped.includes('command');
-/** Whether the card may offer an Allow: only for an input it shows whole (a file's content cut with its marker still shows what the
- *  file is and where it goes; a command is the thing itself). */
-const canAllow = (p) => !p.toolInput?._truncated && !cutCommand(p);
+/** Anything of the input the panel had to cut (a string over 4,000 characters, or nesting too deep to carry) is not shown whole: the
+ *  yes would be for text that is not on the card, whatever the tool (a command, a file's content, an MCP call). */
+const cutInput = (p) => Array.isArray(p.clipped) && p.clipped.length > 0;
+/** Whether the card may offer an Allow: only for an input it shows whole. A cut or oversize input gets Deny and "answer on the Mac". */
+const canAllow = (p) => !p.toolInput?._truncated && !cutInput(p);
+/** Whether "Allow and remember" may be offered: the rules it saves are the ones the card shows, whole. */
+const remembers = (p) => Array.isArray(p.suggestions) && p.suggestions.length > 0;
+const CUT = 'input too long to show in full; answer on the Mac';
 /** What a yes is for, as the card shows it: the command whole, a file's path and what goes in it, each edit as before → after, else
  *  the input as JSON. In a box that scrolls, never a clamp. The panel cut any string over 4,000 characters and says so in the
  *  text ("… N more chars"); an input over 16 kB is not sent, and the card says to answer on the Mac. */
 function inputView(p) {
   const i = p.toolInput ?? {}, pre = (text) => h('pre', { class: 'in', tabindex: '0', text });
   if (i._truncated) return [h('p', { class: 'warn', role: 'note', text: TOO_BIG })];
-  if (p.toolName === 'Bash' && typeof i.command === 'string') return [pre(i.command), cutCommand(p) ? h('p', { class: 'warn', role: 'note', text: 'command too long to show in full; answer on the Mac' }) : null];
-  if (p.toolName === 'Write') return [h('p', { class: 'path', text: String(i.file_path ?? '') }), pre(String(i.content ?? ''))];
-  if (p.toolName === 'Edit' || p.toolName === 'MultiEdit') {
+  let parts;
+  if (p.toolName === 'Bash' && typeof i.command === 'string') {
+    // What it says it is for, under it, and the two switches that change what it may do, in plain words.
+    const flags = [i.dangerouslyDisableSandbox === true ? 'sandbox off' : null, i.run_in_background === true ? 'in background' : null].filter(Boolean);
+    parts = [pre(i.command), typeof i.description === 'string' && i.description ? h('p', { class: 'hint', text: i.description }) : null, flags.length ? h('p', { class: 'warn', text: flags.join(' · ') }) : null];
+  } else if (p.toolName === 'Write') parts = [h('p', { class: 'path', text: String(i.file_path ?? '') }), pre(String(i.content ?? ''))];
+  else if (p.toolName === 'Edit' || p.toolName === 'MultiEdit') {
     const edits = Array.isArray(i.edits) ? i.edits : [{ old_string: i.old_string, new_string: i.new_string }];
-    return [h('p', { class: 'path', text: String(i.file_path ?? '') }), ...edits.map((e) => pre(`${e?.old_string ?? ''}\n→\n${e?.new_string ?? ''}`))];
-  }
-  return [pre(JSON.stringify(i, null, 2))];
+    parts = [h('p', { class: 'path', text: String(i.file_path ?? '') }), ...edits.map((e) => pre(`${e?.old_string ?? ''}\n→\n${e?.new_string ?? ''}`))];
+  } else parts = [pre(JSON.stringify(i, null, 2))];
+  return [...parts, cutInput(p) ? h('p', { class: 'warn', role: 'note', text: CUT }) : null];
 }
 const DEST = { session: 'for this session', localSettings: 'in local settings', projectSettings: 'in project settings', userSettings: 'in your user settings' };
 /** What "Allow and remember" would save, in words: the rules the request itself suggests. */
@@ -792,7 +800,7 @@ function cardShell(x, p, name) {
     pane.cardBusy = p.id; err.hidden = true; el.setAttribute('aria-busy', 'true');
     const r = await api('/api/fleet/decide', { id: p.id, ...payload }).catch((e) => ({ ok: false, error: String(e.message), retry: true }));
     pane.cardBusy = null; el.removeAttribute('aria-busy');
-    if (r.ok) { el.dataset.sent = 'true'; el.replaceChildren(h('p', { class: 'sent', text: 'Sent' })); load(); return; }
+    if (r.ok) { el.dataset.sent = 'true'; lastSend = { key: keyOf(x), at: Date.now() }; el.replaceChildren(h('p', { class: 'sent', text: 'Sent' })); load(); return; }
     // What the panel said ("That request is gone": answered in the terminal, or expired). Nothing is armed after it.
     lock(true);
     const again = r.retry || !/gone|not asking/i.test(r.error ?? '') ? h('button', { class: 'b', type: 'button', text: 'Try again', onclick: () => { err.hidden = true; lock(false); } }) : null;
@@ -814,9 +822,9 @@ function permissionCard(x, p) {
   el.append(...[head, ...inputView(p),
     h('div', { class: 'acts' },
       may ? h('button', { class: 'b go', type: 'button', 'data-act': 'allow', text: 'Allow', onclick: () => send({ behavior: 'allow', always: false }) }) : null,
-      may && p.suggestions?.length ? h('button', { class: 'b', type: 'button', 'data-act': 'always', text: 'Allow and remember', onclick: () => send({ behavior: 'allow', always: true }) }) : null,
+      may && remembers(p) ? h('button', { class: 'b', type: 'button', 'data-act': 'always', text: 'Allow and remember', onclick: () => send({ behavior: 'allow', always: true }) }) : null,
       no.button),
-    no.input, may && p.suggestions?.length ? h('p', { class: 'hint', text: rememberLine(p.suggestions) }) : null, err].filter(Boolean));
+    no.input, may && remembers(p) ? h('p', { class: 'hint', text: rememberLine(p.suggestions) }) : null, err].filter(Boolean));
   return el;
 }
 function questionCard(x, p) {
@@ -886,8 +894,10 @@ function renderCard(x) {
     return heldCard.el;
   }
   // The next request of the same session takes the place of the one just answered, a few ms later, under the finger that pressed
-  // it: a second tap would answer a request nobody has read. The new card says so for a beat and takes no tap in it.
-  const next = heldCard?.key === keyOf(x), sent = heldCard?.el.dataset.sent === 'true';
+  // it: a second tap would answer a request nobody has read. The new card says so for a beat and takes no tap in it. That holds
+  // whether the answered card is still there when the next arrives, or the next comes a moment after it went (a push or two apart).
+  const recent = lastSend?.key === keyOf(x) && Date.now() - lastSend.at < BEAT_MS;
+  const next = heldCard?.key === keyOf(x) || recent, sent = heldCard?.el.dataset.sent === 'true' || recent;
   heldCard?.el.remove();
   heldCard = { sig, key: keyOf(x), el: { permission: permissionCard, question: questionCard, plan: planCard }[kind](x, p) };
   if (next) beat(heldCard.el, sent);

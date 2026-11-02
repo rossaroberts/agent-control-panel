@@ -34,10 +34,18 @@ function shownInput(p) {
   return { toolInput: out, clipped };
 }
 
+/** The suggestions a row carries (what "Allow and remember" would save): whole, or `{ _truncated, bytes }` when any string in them is
+ *  over the cut or the JSON is over the cap. "Allow and remember" saves the panel's own copy, so a rule the card could only show cut
+ *  is a rule the card does not offer. */
+function shownSuggestions(list) {
+  const arr = Array.isArray(list) ? list : [], hit = { n: 0 }, out = clipDeep(arr, hit);
+  return hit.n > 0 || JSON.stringify(out).length > CAP ? { _truncated: true, bytes: Buffer.byteLength(JSON.stringify(arr)) } : out;
+}
+
 /** A held request as a row shows it: what the card needs, none of the plumbing (the response, the timer, the profile folder). */
 export function shown(p) {
   const { toolInput, clipped } = shownInput(p);
-  return { id: p.id, open: Boolean(p.open), toolName: p.toolName, toolInput, clipped, suggestions: p.suggestions ?? [], permissionMode: p.permissionMode ?? null,
+  return { id: p.id, open: Boolean(p.open), toolName: p.toolName, toolInput, clipped, suggestions: shownSuggestions(p.suggestions), permissionMode: p.permissionMode ?? null,
            createdAt: p.createdAt ?? null, deadline: p.deadline ?? null, agentId: p.agentId ?? null, agentType: p.agentType ?? null };
 }
 

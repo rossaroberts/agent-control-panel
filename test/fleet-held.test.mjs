@@ -88,3 +88,23 @@ test('a session with more than one held request says how many (`of`), showing th
 test('a snapshot that is not a list of machines passes through', () => {
   assert.deepEqual(withHeld({ ok: false, error: 'x' }, () => null), { ok: false, error: 'x' });
 });
+
+test('input nested deeper than the cut can see is marked cut too, so the card does not offer a yes for it', () => {
+  let deep = { leaf: 'secret-tail' };
+  for (let i = 0; i < 12; i++) deep = { in: deep };
+  const p = shown(req({ toolName: 'mcp__x__run', toolInput: { args: deep } }));
+  assert.deepEqual(p.clipped, ['args']);
+  assert.ok(!JSON.stringify(p.toolInput).includes('secret-tail'), 'what was not shown is not sent either');
+});
+
+test('suggestions are cut like the input: whole, or replaced; a cut or an oversize one is `_truncated`, so Remember is not offered', () => {
+  const rule = (content) => ({ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: content }], behavior: 'allow', destination: 'session' });
+  assert.deepEqual(shown(req({ suggestions: [rule('ls:*')] })).suggestions, [rule('ls:*')]);
+  const cut = shown(req({ suggestions: [rule('x'.repeat(9000))] })).suggestions;
+  assert.equal(cut._truncated, true, 'one rule over 4,000 characters would be shown cut, and saved whole');
+  assert.ok(cut.bytes > 9000);
+  const many = shown(req({ suggestions: Array.from({ length: 900 }, (_, i) => rule(`cmd${i}:*`)) })).suggestions;
+  assert.equal(many._truncated, true, 'and many that add up past 16 kB');
+  assert.ok(JSON.stringify(shown(req({ suggestions: [rule('x'.repeat(2_000_000))] }))).length < 1000, 'a megabyte of rule is not on the row');
+  assert.deepEqual(shown(req({ suggestions: undefined })).suggestions, []);
+});

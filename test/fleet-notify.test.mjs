@@ -5,11 +5,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
 import { createFleet } from '../fleet/fleet.mjs';
 
-function setup({ config = { public: 'mac.example-tailnet.ts.net' }, platform = 'darwin', build, push } = {}) {
+function setup({ config = { public: 'mac.example-tailnet.ts.net' }, platform = 'darwin', build, push, phonesChanged } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-notify-'));
   if (config) fs.writeFileSync(path.join(dir, 'fleet.json'), JSON.stringify(config));
   const pushed = [], macs = [];
-  const fleet = createFleet({ dir, notifier: {
+  const fleet = createFleet({ dir, phonesChanged, notifier: {
     platform,
     push: push ?? (async (a) => { pushed.push(a); return { sent: 1, failed: 0, dropped: 0 }; }),
     build,
@@ -90,4 +90,22 @@ test('the real payload builder survives a lone surrogate in a session id', () =>
   assert.doesNotThrow(() => t.fleet.notify('Mac', { ...sess, sessionId: 'a\ud800b' }));
   assert.equal(t.pushed.length, 1);
   assert.equal(t.pushed[0].payload.data.url, '/#Mac%3Aa%EF%BF%BDb');
+});
+
+test('config() says whether notifications are on: "notify": false is the one switch the panel reads for the phone, too', () => {
+  assert.equal(setup().fleet.config().notify, true);
+  assert.equal(setup({ config: null }).fleet.config().notify, true);
+  assert.equal(setup({ config: { notify: false } }).fleet.config().notify, false);
+});
+
+test('a push the service says is gone (404/410, dropped) tells the panel its phones changed; one that went through does not', async () => {
+  const told = [];
+  const gone = setup({ push: async () => ({ sent: 0, failed: 0, dropped: 1 }), phonesChanged: () => told.push('changed') });
+  gone.fleet.notify('Mac', sess);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(told, ['changed']);
+  const fine = setup({ phonesChanged: () => told.push('wrong') });
+  fine.fleet.notify('Mac', sess);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(told, ['changed']);
 });

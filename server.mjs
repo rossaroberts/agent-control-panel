@@ -124,9 +124,13 @@ const clients = new Set();
 const pages = new Set();
 /** Set while no page is connected but one may still come back (RECONNECT_MS). */
 let releaseTimer = null;
-/** Whether a phone can be told and can answer with no page open on this Mac: the panel has a public name to be reached by, and a
- *  phone asked for push. A request is held for it (the terminal's own dialog still shows, and HOLD_MS still expires it). */
-const phoneReachable = () => PUBLIC !== null && pushStore(path.dirname(PREFS)).list().length > 0;
+/** Whether a phone can be told and can answer with no page open on this Mac: the panel has a public name to be reached by, a phone asked
+ *  for push, and notifications are on (`"notify": false` in fleet.json turns the phone's push off, so nobody is being told). A request
+ *  is held for it (the terminal's own dialog still shows, and HOLD_MS still expires it). */
+const phoneReachable = () => PUBLIC !== null && fleet.config().notify && pushStore(path.dirname(PREFS)).list().length > 0;
+/** The phones changed (the last one unsubscribed, or a push service said one is gone): with no page and no phone left, a held request
+ *  is handed back after the reconnect time, as if the last page had just gone. */
+function phonesChanged() { if (!phoneReachable()) lookerWent(); }
 const watched = () => clients.size > 0 || pages.size > 0 || releaseTimer !== null || phoneReachable();
 let armed = true;
 let rosterError = null;
@@ -144,7 +148,7 @@ const HOME = os.homedir();
 const PREFS = prefsPath();
 const KEY = pairKey(PREFS);
 // Every machine's agents and accounts in one view (fleet/); its machines are listed in fleet.json beside prefs.json.
-const fleet = createFleet({ dir: path.dirname(PREFS), quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
+const fleet = createFleet({ dir: path.dirname(PREFS), phonesChanged, quiet: (id) => { quietIds.add(id); setTimeout(() => quietIds.delete(id), 300_000); } });
 // Satellite: the delivery pipeline on GitHub, every PR from agent to production (fleet/satellite.mjs), read-only.
 const satellite = createSatellite({ snapshot: () => fleet.snapshot(), testUrl: () => (fleet.config().epics ?? []).find((e) => e.test)?.test ?? null });
 // Context: the documents that shape how a session starts, read-only (fleet/context.mjs).
@@ -1909,7 +1913,7 @@ async function handle(req, res) {
                       // Push: the page asks for the panel's VAPID public key, then hands over the subscription its browser made.
                       '/api/push/key': () => ({ ok: true, publicKey: vapidKeys(path.dirname(PREFS)).publicKey, public: PUBLIC }),
                       '/api/push/subscribe': (b) => pushStore(path.dirname(PREFS)).add(b?.subscription),
-                      '/api/push/unsubscribe': (b) => ({ ok: true, removed: pushStore(path.dirname(PREFS)).remove(String(b?.endpoint ?? '')) }),
+                      '/api/push/unsubscribe': (b) => { const removed = pushStore(path.dirname(PREFS)).remove(String(b?.endpoint ?? '')); phonesChanged(); return { ok: true, removed }; },
                       '/api/hub/status': () => ({ ok: true, hub: hubInfo() }), '/api/hub/login/start': hubLoginStart,
                       '/api/hub/login/cancel': hubLoginCancel, '/api/hub/logout': hubLogout, '/api/hub/sync': hubSyncNow,
                       '/api/update': updateApp, '/api/fleet': async () => withHeld(await fleet.snapshot(), heldIndex([...pending.values(), ...openRequests()])), '/api/fleet/launch': (b) => fleet.launch(b),

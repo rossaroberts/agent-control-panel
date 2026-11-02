@@ -105,6 +105,8 @@ function hold(over = {}) {
 const CARD = '#pane > .card';
 const cardKind = async (page, kind, ms = 4000) => {
   const el = await page.waitForSelector(`${CARD}[data-kind="${kind}"]`, { timeout: ms });
+  // A card that comes a moment after one was answered waits out a beat (700 ms) before it takes a tap: the checks that follow want it live.
+  await page.waitForFunction(() => !document.querySelector('#pane > .card')?.hasAttribute('data-settling'), null, { timeout: 3000 });
   const text = await el.textContent();
   check(!/\b(null|undefined)\b/.test(text), `a ${kind} card carries no stray null or undefined text`);
   return el;
@@ -160,7 +162,7 @@ async function phone(url) {
     const c = document.querySelector('#pane > .card'), f = document.getElementById('p-foot'), r = c.getBoundingClientRect(), fr = f.getBoundingClientRect();
     const btn = (a) => document.querySelector(`#pane > .card [data-act="${a}"]`);
     return { next: c.nextElementSibling?.id, bottom: r.bottom, footTop: fr.top, width: r.width, text: c.textContent, allowH: btn('allow')?.getBoundingClientRect().height, always: btn('always')?.textContent, denyH: btn('deny')?.getBoundingClientRect().height,
-             hint: c.querySelector('.hint')?.textContent, scrollX: document.documentElement.scrollWidth <= innerWidth };
+             hint: [...c.querySelectorAll('.hint')].map((e) => e.textContent).find((t) => /^Remember/.test(t)), scrollX: document.documentElement.scrollWidth <= innerWidth };
   });
   check(g.next === 'p-foot' && g.bottom <= g.footTop + 1, `phone: the card sits right above the reply box (card bottom ${Math.round(g.bottom)}, box top ${Math.round(g.footTop)})`);
   check(/Bash/.test(g.text) && g.text.includes('git push origin feat/fleet-card'), 'phone: it names the tool and shows its command on one line');
@@ -218,9 +220,38 @@ async function phone(url) {
   await page.tap(`${CARD} [data-act="deny"]`); await page.tap(`${CARD} [data-act="deny"]`); await cut.answer(); await gone(page);
   const write = hold({ tool_name: 'Write', tool_input: { file_path: '/tmp/big.txt', content: 'z'.repeat(10_000) }, permission_suggestions: [] });
   await cardKind(page, 'permission');
-  const w = await page.evaluate(() => ({ path: document.querySelector('#pane > .card .path')?.textContent, text: document.querySelector('#pane > .card pre.in').textContent, allow: Boolean(document.querySelector('#pane > .card [data-act="allow"]')) }));
-  check(w.path === '/tmp/big.txt' && w.text.endsWith('… 6000 more chars') && w.text.length < 4100 && w.allow, 'phone: a 10 kB Write shows its path and the first 4,000 characters, then "… 6000 more chars": never silent');
-  await page.tap(`${CARD} [data-act="allow"]`); await write.answer(); await gone(page);
+  const buttons = () => page.evaluate(() => ({ allow: Boolean(document.querySelector('#pane > .card [data-act="allow"]')), always: Boolean(document.querySelector('#pane > .card [data-act="always"]')),
+    deny: Boolean(document.querySelector('#pane > .card [data-act="deny"]')), warn: document.querySelector('#pane > .card .warn')?.textContent ?? '' }));
+  const w = await page.evaluate(() => ({ path: document.querySelector('#pane > .card .path')?.textContent, text: document.querySelector('#pane > .card pre.in').textContent }));
+  const wb = await buttons();
+  check(w.path === '/tmp/big.txt' && w.text.endsWith('… 6000 more chars') && w.text.length < 4100, 'phone: a 10 kB Write shows its path and the first 4,000 characters, then "… 6000 more chars": never silent');
+  check(!wb.allow && wb.deny && /too long to show in full; answer on the Mac/.test(wb.warn), 'phone: and, being cut, it has Deny and the note to answer on the Mac, no Allow');
+  await page.tap(`${CARD} [data-act="deny"]`); await page.tap(`${CARD} [data-act="deny"]`); await write.answer(); await gone(page);
+  const exec = hold({ tool_name: 'mcp__shell__exec', tool_input: { command: 'b'.repeat(4500) }, permission_suggestions: [] });
+  await cardKind(page, 'permission');
+  const xb = await buttons();
+  check(!xb.allow && !xb.always && xb.deny && /too long to show in full/.test(xb.warn), 'phone: a 4,500-character command of an MCP exec tool is cut the same way: no Allow, Deny and the note');
+  await page.tap(`${CARD} [data-act="deny"]`); await page.tap(`${CARD} [data-act="deny"]`); await exec.answer(); await gone(page);
+  const small = hold({ tool_name: 'Write', tool_input: { file_path: '/tmp/small.txt', content: 'q'.repeat(4000) }, permission_suggestions: [] });
+  await cardKind(page, 'permission');
+  check((await buttons()).allow, 'phone: a Write of exactly 4,000 characters is whole, so it has Allow');
+  await page.tap(`${CARD} [data-act="allow"]`); await small.answer(); await gone(page);
+  const rule = (c) => ({ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: c }], behavior: 'allow', destination: 'session' });
+  const bigRule = hold({ tool_input: { command: 'ls' }, permission_suggestions: [rule('r'.repeat(9000))] });
+  await cardKind(page, 'permission');
+  const rb = await buttons();
+  check(rb.allow && !rb.always && rb.deny, 'phone: a rule too big to show whole gets Allow but not "Allow and remember"');
+  await page.tap(`${CARD} [data-act="allow"]`); const rd = await bigRule.answer(); await gone(page);
+  check(rd?.behavior === 'allow' && !rd.updatedPermissions, 'phone: and Allow saves no rule');
+  const flags = hold({ tool_input: { command: 'rm -rf build', description: 'Remove the build folder', dangerouslyDisableSandbox: true, run_in_background: true } });
+  await cardKind(page, 'permission');
+  const fl = await page.evaluate(() => ({ text: document.querySelector('#pane > .card').innerText, desc: [...document.querySelectorAll('#pane > .card .hint')].map((e) => e.textContent).find((t) => !/^Remember/.test(t)) }));
+  check(fl.desc === 'Remove the build folder' && /sandbox off · in background/.test(fl.text), 'phone: a Bash card shows its description under the command, and "sandbox off · in background" when those are set');
+  await page.tap(`${CARD} [data-act="allow"]`); await flags.answer(); await gone(page);
+  const plain = hold({ tool_input: { command: 'ls', dangerouslyDisableSandbox: false } });
+  await cardKind(page, 'permission');
+  check(!/sandbox off|in background/.test(await page.evaluate(() => document.querySelector('#pane > .card').innerText)), 'phone: and says neither when they are not set');
+  await page.tap(`${CARD} [data-act="allow"]`); await plain.answer(); await gone(page);
   const edit = hold({ tool_name: 'Edit', tool_input: { file_path: '/tmp/a.txt', old_string: 'the old line', new_string: 'the new line' }, permission_suggestions: [] });
   await cardKind(page, 'permission');
   const e = await page.evaluate(() => document.querySelector('#pane > .card').textContent);
@@ -258,6 +289,22 @@ async function phone(url) {
   check(!/1 of/.test(await page.textContent(CARD)) || await page.evaluate(() => document.querySelector('#pane > .card .of').hidden), 'phone: after the beat it is the second request, alone, enabled');
   await page.tap(`${CARD} [data-act="allow"]`);
   check((await second.answer())?.behavior === 'allow', 'phone: and then its own Allow answers it');
+  await gone(page);
+
+  // The next request arriving a moment after the answered card went (not under it) still gets the beat.
+  const early = hold({ tool_input: { command: 'echo early' } });
+  await cardKind(page, 'permission');
+  const spot = await page.evaluate(() => { const b = document.querySelector('#pane > .card [data-act="allow"]').getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; });
+  await page.touchscreen.tap(spot.x, spot.y);
+  check((await early.answer())?.behavior === 'allow', 'phone: Allow answers the first');
+  await settle(150);
+  const late = hold({ tool_input: { command: 'echo late' } }); // 150 ms on: the first card is long gone
+  await settle(300); // 450 ms after the first tap
+  await page.touchscreen.tap(spot.x, spot.y);
+  check((await within(late.done, 700)) === null, 'phone: the same thumb 450 ms on, with the next request arriving 150 ms after the first went: it is still held');
+  await page.waitForFunction(() => { const c = document.querySelector('#pane > .card'); return c && !c.hasAttribute('data-settling') && /echo late/.test(c.textContent) && !c.querySelector('[data-act="allow"]').disabled; }, null, { timeout: 3000 });
+  await page.tap(`${CARD} [data-act="allow"]`);
+  check((await late.answer())?.behavior === 'allow', 'phone: and after the beat its own Allow answers it');
   await gone(page);
 
   // A question with a multiSelect: two picks go as the Board joins them.
