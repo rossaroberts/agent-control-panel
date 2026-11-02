@@ -209,7 +209,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
   font: 12px/1.5 "IBM Plex Mono", ui-monospace, Menlo, monospace; color: #dcdfe1; background: rgba(63,182,238,.22); }
 #p-term .clipnote[hidden] { display: none; }
 #p-term .xterm-viewport { scrollbar-color: #3a3f43 transparent; }
-#pane { --paper: var(--term-bg); --tint: #232729; --ink: #dcdfe1; --grey: #9ba2a7; --quiet: #6c7277; --rule: #2c3033;
+#pane, #doc { --paper: var(--term-bg); --tint: #232729; --ink: #dcdfe1; --grey: #9ba2a7; --quiet: #6c7277; --rule: #2c3033;
         --blue: #3fb6ee; --orange: #ef9a4c; --red: #ec7468; --green: #5fbd8b; color-scheme: dark; color: var(--ink); font-size: 13px; }
 #p-head { padding: 8px 12px 8px 14px; border-bottom: 1px solid var(--rule); }
 .p-top { display: flex; align-items: center; gap: 12px; min-height: 24px; }
@@ -324,6 +324,71 @@ body.phone .card .reason, body.phone .card .other, body.phone .card .fb { font-s
 body.phone .card .fb { min-height: 4.5em; }
 body.phone .card:has(+ #p-foot[hidden]) { padding-bottom: calc(8px + max(var(--safe-b, 0px), var(--kb, 0px))); }
 
+/* the Documents strip under the session's name: what it wrote, newest first, a dot while a write is under way */
+.docs { display: flex; flex-wrap: wrap; gap: 2px 16px; padding: 4px 0 0 18px; font-size: 13px; max-height: 5.2em; overflow-y: auto; min-width: 0; }
+.doc-row { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; max-width: 100%; color: var(--ink); }
+.doc-row b { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-row i { font-style: normal; color: var(--grey); white-space: nowrap; }
+.doc-row .live { color: var(--blue); font-weight: 500; }
+.doc-row:hover b { color: var(--blue); } .doc-row.on b { color: var(--blue); }
+
+/* the document open: a third column at the right edge from 1100 px (the session moves left of it, the list narrows by both);
+   from 720 to 1100 it sits over the session in the same box, a toggle in each head going between them; on the phone it is
+   a sheet like the session's. Its width is yours (fleet.doc.width), never under 360 nor over 60% of the window, and the
+   list is left 240 px where the window allows. The tokens are the session's. */
+:root { --doc: 0px; }
+body { --pane-eff: var(--pane); }
+body.pane-min { --pane-eff: var(--rail); }
+body.has-doc { --doc: clamp(360px, min(var(--doc-w, 520px), 100vw - var(--pane-eff) - 304px), 60vw); }
+#doc { position: fixed; top: 0; right: 0; bottom: 0; width: var(--doc); display: flex; flex-direction: column; background: var(--paper); border-left: 1px solid var(--rule); z-index: 5; font-size: 13px; }
+#doc[hidden] { display: none; }
+#doc-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; padding: 0 3px; cursor: col-resize; z-index: 1; touch-action: none; }
+#doc-grip:hover, #doc-grip.drag { background: var(--blue); background-clip: content-box; }
+#doc-head { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 8px 12px 8px 14px; border-bottom: 1px solid var(--rule); }
+.doc-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.doc-age { color: var(--grey); font-size: 13px; white-space: nowrap; }
+#doc-head .act { font-size: 13px; color: var(--grey); } #doc-head .act:hover { color: var(--ink); } #doc-head .act[aria-pressed="true"] { color: var(--blue); }
+.doc-toggle { display: none; }
+#doc-body { position: relative; flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 28px; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+#doc-body.mockup { padding: 0; overflow: hidden; }
+#doc-body iframe.mock { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; } /* a mockup is a page of its own: on white, as it was drawn */
+#doc-body .doc-note { color: var(--grey); font-size: 13px; }
+#doc-body .doc-note + pre.raw { margin-top: 10px; }
+#doc-body pre.raw { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+/* markdown, as the rest of the panel writes: one typeface, tone for rank, no boxes but the tint behind code */
+#doc-body.md > :first-child { margin-top: 0; }
+#doc-body.md h1, #doc-body.md h2, #doc-body.md h3, #doc-body.md h4, #doc-body.md h5, #doc-body.md h6 { font-weight: 500; line-height: 1.5; margin: 28px 0 8px; }
+#doc-body.md h1 { font-size: 17px; margin-top: 0; }
+#doc-body.md h2 { font-size: 15px; padding-bottom: 4px; border-bottom: 1px solid var(--rule); }
+#doc-body.md h3, #doc-body.md h4, #doc-body.md h5, #doc-body.md h6 { font-size: 14px; color: var(--grey); margin-top: 22px; margin-bottom: 6px; }
+#doc-body.md p, #doc-body.md ul, #doc-body.md ol, #doc-body.md blockquote, #doc-body.md pre, #doc-body.md table { margin: 0 0 12px; }
+#doc-body.md ul, #doc-body.md ol { padding-left: 22px; }
+#doc-body.md li { margin: 2px 0; } #doc-body.md li > p { margin: 0 0 6px; }
+#doc-body.md a { color: var(--blue); } #doc-body.md a:hover { text-decoration: underline; text-underline-offset: 3px; }
+#doc-body.md code { font-size: 13px; background: var(--tint); border-radius: 3px; padding: 1px 5px; }
+#doc-body.md pre { background: var(--tint); border-radius: 4px; padding: 10px 14px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+#doc-body.md pre code { background: none; padding: 0; font-size: inherit; white-space: pre; overflow-wrap: normal; }
+#doc-body.md pre.raw code { color: var(--grey); white-space: pre-wrap; overflow-wrap: anywhere; }
+#doc-body.md blockquote { margin-left: 0; padding-left: 14px; border-left: 2px solid var(--rule); color: var(--grey); }
+#doc-body.md hr { border: 0; border-top: 1px solid var(--rule); margin: 24px 0; }
+#doc-body.md table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 13px; }
+#doc-body.md th { text-align: left; font-weight: 500; padding: 4px 18px 4px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+#doc-body.md td { padding: 3px 18px 3px 0; vertical-align: top; }
+#doc-body.md input[type=checkbox] { margin: 0 6px 0 0; }
+#doc-body.md .noimg { color: var(--grey); }
+#doc-body.md strong { font-weight: 500; }
+@media (min-width: 1100px) {
+  /* a width kept from a wide window must not push the session off the screen: with a document open it leaves the document its 360 and the list its 304 */
+  body.has-doc { --pane: max(340px, min(var(--pane-w, 460px), 100vw - 664px)); }
+  body.has-doc #pane { right: var(--doc); }
+  body.has-pane.has-doc main { width: calc(100% - var(--pane) - var(--doc) - 64px); margin-left: 32px; }
+  body.has-pane.has-doc.pane-min main { width: calc(100% - var(--rail) - var(--doc) - 64px); }
+}
+@media (min-width: 721px) and (max-width: 1099px) {
+  #doc { width: var(--pane); min-width: 340px; z-index: 6; }
+  body.doc-back #doc { display: none; }
+  .doc-toggle { display: inline-flex; }
+}
 
 /* the phone: two screens that slide. The queues are the page; the session is the pane, full width, sliding in over them.
    Everything that wants a pointer or a keyboard (groups, drag, rename, Satellite, Board, the fold rail) is left to the desktop.
@@ -424,6 +489,23 @@ body.phone .card:has(+ #p-foot[hidden]) { padding-bottom: calc(8px + max(var(--s
   body.phone #p-reply { font-size: 16px; line-height: 1.5; min-height: 1.5em; max-height: 40vh; }
   body.phone #p-tools { font-size: 14px; }
   body.phone #keys, body.phone #finder { display: none; }
+
+  /* the documents: a strip you slide along under the name, and a sheet like the session's over it */
+  body.phone .docs { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; max-height: none; gap: 0 22px; padding: 0 14px; font-size: 15px; scrollbar-width: none; }
+  body.phone .doc-row { flex: none; align-items: center; min-height: 44px; }
+  body.phone #doc { inset: 0; width: 100%; min-width: 0; border-left: 0; font-size: 15px; transform: translateX(100%); visibility: hidden;
+    transition: transform 180ms ease-out, visibility 0s linear 180ms; }
+  body.phone #doc[hidden] { display: flex; }
+  body.phone.has-doc #doc { transform: none; visibility: visible; transition: transform 180ms ease-out, visibility 0s; }
+  body.phone #doc-grip, body.phone #doc-head .p-x { display: none; }
+  body.phone #doc-head { gap: 0; min-height: 44px; padding: calc(4px + var(--safe-t)) 4px 6px 4px; }
+  body.phone #doc-head > * { flex: none; }
+  body.phone #doc-head .doc-name { flex: 1 1 0; min-width: 0; font-size: 16px; padding: 0 8px; }
+  body.phone #doc-head .doc-age { font-size: 13px; padding: 0 8px; }
+  body.phone #doc-head .act { font-size: 14px; min-height: 44px; padding: 0 10px; }
+  body.phone #doc-body { padding: 14px 16px calc(24px + var(--safe-b)); font-size: 15px; line-height: 1.65; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  body.phone #doc-body.mockup { padding: 0; }
+  body.phone #doc-body pre.raw, body.phone #doc-body.md code, body.phone #doc-body.md pre { font-size: 13px; }
 }
 </style>
 </head>
@@ -459,6 +541,11 @@ body.phone .card:has(+ #p-foot[hidden]) { padding-bottom: calc(8px + max(var(--s
   <div id="p-body"></div>
   <div id="p-term" hidden></div>
   <div id="p-foot"><textarea id="p-reply" rows="1" placeholder="Message it" aria-label="Message"></textarea><div id="p-tools"></div></div>
+</aside>
+<aside id="doc" hidden aria-label="Document">
+  <div id="doc-grip" title="Drag to widen · double-click for the usual width"></div>
+  <div id="doc-head"></div>
+  <div id="doc-body"></div>
 </aside>
 <datalist id="fleet-groups"></datalist>
 <div id="keys" role="dialog" aria-label="Keyboard" hidden>
@@ -947,7 +1034,8 @@ const keyOf = (x) => `${x.machine}:${x.sessionId ?? x.id ?? x.pid}`;
 // ---------------------------------------------------------------- the session open on the right
 // One session at a time, full height on the right: its conversation scrolls, the message box stays at the bottom. The
 // panel's parts are built once and updated in place, so a refresh never takes the caret or a half-typed message.
-const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null, codexOn: null, phoneTerm: false };
+const pane = { key: null, items: null, error: null, said: null, sending: false, arm: false, armMove: false, moving: false, more: false, view: null, timer: null, codexOn: null, phoneTerm: false,
+               doc: null, docBack: false }; // doc: the document open beside the session (see openDoc); docBack: between 720 and 1100 px, the session is in front of it
 const drafts = new Map(); // what you had typed to each session, kept when you switch away
 let everything = [];
 const current = () => everything.find((x) => keyOf(x) === pane.key) ?? (pane.trust && keyOf(pane.trust) === pane.key ? pane.trust : null);
@@ -988,9 +1076,20 @@ function prefetch(x) {
 
 // The pane is as wide as you dragged it, or folded to a strip at the edge; both are remembered.
 const paneUi = { width: Number(store.get('pane.width')) || 460, min: store.get('pane.min') === '1' };
+const docUi = { width: Number(store.get('doc.width')) || 520 };
+const wide = matchMedia('(min-width: 1100px)'); // from here the document is a column of its own; under it, it sits over the session
+let docClearT = null;
 function applyPaneUi() {
   document.documentElement.style.setProperty('--pane-w', `${paneUi.width}px`);
+  document.documentElement.style.setProperty('--doc-w', `${docUi.width}px`);
   document.body.classList.toggle('pane-min', Boolean(pane.key) && paneUi.min);
+  const shown = Boolean(pane.key && pane.doc);
+  document.body.classList.toggle('has-doc', shown);
+  document.body.classList.toggle('doc-back', shown && pane.docBack);
+  $('doc').hidden = !shown;
+  // A document that closed lets go of its content once the sheet has slid away (a mockup's scripts stop with it).
+  clearTimeout(docClearT);
+  if (!shown) docClearT = setTimeout(() => { if (!pane.doc) { $('doc-body').replaceChildren(); $('doc-head').replaceChildren(); docHeadSig = ''; } }, 260);
 }
 function fold(min) {
   paneUi.min = min; store.set('pane.min', min ? '1' : '');
@@ -1001,11 +1100,20 @@ $('p-rail').addEventListener('click', () => fold(false));
 $('p-grip').addEventListener('pointerdown', (e) => {
   const grip = $('p-grip');
   e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('drag');
-  const move = (ev) => { paneUi.width = Math.round(Math.min(innerWidth * 0.8, Math.max(340, innerWidth - ev.clientX))); applyPaneUi(); };
+  // With the document open in a column of its own, the session's right edge is the document's left.
+  const move = (ev) => { const beside = pane.doc && wide.matches ? $('doc').offsetWidth : 0; paneUi.width = Math.round(Math.min(innerWidth * 0.8, Math.max(340, innerWidth - beside - ev.clientX))); applyPaneUi(); };
   grip.addEventListener('pointermove', move);
   grip.addEventListener('pointerup', () => { grip.classList.remove('drag'); grip.removeEventListener('pointermove', move); store.set('pane.width', paneUi.width); }, { once: true });
 });
 $('p-grip').addEventListener('dblclick', () => { paneUi.width = 460; store.set('pane.width', 460); applyPaneUi(); });
+$('doc-grip').addEventListener('pointerdown', (e) => {
+  const grip = $('doc-grip');
+  e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('drag');
+  const move = (ev) => { docUi.width = Math.round(Math.min(innerWidth * 0.6, Math.max(360, innerWidth - ev.clientX))); applyPaneUi(); };
+  grip.addEventListener('pointermove', move);
+  grip.addEventListener('pointerup', () => { grip.classList.remove('drag'); grip.removeEventListener('pointermove', move); store.set('doc.width', docUi.width); }, { once: true });
+});
+$('doc-grip').addEventListener('dblclick', () => { docUi.width = 520; store.set('doc.width', 520); applyPaneUi(); });
 
 function select(x) {
   const key = keyOf(x);
@@ -1014,7 +1122,8 @@ function select(x) {
   if (pane.key === key) return;
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
   const was = pane.key;
-  Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, armStop: false, moving: false, more: false, view: null, phoneTerm: false });
+  Object.assign(pane, { key, items: seen.get(key)?.items ?? null, error: null, said: null, sending: false, arm: false, armMove: false, armStop: false, moving: false, more: false, view: null, phoneTerm: false, doc: null, docBack: false });
+  docSeq++; // a document read still on its way is for the session you left
   $('p-reply').value = drafts.get(key) ?? '';
   // The phone's back gesture closes the session: opening it is one step forward in the history. A session already open (or
   // one whose step this is) is replaced, so picking sessions in the list never stacks steps. Links into sessions (`#<key>`) do:
@@ -1028,12 +1137,12 @@ function deselect() {
   if (pane.key) drafts.set(pane.key, $('p-reply').value);
   hideTerms(); // the terminal stays attached out of sight, so opening it again is instant
   const was = pane.key;
-  pane.key = null;
+  pane.key = null; pane.doc = null; pane.docBack = false; docSeq++;
   inPlace(was, () => { document.body.classList.remove('has-pane'); renderMachines(); renderPane(); });
   // Closed some other way than back (an archive, /exit): take its history step off too, a tick later, so a select right
   // after (continue) keeps the step. The popstate that causes finds nothing open; a deselect that came from popstate
-  // finds the step already gone.
-  if (phone.matches && history.state?.fleetPane) setTimeout(() => { if (!pane.key && history.state?.fleetPane) history.back(); }, 0);
+  // finds the step already gone. A document open on top of it has a step of its own: both go.
+  if (phone.matches && history.state?.fleetPane) setTimeout(() => { if (!pane.key && history.state?.fleetPane) history.go(history.state.fleetDoc ? -2 : -1); }, 0);
 }
 /** The pane opening or closing narrows or widens the list (rows wrap differently): the row you pressed stays where it
  *  was on the screen, under your pointer. */
@@ -1394,6 +1503,7 @@ function renderPane(toEnd = false) {
   const aside = $('pane'), x = current();
   aside.hidden = !pane.key;
   applyPaneUi();
+  docHead(); // its age moves on
   if (!pane.key) return;
   if (!x && shown === pane.key) return; // a read that missed it: its terminal stays as it is
   if (!x) {
@@ -1499,17 +1609,20 @@ function renderHead(x, term) {
   // the name (continue, move, an error) goes on a line under it.
   const toggle = phone.matches && (attachable(x) || (x.engine === 'codex' && terms.has(keyOf(x))))
     ? h('button', { class: 'act term-toggle', text: pane.phoneTerm ? 'Chat' : 'Terminal', onclick: () => { pane.phoneTerm = !pane.phoneTerm; renderPane(true); if (!pane.phoneTerm) peek(); } }) : null;
+  // Between 720 and 1100 px the document sits over the session: this is the way back to it (CSS shows it only there).
+  const docToggle = pane.doc ? h('button', { class: 'act doc-toggle', text: 'Documents', 'aria-pressed': String(!pane.docBack), onclick: () => { pane.docBack = false; applyPaneUi(); renderPane(); } }) : null;
+  const docs = docStrip(x);
   const barButtons = [state, cont, move, copy, codexOpen].filter(Boolean);
   const top = phone.matches
     ? [h('div', { class: 'p-top' }, h('button', { class: 'p-back', 'aria-label': 'Back to the queues', onclick: () => (history.state?.fleetPane ? history.back() : deselect()) }, icon('back')),
         titleField(x), word(x.state), toggle, more),
        barButtons.length ? h('div', { class: 'p-top p-do' }, ...barButtons) : null]
-    : [h('div', { class: 'p-top' }, word(x.state), titleField(x), state, cont, move, copy, codexOpen, more,
+    : [h('div', { class: 'p-top' }, word(x.state), titleField(x), state, cont, move, copy, codexOpen, docToggle, more,
       h('button', { class: 'p-fold', title: 'Fold (⌘\\)', 'aria-label': 'Fold', onclick: () => fold(true) }, icon('fold')),
       h('button', { class: 'p-x', title: 'Close (Esc)', 'aria-label': 'Close', onclick: deselect }, icon('x')))];
   const parts = [
     ...top,
-    run, agents,
+    run, agents, docs,
     pane.more ? h('div', { class: 'p-meta', title: [x.name, x.cwd, x.model].filter(Boolean).join('\n') },
       [WORD[x.state], x.stage, when(x.lastAt ?? x.since ?? x.startedAt), x.machine, x.sub, lastPart(x.cwd), shortModel(x.model), x.effort, c && `${Math.round(c.pct)}% ctx (${ctxWords(c)})`, x.shareWeek >= 0.5 && `${Math.round(x.shareWeek)}% wk`]
         .filter(Boolean).map((t) => h('span', { text: t }))) : null,
@@ -1519,10 +1632,152 @@ function renderHead(x, term) {
     .filter(Boolean);
   const box = h('div', {}, ...parts), sig = `${pane.key}\n${box.innerHTML}`;
   if (sig === headSig) return;
+  // A press on a document is not cut short: the strip is drawn once it is let go.
+  if (docPress && Date.now() - docPress < 3000) { clearTimeout(pressT); pressT = setTimeout(renderPane, 250); return; }
+  const was = headSig.startsWith(`${pane.key}\n`) ? $('p-head').querySelector('.docs') : null, at = was && [was.scrollLeft, was.scrollTop];
   headSig = sig;
   $('p-head').replaceChildren(...box.childNodes);
+  // The strip is a new element each time (the sort of a write, a minute going by): it keeps the place it was scrolled to.
+  const now = was && $('p-head').querySelector('.docs');
+  if (now) { now.scrollLeft = at[0]; now.scrollTop = at[1]; }
 }
 let headSig = '';
+
+// ---------------------------------------------------------------- the documents a session wrote
+// The session's head lists what it wrote (hook.sh keeps a line per write), newest first. A tap reads the file where the
+// session runs (only paths from that list are served) and shows it beside the session: markdown through the vendored marked
+// and context-render's renderSafe (raw HTML in it is text, links are checked, images are not loaded), HTML in an iframe that
+// runs its own scripts but cannot read the panel: sandbox="allow-scripts" without allow-same-origin gives it an origin of its
+// own, so the panel's DOM, storage, cookie and token are out of its reach, and the panel refuses what it POSTs (a blind GET may
+// carry the cookie on WebKit; the answer is unreadable). A mockup that loops forever still blocks the page: a reload recovers.
+// A write while it is open reads it again, in place.
+let docSeq = 0, docHeadSig = '', docT = null, dotT = null, renderer = null, docPress = 0, pressT = null;
+const FRESH_MS = 2000; // a document written this recently is marked as being written
+const RAW_OVER = 100_000; // a markdown larger than this is shown as text: marked is quadratic on some inputs (`*a *a ...`: 6 s at 32 KB)
+/** A mockup's source with two lines put ahead of it (after its doctype, if it has one). Its base is its own page: in an srcdoc
+ *  a link takes the panel's address as its base, so `href="#"` would load the panel inside the frame. And a click on an in-page
+ *  link (`#top`, `#section`) goes to its place by replacing the frame's history entry, as the browser would by adding one: that
+ *  entry is one more back before the phone's back reaches the document, and the page cannot see or take it off. :target and
+ *  hashchange work as before. */
+const MOCK_HEAD = '<base href="about:srcdoc"><script>addEventListener("click",function(e){var a=e.target&&e.target.closest&&e.target.closest("a[href^=\'#\']");'
+  + 'if(!a||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||(a.target&&a.target!=="_self"))return;e.preventDefault();'
+  + 'location.replace(location.href.split("#")[0]+a.getAttribute("href"))})<\/script>';
+const mockSrc = (text) => { const at = /^\uFEFF?\s*<!doctype[^>]*>/i.exec(text)?.[0].length ?? 0; return text.slice(0, at) + MOCK_HEAD + text.slice(at); };
+// A press on a document in the strip is not cut short by the strip being drawn again: that waits for the release.
+$('p-head').addEventListener('pointerdown', (e) => { if (e.target.closest?.('.docs')) docPress = Date.now(); });
+addEventListener('pointerup', () => { docPress = 0; }, true);
+addEventListener('pointercancel', () => { docPress = 0; }, true);
+/** Their names, the folder added to those that would read alike. */
+function docNames(list) {
+  const base = list.map((d) => lastPart(d.path) ?? d.path);
+  return list.map((d, i) => (base.filter((b) => b === base[i]).length > 1 ? d.path.split('/').filter(Boolean).slice(-2).join('/') : base[i]));
+}
+function docStrip(x) {
+  clearTimeout(dotT);
+  const list = x.docs ?? [];
+  if (!list.length) return null;
+  const names = docNames(list), fresh = (d) => d.at > Date.now() - FRESH_MS;
+  const left = Math.max(...list.map((d) => d.at + FRESH_MS - Date.now()));
+  if (left > 0) dotT = setTimeout(renderPane, left + 50); // drawn again when the newest write stops being new: the dot goes out
+  return h('div', { class: 'docs', title: 'Documents this session wrote' }, list.map((d, i) => h('button', { class: `doc-row${pane.doc?.path === d.path ? ' on' : ''}`, 'data-name': names[i],
+    title: `${d.path}${d.tool ? `\n${d.tool}` : ''}`, onclick: () => openDoc(x, d.path) },
+    h('b', { text: names[i] }), fresh(d) ? h('span', { class: 'live', text: '·', title: 'being written' }) : null, h('i', { text: ago(d.at) }))));
+}
+/** marked and renderSafe, loaded once the first markdown needs them (and at idle, so that is not on the tap). */
+const docRenderer = () => (renderer ??= Promise.all([
+  window.marked ? 0 : new Promise((ok, no) => { const s = h('script', { src: '/vendor/marked.umd.js' }); s.onload = ok; s.onerror = no; document.head.append(s); }),
+  import('/context-render.mjs')]).then(([, m]) => (text) => m.renderSafe(window.marked, text, {})).catch((e) => { renderer = null; throw e; }));
+/** Open one of the session's documents: the pane is up at once, filled when the machine answers. */
+async function openDoc(x, p) {
+  x = current() ?? x;
+  if (!x?.sessionId) return;
+  if (paneUi.min) fold(false);
+  const seq = ++docSeq;
+  if (pane.doc?.path !== p) pane.doc = { path: p, kind: null, text: null, at: null, source: false, error: null };
+  pane.docBack = false;
+  inPlace(pane.key, applyPaneUi);
+  // The phone's back gesture closes the document before the session: it is a step of its own, on top of the session's.
+  if (phone.matches) history[history.state?.fleetDoc ? 'replaceState' : 'pushState']({ fleetPane: pane.key, fleetDoc: p }, '');
+  renderDoc(); renderPane();
+  const r = await api('/api/fleet/doc', { machine: x.machine, profile: x.profile, sessionId: x.sessionId, path: p }).catch((e) => ({ ok: false, error: String(e.message) }));
+  if (seq !== docSeq || pane.doc?.path !== p) return; // closed, or another asked for, while it read
+  pane.doc = r.ok ? { ...pane.doc, kind: r.kind, text: r.text, at: r.at, error: null } : { ...pane.doc, error: r.error ?? 'Could not read it.' };
+  await renderDoc();
+}
+/** The document's head: its name, its age, Source, and the way out. */
+function docHead(force = false) {
+  const d = pane.doc;
+  if (!d) return;
+  const sig = `${d.path}|${d.kind}|${d.source}|${d.error ?? ''}|${when(d.at)}|${phone.matches}`;
+  if (!force && sig === docHeadSig) return;
+  docHeadSig = sig;
+  $('doc-head').replaceChildren(
+    h('button', { class: 'p-back', 'aria-label': 'Back to the session', onclick: () => (history.state?.fleetDoc ? history.back() : closeDoc()) }, icon('back')),
+    h('div', { class: 'doc-name', text: lastPart(d.path) ?? d.path, title: d.path }),
+    d.at ? h('span', { class: 'doc-age', text: when(d.at), title: new Date(d.at).toLocaleString() }) : null,
+    d.kind === 'md' || d.kind === 'html' ? h('button', { class: 'act doc-source', text: 'Source', 'aria-pressed': String(d.source), title: 'The text as written', onclick: () => { d.source = !d.source; renderDoc(); } }) : null,
+    h('button', { class: 'act doc-toggle', text: 'Session', onclick: () => { pane.docBack = true; applyPaneUi(); renderPane(); } }),
+    h('button', { class: 'p-x doc-close', title: 'Close (Esc)', 'aria-label': 'Close', onclick: () => closeDoc() }, icon('x')));
+}
+/** The document on show, drawn again; `keep` leaves the scroll where it was (a write while you read), else it starts at the top. */
+async function renderDoc(keep = false) {
+  const d = pane.doc, body = $('doc-body');
+  applyPaneUi();
+  if (!d) return;
+  docHead(true);
+  const at = keep ? body.scrollTop : 0;
+  let kids, cls = '';
+  if (d.error) kids = [h('div', { class: 'doc-note', text: d.error })];
+  else if (d.text == null) kids = [h('div', { class: 'doc-note', text: '…' })];
+  else if (d.source || d.kind === 'text') kids = [h('pre', { class: 'raw', text: d.text })];
+  else if (d.kind === 'md' && d.text.length > RAW_OVER) kids = [h('div', { class: 'doc-note', text: 'shown as text (large)' }), h('pre', { class: 'raw', text: d.text })];
+  else if (d.kind === 'html') { kids = [h('iframe', { class: 'mock', sandbox: 'allow-scripts', srcdoc: mockSrc(d.text), title: lastPart(d.path) ?? 'Document', referrerpolicy: 'no-referrer' })]; cls = 'mockup'; }
+  else {
+    const render = await docRenderer().catch(() => null);
+    if (pane.doc !== d) return; // closed or replaced while marked loaded
+    let html = null;
+    try { html = render ? render(d.text) : null; } catch { html = null; }
+    if (html != null) { body.className = 'md'; body.innerHTML = html; body.scrollTop = at; return; } // safe by construction: see context-render.mjs
+    kids = [h('div', { class: 'doc-note', text: 'shown as text (could not be rendered)' }), h('pre', { class: 'raw', text: d.text })]; // marked did not load, or failed: the text, readable
+  }
+  body.className = cls;
+  body.replaceChildren(...kids);
+  body.scrollTop = at;
+}
+/** The document is closed. On the phone its history step goes too, unless that is what closed it (back). */
+function closeDoc({ step = true } = {}) {
+  if (!pane.doc) return;
+  docSeq++; clearTimeout(docT);
+  pane.doc = null; pane.docBack = false;
+  inPlace(pane.key, applyPaneUi);
+  renderPane();
+  if (step && history.state?.fleetDoc) {
+    if (phone.matches) setTimeout(() => { if (!pane.doc && history.state?.fleetDoc) history.back(); }, 0);
+    else dropDocState(); // narrowed and widened again: the step is left in the state, not taken off
+  }
+}
+/** The history state without the document's step, for a document that is closed: the entry stays, as the session's. */
+function dropDocState() {
+  if (pane.doc || !history.state?.fleetDoc) return;
+  history.replaceState(history.state.fleetPane ? { fleetPane: history.state.fleetPane } : null, '', location.pathname + location.search);
+}
+/** The session wrote the document that is open: read it again and draw it in place. Debounced; a read that finds the same
+ *  text changes nothing (a mockup would start over). */
+function refreshDoc() {
+  clearTimeout(docT);
+  if (!pane.doc) return;
+  docT = setTimeout(async () => {
+    const d = pane.doc, x = current(), entry = x?.docs?.find((e) => e.path === d?.path);
+    if (!d || d.text == null || !entry || !(entry.at > d.at)) return;
+    const seq = ++docSeq;
+    const r = await api('/api/fleet/doc', { machine: x.machine, profile: x.profile, sessionId: x.sessionId, path: d.path }).catch(() => null);
+    if (seq !== docSeq || pane.doc !== d || !r?.ok) return;
+    const same = r.text === d.text && r.kind === d.kind;
+    pane.doc = { ...d, kind: r.kind, text: r.text, at: r.at, error: null };
+    if (same) docHead(); else renderDoc(true);
+  }, 100);
+}
+
 /** Continue a closed session where it ran: started again as a background job (its own record, else its conversation
  *  under a new one); its row comes back and opens as a terminal here. */
 async function continueClosed() {
@@ -1615,7 +1870,9 @@ document.addEventListener('keydown', (e) => {
     if (!pane.key || $('p-term').contains(document.activeElement)) return; // Esc is Claude Code's there
     if (document.activeElement === $('p-reply') && $('p-reply').value) { $('p-reply').blur(); return; }
     if (document.activeElement?.matches?.('input, textarea, [contenteditable]')) { document.activeElement.blur(); return; }
-    deselect(); return;
+    // The document you can see closes first; with the session in front of it (720–1100 px) Esc is the session's.
+    if (pane.doc && (!pane.docBack || wide.matches || phone.matches)) closeDoc(); else deselect();
+    return;
   }
   if (typing() || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
   const k = e.key;
@@ -1888,7 +2145,7 @@ async function reload() {
     const doubted = snap.machines.flatMap((m) => (m.ok === false || m.stale ? [] : (m.accounts ?? []).filter((a) => a.stale).map((a) => `${m.name} ${a.id}: ${a.stale}`)));
     $('err').hidden = !bad.length && !doubted.length;
     $('err').textContent = [...bad.map((m) => (m.stale ? `${m.name} didn't answer (${m.stale}): showing its last read` : `${m.name}: ${m.error ?? 'no answer'}`)), ...doubted].join('\n');
-    renderHow(); renderMachines(); renderPane();
+    renderHow(); renderMachines(); renderPane(); refreshDoc();
     $('refresh').title = `Read ${new Date(snap.at).toLocaleTimeString()}`;
     // An old read (nobody had looked for a while) is on show at once; the fresh one behind it comes in a moment.
     if (Date.now() - snap.at > 12_000) { clearTimeout(soonT); soonT = setTimeout(load, 1500); }
@@ -1909,6 +2166,8 @@ $('refresh').addEventListener('click', load);
 addEventListener('popstate', () => {
   if (location.hash.length > 1) return; // a link into a session (`#<key>`) also fires popstate: hashchange opens it, and nothing closes
   if (document.body.classList.contains('compose')) { document.body.classList.remove('compose'); return; }
+  // Back from a document lands on the session's own step: the document closes, the session stays.
+  if (pane.doc && !history.state?.fleetDoc) { closeDoc({ step: false }); return; }
   if (pane.key) deselect();
 });
 function openCompose() {
@@ -1937,7 +2196,9 @@ phone.addEventListener('change', () => {
   document.body.classList.toggle('phone', phone.matches); document.body.classList.remove('compose'); headSig = '';
   // A session opened at desktop width has no history step; the phone's back gesture needs one.
   if (phone.matches && pane.key && history.state?.fleetPane !== pane.key) history.pushState({ fleetPane: pane.key }, '');
-  if (snap) { renderMachines(); renderPane(); }
+  if (phone.matches && pane.doc && !history.state?.fleetDoc) history.pushState({ fleetPane: pane.key, fleetDoc: pane.doc.path }, '');
+  dropDocState();
+  if (snap) { renderMachines(); renderPane(); if (pane.doc) renderDoc(true); }
 });
 // A link into one session (`/#<machine>:<sessionId>`, the way Satellite's agent cell points here): it opens once the list has it.
 let wanted = null;
@@ -1950,7 +2211,13 @@ function openWanted() {
 }
 // A reload keeps the history step of the session that was open, but the page boots with none open: take it off, or the first
 // back press would go nowhere.
-if (history.state?.fleetPane && !pane.key) history.replaceState(null, '', location.pathname + location.search);
+if (history.state?.fleetPane && !pane.key) {
+  // With a document open there were two steps (the session's, then its own): both go, or the first back would land on a
+  // session that is not there. This one is cleared and the page steps back over the session's.
+  const withDoc = Boolean(history.state.fleetDoc);
+  history.replaceState(null, '', location.pathname + location.search);
+  if (withDoc) history.go(-2);
+}
 const fromHash = () => {
   if (location.hash.length <= 1) return;
   let k = ''; try { k = decodeURIComponent(location.hash.slice(1)); } catch {}
@@ -1963,6 +2230,7 @@ addEventListener('hashchange', fromHash);
 fromHash();
 load();
 wired().catch(() => {}); // the panel tells this page when something changes, over the same socket the terminals use
+(window.requestIdleCallback ?? ((f) => setTimeout(f, 2500)))(() => docRenderer().catch(() => {})); // marked for the first document, ready before the tap
 // Every 10 seconds while you look (the panel reads behind it as often, so each answers at once); every minute in a
 // background tab, so the Needs you count in its title stays true.
 setInterval(() => { if (!document.hidden || Date.now() - loadedAt > 60_000) load(); }, 10_000);
