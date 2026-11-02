@@ -124,7 +124,10 @@ const clients = new Set();
 const pages = new Set();
 /** Set while no page is connected but one may still come back (RECONNECT_MS). */
 let releaseTimer = null;
-const watched = () => clients.size > 0 || pages.size > 0 || releaseTimer !== null;
+/** Whether a phone can be told and can answer with no page open on this Mac: the panel has a public name to be reached by, and a
+ *  phone asked for push. A request is held for it (the terminal's own dialog still shows, and HOLD_MS still expires it). */
+const phoneReachable = () => PUBLIC !== null && pushStore(path.dirname(PREFS)).list().length > 0;
+const watched = () => clients.size > 0 || pages.size > 0 || releaseTimer !== null || phoneReachable();
 let armed = true;
 let rosterError = null;
 
@@ -1866,21 +1869,12 @@ async function handle(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     res.write(`retry: 2000\ndata: ${JSON.stringify(snapshot())}\n\n`);
     clients.add(res);
-    if (DAEMON && setRosterPace(true)) pollRoster().then(checkVersions); // back from idle: catch up at once
-    clearTimeout(releaseTimer);
-    releaseTimer = null;
+    lookerCame();
     const ping = setInterval(() => res.write(': ping\n\n'), 20_000);
     req.on('close', () => {
       clearInterval(ping);
       clients.delete(res);
-      // Last tab gone and not back in time: hand every held request back to the terminal, and (under the daemon) slow
-      // the roster down. Not before: until then a held request still needs the fast polls to see a terminal answer.
-      if (clients.size === 0 && releaseTimer === null) releaseTimer = setTimeout(() => {
-        releaseTimer = null;
-        if (clients.size > 0 || pages.size > 0) return; // a Fleet page is still looking
-        for (const id of [...pending.keys()]) settle(id, null, 'panel closed');
-        if (DAEMON) setRosterPace(false);
-      }, RECONNECT_MS);
+      lookerWent();
     });
     return;
   }
@@ -1895,7 +1889,7 @@ async function handle(req, res) {
     }
     if (url.pathname === '/api/fleet/decide') {
       const r = await decideFromFleet(body);
-      return send(res, r.ok ? 200 : 409, r);
+      return send(res, r.ok ? 200 : 422, r);
     }
     if (url.pathname === '/api/launch') {
       const r = await launch(body);
@@ -1938,6 +1932,25 @@ async function handle(req, res) {
     }
   }
   send(res, 404, { error: 'not found' });
+}
+
+/** A page (a board tab, or Fleet) is looking: the roster goes fast again, and a release waiting on the last one is called off. */
+function lookerCame() {
+  clearTimeout(releaseTimer);
+  releaseTimer = null;
+  if (DAEMON && setRosterPace(true)) pollRoster().then(checkVersions); // back from idle: catch up at once
+}
+/** A page went. The last one gone and not back in time: hand every held request back to the terminal (unless a phone can still
+ *  answer it), and (under the daemon) slow the roster down. Not before: until then a held request still needs the fast polls to
+ *  see a terminal answer. */
+function lookerWent() {
+  if (clients.size > 0 || pages.size > 0 || releaseTimer !== null) return;
+  releaseTimer = setTimeout(() => {
+    releaseTimer = null;
+    if (clients.size > 0 || pages.size > 0) return;
+    if (!phoneReachable()) for (const id of [...pending.keys()]) settle(id, null, 'panel closed');
+    if (DAEMON) setRosterPace(false);
+  }, RECONNECT_MS);
 }
 
 // Under launchd a server that quit on a taken port would be relaunched every 10 s forever. Wait instead: an app-started
@@ -1997,7 +2010,7 @@ function setRosterPace(fast) {
   return true;
 }
 /** Whether someone may be looking: always outside the daemon, and under it while a page is connected. */
-const looking = () => !DAEMON || clients.size > 0;
+const looking = () => !DAEMON || clients.size > 0 || pages.size > 0;
 
 // Fleet's terminals: one WebSocket per tab (fleet/ws.mjs), checked as the API is: this host, this page, this start's token.
 server.on('upgrade', (req, socket, head) => {
@@ -2009,7 +2022,8 @@ server.on('upgrade', (req, socket, head) => {
   if (!ws) return;
   terms.serve(ws);
   pages.add(ws);
-  ws.on('close', () => pages.delete(ws));
+  lookerCame();
+  ws.on('close', () => { pages.delete(ws); lookerWent(); });
 });
 // Each page's socket also hears when Fleet's list changed between its reads (a hook event): it reads again at once.
 fleet.onChange(tellPages);

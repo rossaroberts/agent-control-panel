@@ -282,7 +282,10 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 .card .hd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; }
 .card .tool { color: var(--orange); font-weight: 500; }
 .card .from, .card .hint, .card small { color: var(--grey); }
-.card .what { margin: 2px 0 4px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.card pre.in { margin: 4px 0 6px; padding: 6px 8px; max-height: 40vh; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--paper); border-radius: 3px; font: inherit; font-size: 13px; line-height: 1.45; } /* what a yes is for, whole: it scrolls, it is never clamped */
+.card .path { margin: 2px 0 0; color: var(--grey); overflow-wrap: anywhere; }
+.card .warn { margin: 4px 0 6px; color: var(--orange); }
+.card[data-settling] > :not(.sent) { display: none; } /* a beat after the next request takes the place of the one answered */
 .card .acts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 20px; }
 .card .b { color: var(--grey); min-height: 32px; padding: 0; text-align: left; }
 .card .b:hover:not(:disabled) { color: var(--ink); }
@@ -315,6 +318,7 @@ body.pane-min #p-rail { display: flex; flex-direction: column; align-items: cent
 .card .sent { margin: 0; color: var(--green); }
 .card[aria-busy="true"] { opacity: .6; pointer-events: none; }
 body.phone .card { padding: 12px 16px 6px; font-size: 15px; }
+body.phone .card pre.in { font-size: 14px; }
 body.phone .card .b, body.phone .card .opt { min-height: 44px; font-size: 15px; }
 body.phone .card .reason, body.phone .card .other, body.phone .card .fb { font-size: 16px; min-height: 44px; }
 body.phone .card .fb { min-height: 4.5em; }
@@ -748,9 +752,26 @@ function md(text) {
 let heldCard = null; // { sig, el }
 const cardKind = (p) => (p.toolName === 'AskUserQuestion' ? 'question' : p.toolName === 'ExitPlanMode' ? 'plan' : p.open ? null : 'permission');
 const hasCard = (x) => Boolean(x?.pending && cardKind(x.pending));
-/** What a request asks to do, in one line: its command, file, address or what it says it is for, else the start of its input. */
-const inputLine = (p) => [p.toolInput?.command, p.toolInput?.file_path, p.toolInput?.url, p.toolInput?.description].find((v) => typeof v === 'string' && v)
-  ?? JSON.stringify(p.toolInput ?? {}).slice(0, 120);
+const TOO_BIG = 'input too large to show here; answer on the Mac';
+/** A command the panel had to cut is not one to say yes to from here: the yes would be for text that is not on the card. */
+const cutCommand = (p) => p.toolName === 'Bash' && Array.isArray(p.clipped) && p.clipped.includes('command');
+/** Whether the card may offer an Allow: only for an input it shows whole (a file's content cut with its marker still shows what the
+ *  file is and where it goes; a command is the thing itself). */
+const canAllow = (p) => !p.toolInput?._truncated && !cutCommand(p);
+/** What a yes is for, as the card shows it: the command whole, a file's path and what goes in it, each edit as before → after, else
+ *  the input as JSON. In a box that scrolls, never a clamp. The panel cut any string over 4,000 characters and says so in the
+ *  text ("… N more chars"); an input over 16 kB is not sent, and the card says to answer on the Mac. */
+function inputView(p) {
+  const i = p.toolInput ?? {}, pre = (text) => h('pre', { class: 'in', tabindex: '0', text });
+  if (i._truncated) return [h('p', { class: 'warn', role: 'note', text: TOO_BIG })];
+  if (p.toolName === 'Bash' && typeof i.command === 'string') return [pre(i.command), cutCommand(p) ? h('p', { class: 'warn', role: 'note', text: 'command too long to show in full; answer on the Mac' }) : null];
+  if (p.toolName === 'Write') return [h('p', { class: 'path', text: String(i.file_path ?? '') }), pre(String(i.content ?? ''))];
+  if (p.toolName === 'Edit' || p.toolName === 'MultiEdit') {
+    const edits = Array.isArray(i.edits) ? i.edits : [{ old_string: i.old_string, new_string: i.new_string }];
+    return [h('p', { class: 'path', text: String(i.file_path ?? '') }), ...edits.map((e) => pre(`${e?.old_string ?? ''}\n→\n${e?.new_string ?? ''}`))];
+  }
+  return [pre(JSON.stringify(i, null, 2))];
+}
 const DEST = { session: 'for this session', localSettings: 'in local settings', projectSettings: 'in project settings', userSettings: 'in your user settings' };
 /** What "Allow and remember" would save, in words: the rules the request itself suggests. */
 function rememberLine(suggestions) {
@@ -763,13 +784,15 @@ function cardShell(x, p, name) {
   const el = h('section', { class: 'card', 'data-kind': cardKind(p), 'data-id': p.id, 'aria-label': `${name} waiting for you` });
   const err = h('p', { class: 'err', role: 'alert', hidden: true });
   const lock = (on) => { for (const c of el.querySelectorAll('button, input, textarea')) if (!c.closest('.err')) c.disabled = on; if (!on) el._sync?.(); };
-  const head = h('div', { class: 'hd' }, h('span', { class: 'tool', text: name }), p.agentId ? h('span', { class: 'from', text: `from its subagent${p.agentType ? ` ${p.agentType}` : ''}` }) : null);
+  el._lock = lock;
+  const head = h('div', { class: 'hd' }, h('span', { class: 'tool', text: name }), p.agentId ? h('span', { class: 'from', text: `from its subagent${p.agentType ? ` ${p.agentType}` : ''}` }) : null,
+    h('span', { class: 'from of', hidden: !(p.of > 1), text: `1 of ${p.of}` }));
   async function send(payload) {
     if (pane.cardBusy === p.id) return;
     pane.cardBusy = p.id; err.hidden = true; el.setAttribute('aria-busy', 'true');
     const r = await api('/api/fleet/decide', { id: p.id, ...payload }).catch((e) => ({ ok: false, error: String(e.message), retry: true }));
     pane.cardBusy = null; el.removeAttribute('aria-busy');
-    if (r.ok) { el.replaceChildren(h('p', { class: 'sent', text: 'Sent' })); load(); return; }
+    if (r.ok) { el.dataset.sent = 'true'; el.replaceChildren(h('p', { class: 'sent', text: 'Sent' })); load(); return; }
     // What the panel said ("That request is gone": answered in the terminal, or expired). Nothing is armed after it.
     lock(true);
     const again = r.retry || !/gone|not asking/i.test(r.error ?? '') ? h('button', { class: 'b', type: 'button', text: 'Try again', onclick: () => { err.hidden = true; lock(false); } }) : null;
@@ -787,16 +810,18 @@ function denier(send, { label, placeholder, fallback }) {
 function permissionCard(x, p) {
   const { el, err, send, head } = cardShell(x, p, p.toolName);
   const no = denier(send, { label: 'Deny', placeholder: 'Reason for Claude (optional)', fallback: undefined });
-  el.append(...[head, h('div', { class: 'what', text: inputLine(p), title: inputLine(p) }),
+  const may = canAllow(p);
+  el.append(...[head, ...inputView(p),
     h('div', { class: 'acts' },
-      h('button', { class: 'b go', type: 'button', 'data-act': 'allow', text: 'Allow', onclick: () => send({ behavior: 'allow', always: false }) }),
-      p.suggestions?.length ? h('button', { class: 'b', type: 'button', 'data-act': 'always', text: 'Allow and remember', onclick: () => send({ behavior: 'allow', always: true }) }) : null,
+      may ? h('button', { class: 'b go', type: 'button', 'data-act': 'allow', text: 'Allow', onclick: () => send({ behavior: 'allow', always: false }) }) : null,
+      may && p.suggestions?.length ? h('button', { class: 'b', type: 'button', 'data-act': 'always', text: 'Allow and remember', onclick: () => send({ behavior: 'allow', always: true }) }) : null,
       no.button),
-    no.input, p.suggestions?.length ? h('p', { class: 'hint', text: rememberLine(p.suggestions) }) : null, err].filter(Boolean));
+    no.input, may && p.suggestions?.length ? h('p', { class: 'hint', text: rememberLine(p.suggestions) }) : null, err].filter(Boolean));
   return el;
 }
 function questionCard(x, p) {
   const { el, err, send, head } = cardShell(x, p, 'Question');
+  if (p.toolInput?._truncated) { el.append(head, h('p', { class: 'warn', role: 'note', text: TOO_BIG })); return el; }
   const qs = Array.isArray(p.toolInput?.questions) ? p.toolInput.questions : [];
   // The panel no longer holds an open one: the answers go in on its own screen, and that screen can't press several picks.
   const many = p.open && qs.some((q) => q.multiSelect);
@@ -833,6 +858,7 @@ function questionCard(x, p) {
 }
 function planCard(x, p) {
   const { el, err, send, head } = cardShell(x, p, 'Plan');
+  if (p.toolInput?._truncated) { el.append(head, h('p', { class: 'warn', role: 'note', text: TOO_BIG })); return el; }
   const i = p.toolInput ?? {};
   const fb = h('textarea', { class: 'fb', rows: '2', placeholder: 'Tell Claude what to change', 'aria-label': 'What to change in the plan' });
   const back = h('button', { class: 'b', type: 'button', 'data-act': 'back', text: 'Send back', disabled: true, onclick: () => send({ behavior: 'deny', message: fb.value.trim() }) });
@@ -854,10 +880,24 @@ function renderCard(x) {
   const p = x?.pending, kind = p && cardKind(p);
   if (!kind) return null;
   const sig = `${keyOf(x)}|${p.id}`;
-  if (heldCard?.sig === sig) return heldCard.el;
+  if (heldCard?.sig === sig) {
+    const of = heldCard.el.querySelector('.hd .of'); // another request of this session arrived (or this one's neighbour went): "1 of 2" follows
+    if (of) { of.textContent = `1 of ${p.of}`; of.hidden = !(p.of > 1); }
+    return heldCard.el;
+  }
+  // The next request of the same session takes the place of the one just answered, a few ms later, under the finger that pressed
+  // it: a second tap would answer a request nobody has read. The new card says so for a beat and takes no tap in it.
+  const next = heldCard?.key === keyOf(x), sent = heldCard?.el.dataset.sent === 'true';
   heldCard?.el.remove();
-  heldCard = { sig, el: { permission: permissionCard, question: questionCard, plan: planCard }[kind](x, p) };
+  heldCard = { sig, key: keyOf(x), el: { permission: permissionCard, question: questionCard, plan: planCard }[kind](x, p) };
+  if (next) beat(heldCard.el, sent);
   return heldCard.el;
+}
+const BEAT_MS = 700;
+function beat(el, sent) {
+  const note = h('p', { class: 'sent', text: sent ? 'Sent' : 'Next request' });
+  el.dataset.settling = 'true'; el.prepend(note); el._lock(true);
+  setTimeout(() => { note.remove(); delete el.dataset.settling; el._lock(false); }, BEAT_MS);
 }
 /** The card goes above the reply box on the phone (inside the keyboard's lift) and at the top of the pane on a desktop. */
 function placeCard(x) {

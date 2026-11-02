@@ -318,10 +318,16 @@ function homeWithJob(sessionId) {
   fs.mkdirSync(path.join(h, '.claude'), { recursive: true });
   fs.writeFileSync(path.join(h, '.claude', 'settings.json'), '{}');
   fs.mkdirSync(path.join(h, '.local', 'bin'), { recursive: true });
-  const roster = JSON.stringify([{ id: 'a1b2c3d4', sessionId, name: 'fixture', kind: 'background', pid: 4242, state: 'blocked', status: 'waiting',
-    waitingFor: 'permission prompt', cwd: h, startedAt: Date.now() - 60_000 }]);
-  fs.writeFileSync(path.join(h, '.local', 'bin', 'claude'), `#!/bin/sh\ncase "$1" in\n  agents) cat <<'EOF_ROSTER'\n${roster}\nEOF_ROSTER\n  ;;\n  auth) echo '{"loggedIn":true,"email":"me@example.com"}' ;;\n  *) exit 1 ;;\nesac\n`, { mode: 0o755 });
-  return { home: h, env: { HOME: h, PATH: `${path.join(h, '.local', 'bin')}:${process.env.PATH}` } };
+  // The roster is a file the test can rewrite (a session that stops waiting), and every `claude agents` call is logged.
+  const rosterFile = path.join(h, 'roster.json'), log = path.join(h, 'agents.log');
+  const row = { id: 'a1b2c3d4', sessionId, name: 'fixture', kind: 'background', pid: 4242, state: 'blocked', status: 'waiting', waitingFor: 'permission prompt', cwd: h, startedAt: Date.now() - 60_000 };
+  fs.writeFileSync(rosterFile, JSON.stringify([row]));
+  fs.writeFileSync(path.join(h, '.local', 'bin', 'claude'), `#!/bin/sh\ncase "$1" in\n  agents) echo "$@" >> '${log}'; cat '${rosterFile}' ;;\n  auth) echo '{"loggedIn":true,"email":"me@example.com"}' ;;\n  *) exit 1 ;;\nesac\n`, { mode: 0o755 });
+  return { home: h, env: { HOME: h, PATH: `${path.join(h, '.local', 'bin')}:${process.env.PATH}`, FLEET_REVIVE: '0' },
+    // The session stops waiting (answered in the terminal), as `claude agents` would say.
+    stopWaiting: () => fs.writeFileSync(rosterFile, JSON.stringify([{ ...row, state: 'working', status: 'idle', waitingFor: null }])),
+    // How many times the panel's own roster read has run (`agents --json --all`, which Fleet's reads are not asked in the tests that count).
+    rosterReads: () => { try { return fs.readFileSync(log, 'utf8').split('\n').filter((l) => l.includes('--all')).length; } catch { return 0; } } };
 }
 // A Fleet page's socket as a browser holds it: paired, with the page's token. `frames` are the texts the panel sends it.
 function fleetPage(port, p) {
@@ -463,12 +469,14 @@ test('/api/fleet/decide answers a request whichever local profile it belongs to;
   assert.match((await board.json()).error, /belongs to a profile that is not on the board/);
   assert.equal(await hook.answeredWithin(100), null, 'the board\'s refusal answered nothing');
   const first = await apiCall(p, '/api/fleet/decide', { id: row.pending.id, behavior: 'allow', always: true });
+  assert.equal(first.status, 200);
   assert.deepEqual(await first.json(), { ok: true });
   const answer = JSON.parse((await hook.answeredWithin(2000)).text).hookSpecificOutput.decision;
   assert.equal(answer.behavior, 'allow');
   assert.equal(answer.updatedPermissions?.[0]?.rules?.[0]?.ruleContent, 'ls:*', '"always" adopts the request\'s own suggestions');
   // Two pages pressing Allow: the second finds it gone, and nothing is sent twice.
   const second = await apiCall(p, '/api/fleet/decide', { id: row.pending.id, behavior: 'allow' });
+  assert.equal(second.status, 422, 'a refusal is 422, as the board\'s /api/answer-open answers one');
   const gone = await second.json();
   assert.equal(gone.ok, false);
   assert.match(gone.error, /gone/);
@@ -501,4 +509,107 @@ test('/api/fleet/decide keeps the board\'s answers: deny with a reason, a questi
   assert.match((await decide('/api/fleet/decide', { id: 'open:', behavior: 'allow' })).error, /gone/);
   const bare = await fetch(`${p.base}/api/fleet/decide`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   assert.equal(bare.status, 403, 'only for a paired page with its token');
+});
+
+test('/api/fleet/decide answers a refusal with 422, the status the board\'s answer-open uses', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  for (const body of [{ id: 'nope', behavior: 'allow' }, { id: 'open:no-such-session:toolu_1', behavior: 'approve-plan', mode: 'auto' }]) {
+    const r = await apiCall(p, '/api/fleet/decide', body);
+    assert.equal(r.status, 422, JSON.stringify(body));
+    assert.equal((await r.json()).ok, false);
+  }
+});
+
+test('a MultiEdit of 1.6 MB is a few kB in Fleet\'s list, not a megabyte on every poll', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const page = await fleetPage(port, p); t.after(page.close);
+  const big = 'y'.repeat(200_000);
+  const hook = holdRequest(port, { tool_name: 'MultiEdit', tool_input: { file_path: '/a', edits: Array.from({ length: 4 }, () => ({ old_string: big, new_string: big })) } });
+  assert.equal(await hook.answeredWithin(500), null);
+  const text = await (await apiCall(p, '/api/fleet')).text();
+  assert.ok(text.length < 100_000, `the list is ${text.length} bytes`);
+  const row = JSON.parse(text).machines.find((m) => m.local).accounts.flatMap((a) => a.sessions).find((x) => x.sessionId === 's1-fixture');
+  assert.equal(row.pending.toolInput._truncated, true);
+  assert.ok(row.pending.toolInput.bytes > 1_600_000);
+  // The Mac still has all of it: the held request answers whole.
+  assert.deepEqual(await (await apiCall(p, '/api/fleet/decide', { id: row.pending.id, behavior: 'deny' })).json(), { ok: true });
+});
+
+test('the last Fleet page going hands held requests back to the terminal, as the last board tab does, and slows the roster again', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, { ...job.env, ACP_RECONNECT_MS: '300' }); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  await sleep(1500); // the first read of the roster, at start
+  const idle = job.rosterReads();
+  await sleep(3300);
+  assert.equal(job.rosterReads(), idle, 'with nobody looking the roster is read once a minute');
+  const page = await fleetPage(port, p); t.after(page.close);
+  assert.ok(await until(() => job.rosterReads() >= idle + 3, 9000), 'a Fleet page alone brings the fast pace: one read at once, then every 3 s');
+  const hook = holdRequest(port);
+  assert.equal(await hook.answeredWithin(400), null);
+  page.close();
+  const handed = await hook.answeredWithin(3000);
+  assert.equal(handed?.text, '', 'the last page gone: handed back to the terminal');
+  await sleep(500);
+  const after = job.rosterReads();
+  await sleep(4500);
+  assert.equal(job.rosterReads(), after, 'and the roster is slow again');
+});
+
+test('a request answered in the terminal is let go within seconds when only a Fleet page is open', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  const page = await fleetPage(port, p); t.after(page.close);
+  await sleep(800); // the roster read that the page's arrival brings: the session is on the board, waiting
+  const hook = holdRequest(port);
+  assert.equal(await hook.answeredWithin(400), null);
+  job.stopWaiting(); // answered in the terminal: Claude Code now lists it as not waiting
+  // Four seconds' age, then two reads 3 s apart; at the idle pace (a minute) this would take two.
+  const done = await hook.answeredWithin(20_000);
+  assert.equal(done?.text, '', 'settled with no answer, so the terminal stands');
+});
+
+// A phone that is paired over a public name and has asked for push can be told, and can answer, with no Mac tab open: the
+// request is held for it. Either alone is not enough.
+const subscription = () => {
+  const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys();
+  return { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') } };
+};
+
+test('with a public host and a push subscription a request is held with no page open; with either alone it is not', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  fs.writeFileSync(path.join(prefs, 'fleet.json'), JSON.stringify({ public: 'mac.example-tailnet.ts.net' }));
+  const s = start(port, prefs, { ...job.env, ACP_RECONNECT_MS: '300' }); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  assert.equal((await holdRequest(port).answeredWithin(2000))?.text, '', 'a public host and no subscription: nobody to tell, so the terminal decides');
+  assert.equal((await apiCall(p, '/api/push/subscribe', { subscription: subscription() })).status, 200);
+  const hook = holdRequest(port);
+  assert.equal(await hook.answeredWithin(500), null, 'a public host and a subscription: held for the phone');
+  // A page comes and goes: that is no reason to hand it back while the phone can still answer.
+  const page = await fleetPage(port, p);
+  await sleep(200); page.close();
+  assert.equal(await hook.answeredWithin(1200), null, 'still held after the last page went');
+  const { row } = await fleetRow(p, 's1-fixture');
+  assert.ok(row.pending?.id, 'and a page that opens later finds it');
+  assert.deepEqual(await (await apiCall(p, '/api/fleet/decide', { id: row.pending.id, behavior: 'allow' })).json(), { ok: true });
+  assert.equal(JSON.parse((await hook.answeredWithin(2000)).text).hookSpecificOutput.decision.behavior, 'allow');
+});
+
+test('a push subscription with no public host holds nothing: the phone could not reach the panel to answer', async (t) => {
+  const port = await freePort(), prefs = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-')), job = homeWithJob('s1-fixture');
+  const s = start(port, prefs, job.env); t.after(s.stop);
+  assert.ok(await until(() => answers(port)), s.log());
+  const p = await paired(port, prefs);
+  assert.equal((await apiCall(p, '/api/push/subscribe', { subscription: subscription() })).status, 200);
+  assert.equal((await holdRequest(port).answeredWithin(2000))?.text, '');
 });

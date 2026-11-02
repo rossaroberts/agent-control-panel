@@ -28,7 +28,7 @@ test('the snapshot Fleet shares between pages is not written to', () => {
 
 test('a row shows what the card needs and none of the plumbing', () => {
   const p = shown(req({ suggestions: [{ type: 'setMode' }] }));
-  assert.deepEqual(Object.keys(p).sort(), ['agentId', 'agentType', 'createdAt', 'deadline', 'id', 'open', 'permissionMode', 'suggestions', 'toolInput', 'toolName']);
+  assert.deepEqual(Object.keys(p).sort(), ['agentId', 'agentType', 'clipped', 'createdAt', 'deadline', 'id', 'open', 'permissionMode', 'suggestions', 'toolInput', 'toolName']);
   assert.equal(p.open, false);
 });
 
@@ -39,12 +39,50 @@ test('a session\'s main agent comes before a subagent, then the oldest', () => {
   assert.equal(held('nobody'), null);
 });
 
-test('an open question or plan from a transcript is shown as open; long file contents are cut, questions and plans are whole', () => {
-  const long = 'x'.repeat(9000);
+test('an open question or plan from a transcript is shown as open', () => {
   assert.equal(shown(req({ open: true, id: 'open:s1:t1' })).open, true);
-  assert.equal(shown(req({ toolName: 'Write', toolInput: { file_path: '/a', content: long } })).toolInput.content.length, 4000);
-  assert.equal(shown(req({ toolName: 'ExitPlanMode', toolInput: { plan: long } })).toolInput.plan.length, 9000);
-  assert.equal(shown(req({ toolName: 'AskUserQuestion', toolInput: { questions: [{ question: long }] } })).toolInput.questions[0].question.length, 9000);
+});
+
+test('a long string is cut at 4,000 characters with a marker that says how many were left out, never silently', () => {
+  const p = shown(req({ toolName: 'Write', toolInput: { file_path: '/a', content: 'x'.repeat(10_000) } }));
+  assert.equal(p.toolInput.content, `${'x'.repeat(4000)}\n… 6000 more chars`);
+  assert.deepEqual(p.clipped, ['content']);
+  assert.equal(p.toolInput.file_path, '/a');
+  assert.deepEqual(shown(req({ toolInput: { command: 'ls' } })).clipped, [], 'nothing cut, nothing to say');
+});
+
+test('strings are cut wherever they sit: a MultiEdit of four 400 kB edits is a few kB on the row, not 1.6 MB', () => {
+  const big = 'y'.repeat(200_000);
+  const input = { file_path: '/a', edits: Array.from({ length: 4 }, () => ({ old_string: big, new_string: big })) };
+  const p = shown(req({ toolName: 'MultiEdit', toolInput: input }));
+  assert.ok(JSON.stringify(p).length < 20_000, `row is ${JSON.stringify(p).length} bytes`);
+  // Eight cut strings are 32 kB of JSON, over the 16 kB a row carries: the input is replaced, and says how big it was.
+  assert.equal(p.toolInput._truncated, true);
+  assert.ok(p.toolInput.bytes > 1_600_000);
+  const two = shown(req({ toolName: 'MultiEdit', toolInput: { file_path: '/a', edits: [{ old_string: big, new_string: 'z' }] } }));
+  assert.equal(two.toolInput._truncated, undefined, 'one cut string is within the 16 kB');
+  assert.match(two.toolInput.edits[0].old_string, /… 196000 more chars$/);
+  assert.deepEqual(two.clipped, ['edits']);
+});
+
+test('many small strings that add up past 16 kB are replaced too, with the size they were', () => {
+  const p = shown(req({ toolName: 'Task', toolInput: { items: Array.from({ length: 2000 }, (_, i) => `item number ${i}`) } }));
+  assert.equal(p.toolInput._truncated, true);
+  assert.ok(p.toolInput.bytes > 16_384);
+});
+
+test('a question or a plan is read whole up to 64 kB, then replaced like any other input', () => {
+  const plan = 'p'.repeat(20_000);
+  assert.equal(shown(req({ toolName: 'ExitPlanMode', toolInput: { plan } })).toolInput.plan.length, 20_000);
+  assert.equal(shown(req({ toolName: 'ExitPlanMode', toolInput: { plan: 'p'.repeat(70_000) } })).toolInput._truncated, true);
+  assert.equal(shown(req({ toolName: 'AskUserQuestion', toolInput: { questions: [{ question: 'q'.repeat(9000) }] } })).toolInput.questions[0].question.length, 9000);
+});
+
+test('a session with more than one held request says how many (`of`), showing the first', () => {
+  const held = heldIndex([req({ id: 'a', createdAt: 1 }), req({ id: 'b', createdAt: 2 }), req({ id: 'c', sessionId: 's2' })]);
+  assert.equal(held('s1').id, 'a');
+  assert.equal(held('s1').of, 2);
+  assert.equal(held('s2').of, 1);
 });
 
 test('a snapshot that is not a list of machines passes through', () => {

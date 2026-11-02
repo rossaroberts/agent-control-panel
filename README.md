@@ -175,6 +175,15 @@ address in Safari and use Share, Add to Home Screen.
 - Push for "needs you" (the **Notify me** button, installed app only) goes through the phone vendor's push service (Apple, Google,
   Mozilla or Microsoft). The VAPID `sub` sends this Mac's public host name to that service, and the lock-screen text mirrors the
   Mac notification, so it can carry a command line a session is waiting on. `"notify": false` in `fleet.json` turns off both.
+- A session waiting on a permission prompt, a question or a plan shows a card in its Fleet session view (above the reply box on the
+  phone, at the top of the pane on a desktop) with the Board's buttons. The card shows what a yes is for in a box that scrolls: a
+  command whole, a file's path and content (any string over 4,000 characters is cut with an "… N more chars" marker), and an input
+  over 16 kB is not sent at all: the card says to answer on the Mac. A command the panel had to cut gets no Allow.
+- The Mac holds a prompt (instead of leaving it to the terminal) while a Board or Fleet page is open, and also while a public host is
+  configured **and** a phone has asked for push, so "push, tap, approve" works from a locked phone with no tab open on the Mac. The
+  terminal's own dialog still shows during a hold, and answering there ends it. A hold ends when you answer, when it expires (just
+  under an hour), or 15 seconds after the last page closes, unless a phone can be pushed. Only this Mac's sessions get a card: a
+  remote machine's hooks point at its own panel.
 - When the tailnet is up but the panel is down, Tailscale answers 502 with its own error page. The offline page appears only when the
   phone cannot reach the Mac at all (no tailnet), because the service worker sees a failed fetch, not an HTTP error.
 
