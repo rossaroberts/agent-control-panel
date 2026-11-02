@@ -38,3 +38,25 @@ test('the phone\'s back gesture has a step for the document on top of the sessio
   assert.match(SCRIPT, /fleetDoc: p/);
   assert.match(SCRIPT, /pane\.doc && !history\.state\?\.fleetDoc\) \{ closeDoc\(\{ step: false \}\)/);
 });
+
+test('a mockup is given its own base, after its doctype, and in-page links replace the frame\'s history entry', () => {
+  const from = SCRIPT.indexOf('const MOCK_HEAD'), to = SCRIPT.indexOf('\n', SCRIPT.indexOf('const mockSrc'));
+  const ctx = vm.createContext({});
+  vm.runInContext(`${SCRIPT.slice(from, to)}\nglobalThis.mockSrc = mockSrc; globalThis.MOCK_HEAD = MOCK_HEAD;`, ctx);
+  assert.match(ctx.MOCK_HEAD, /^<base href="about:srcdoc"><script>/);
+  assert.match(ctx.MOCK_HEAD, /location\.replace\(/);
+  assert.ok(!/<\/script>.*<\/script>/s.test(ctx.MOCK_HEAD), 'one script, closed once');
+  const doc = '<!doctype html><title>x</title><body>hi';
+  assert.equal(ctx.mockSrc(doc), `<!doctype html>${ctx.MOCK_HEAD}<title>x</title><body>hi`, 'after the doctype, which must stay first');
+  assert.equal(ctx.mockSrc('<p>no doctype'), `${ctx.MOCK_HEAD}<p>no doctype`);
+  assert.equal(ctx.mockSrc('\uFEFF  <!DOCTYPE HTML>x'), `\uFEFF  <!DOCTYPE HTML>${ctx.MOCK_HEAD}x`);
+});
+
+test('a large markdown is shown as text, not rendered (marked is quadratic on some inputs)', () => {
+  assert.match(SCRIPT, /const RAW_OVER = 100_000;/);
+  assert.match(SCRIPT, /d\.kind === 'md' && d\.text\.length > RAW_OVER/);
+});
+
+test('with a document open the session\'s kept width is clamped too, so the list keeps room', () => {
+  assert.match(HTML, /body\.has-doc \{ --pane: max\(340px, min\(var\(--pane-w, 460px\), 100vw - 664px\)\); \}/);
+});

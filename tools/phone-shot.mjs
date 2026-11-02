@@ -13,7 +13,7 @@
 //           brief.md, a mock.html and the fleet-state/<session>.docs.jsonl the hook would have kept, and starts its own
 //           panel on it (ACP_PORT, default 4798). Nothing of yours is read or written, and the panel on :4747 is not touched.
 //           It then runs the phone and desktop checks above against the same fixture. Pictures: tools/out/doc-*.png.
-//   NODE_PATH=/opt/homebrew/lib/node_modules node tools/phone-shot.mjs --doc
+//   NODE_PATH=/opt/homebrew/lib/node_modules node tools/phone-shot.mjs --doc     (ACP_DOC_ONLY=clamp,strip: only those)
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -214,7 +214,7 @@ async function desktop() {
 }
 
 // ---------------------------------------------------------------- --doc: a fixture world, its panel, and the Documents pane in it
-const SID = ['fe11d0c5-0000-4000-8000-000000000001', 'fe11d0c5-0000-4000-8000-000000000002'];
+const SID = ['fe11d0c5-0000-4000-8000-000000000001', 'fe11d0c5-0000-4000-8000-000000000002', 'fe11d0c5-0000-4000-8000-000000000003'];
 const WORK = path.join(fx, 'work');
 const rowOf = (sid) => `#machines [data-key$=":${sid}"]`;
 const LONG = Array.from({ length: 160 }, (_, i) => `${i % 12 === 0 ? `\n## Part ${i / 12 + 1}\n\n` : ''}Line ${i + 1} of a long document, long enough to need the scroll bar.\n`).join('\n');
@@ -237,6 +237,11 @@ a_very_long_line_with_no_break_to_see_that_a_code_block_scrolls_sideways_and_nev
 | a | 0 |
 `;
 // A mockup that tries to read the panel: in the sandbox that throws, and it writes "blocked" over itself.
+// Links that point at the frame's own page: with the srcdoc's base left as the panel's, `#` would load the panel inside the frame.
+const LINKS = '<!doctype html><title>Links</title><body style="margin:24px;font:16px sans-serif"><p id="t">links mock</p><a id="h" href="#">top</a> <a id="o" href="#one">one</a><p id="one" style="margin-top:900px">one</p>';
+// 200 KB of the input marked takes minutes over (`*a *a ...`): shown as text, and at once.
+const BIG = '*a '.repeat(70_000);
+const MANY = Array.from({ length: 60 }, (_, i) => `n${String(i + 1).padStart(2, '0')}.txt`); // a session that wrote sixty: its strip scrolls
 const MOCK = '<!doctype html><title>Mock</title><body style="font:16px sans-serif;margin:24px">open<script>try{parent.document}catch(e){document.body.textContent=\'blocked\'}</script>';
 
 /** The world the panel runs on: its own HOME (so `~/.claude` is ours), a stand-in `claude` that lists two sessions, one
@@ -248,9 +253,12 @@ function buildFixture() {
   for (const d of ['home', 'work']) fs.rmSync(path.join(fx, d), { recursive: true, force: true });
   const home = path.join(fx, 'home'), claude = path.join(home, '.claude'), now = Date.now();
   for (const d of [WORK, path.join(claude, 'fleet-state'), path.join(claude, 'projects', WORK.replace(/[^A-Za-z0-9]/g, '-')), path.join(home, '.local', 'bin')]) fs.mkdirSync(d, { recursive: true });
-  const files = { 'brief.md': BRIEF, 'mock.html': MOCK, 'long.md': LONG, 'notes.txt': 'plain notes\nline two\n' };
+  const files = { 'brief.md': BRIEF, 'mock.html': MOCK, 'long.md': LONG, 'notes.txt': 'plain notes\nline two\n', 'links.html': LINKS, 'big.md': BIG };
   for (const [n, text] of Object.entries(files)) fs.writeFileSync(path.join(WORK, n), text);
-  const age = { 'brief.md': 60, 'mock.html': 120, 'long.md': 180, 'notes.txt': 300 }; // seconds ago: newest first is brief.md
+  fs.mkdirSync(path.join(WORK, 'many'), { recursive: true });
+  for (const n of MANY) fs.writeFileSync(path.join(WORK, 'many', n), `${n}\n`);
+  fs.writeFileSync(path.join(claude, 'fleet-state', `${SID[2]}.docs.jsonl`), MANY.map((n, i) => JSON.stringify({ p: path.join(WORK, 'many', n), t: 'Write', at: now - (60 + i) * 1000 })).join('\n') + '\n');
+  const age = { 'brief.md': 60, 'mock.html': 120, 'long.md': 180, 'notes.txt': 300, 'links.html': 360, 'big.md': 420 }; // seconds ago: newest first is brief.md
   fs.writeFileSync(path.join(claude, 'fleet-state', `${SID[0]}.docs.jsonl`),
     Object.entries(age).map(([n, s]) => JSON.stringify({ p: path.join(WORK, n), t: 'Write', at: now - s * 1000 })).join('\n') + '\n');
   fs.writeFileSync(path.join(claude, 'settings.json'), '{}');
@@ -258,12 +266,14 @@ function buildFixture() {
   const say = (s, text) => JSON.stringify({ type: 'assistant', timestamp: ts(s), message: { role: 'assistant', model: 'claude-opus-4-5', stop_reason: 'end_turn', usage: { input_tokens: 1200, output_tokens: 300 }, content: [{ type: 'text', text }] } });
   const ask = (s, text) => JSON.stringify({ type: 'user', timestamp: ts(s), message: { role: 'user', content: text } });
   for (const [i, lines] of [[0, [ask(400, 'Write a one-page brief for the Documents pane, and a mockup of it.'), say(70, 'Both are written: the brief is brief.md and the mockup is mock.html.')]],
-                            [1, [ask(300, 'Look at the build.'), say(200, 'The build is green.')]]]) {
+                            [1, [ask(300, 'Look at the build.'), say(200, 'The build is green.')]],
+                            [2, [ask(350, 'Write sixty notes.'), say(100, 'Written.')]]]) {
     fs.writeFileSync(path.join(claude, 'projects', WORK.replace(/[^A-Za-z0-9]/g, '-'), `${SID[i]}.jsonl`), lines.join('\n') + '\n');
   }
   // What `claude agents --json [--all]` and `claude auth status --json` print; nothing else the panel asks is answered.
   const roster = [{ sessionId: SID[0], name: 'docs fixture', cwd: WORK, pid: process.pid, startedAt: now - 500_000, status: 'idle' },
-                  { sessionId: SID[1], name: 'build fixture', cwd: WORK, pid: process.pid, startedAt: now - 400_000, status: 'waiting' }]; // waiting: "needs you", the one section the phone always has open
+                  { sessionId: SID[1], name: 'build fixture', cwd: WORK, pid: process.pid, startedAt: now - 400_000, status: 'waiting' }, // waiting: "needs you", the one section the phone always has open
+                  { sessionId: SID[2], name: 'many fixture', cwd: WORK, pid: process.pid, startedAt: now - 300_000, status: 'idle' }];
   fs.writeFileSync(path.join(fx, 'roster.json'), JSON.stringify(roster));
   const bin = path.join(home, '.local', 'bin', 'claude');
   fs.writeFileSync(bin, `#!/bin/sh\ncase "$1" in\n  agents) cat '${path.join(fx, 'roster.json')}' ;;\n  auth) echo '{"loggedIn":true,"email":"fixture@example.test","subscriptionType":"max"}' ;;\n  *) exit 1 ;;\nesac\n`, { mode: 0o755 });
@@ -292,6 +302,13 @@ async function withFixturePanel(fn) {
 
 const box = (page, sel) => page.evaluate((s) => { const el = document.querySelector(s); if (!el) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), r: Math.round(b.right), w: Math.round(b.width), h: Math.round(b.height), shown: getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none' }; }, sel);
 const stripNames = (page) => page.$$eval('#p-head .docs .doc-row', (els) => els.map((e) => e.dataset.name));
+/** The mockup's frame, once it has loaded. */
+async function frameOf(page) {
+  const el = await page.waitForSelector('#doc-body iframe.mock', { timeout: 10_000 });
+  const frame = await el.contentFrame();
+  await frame.waitForFunction(() => document.readyState === 'complete', null, { timeout: 5000 });
+  return frame;
+}
 /** The frame of the mockup on show, once it has run its script. */
 async function mockText(page) {
   const el = await page.waitForSelector('#doc-body iframe.mock', { timeout: 10_000 });
@@ -313,7 +330,7 @@ async function docsDesktop() {
   await page.waitForSelector('#p-head .docs .doc-row', { timeout: 10_000 }).catch(() => {});
   await settle(400);
   const names = await stripNames(page);
-  check(JSON.stringify(names) === JSON.stringify(['brief.md', 'mock.html', 'long.md', 'notes.txt']), `desktop: the pane head lists the session's documents, newest first (${names.join(', ') || 'none'})`);
+  check(JSON.stringify(names) === JSON.stringify(['brief.md', 'mock.html', 'long.md', 'notes.txt', 'links.html', 'big.md']), `desktop: the pane head lists the session's documents, newest first (${names.join(', ') || 'none'})`);
   check(await page.evaluate(() => !document.body.classList.contains('has-doc') && getComputedStyle(document.getElementById('doc')).display === 'none'), 'desktop: no document pane until one is opened');
 
   // The mockup: it runs its own script, which cannot read the panel.
@@ -324,6 +341,24 @@ async function docsDesktop() {
   const mb = await box(page, '#doc-body iframe.mock'), db = await box(page, '#doc-body');
   check(mb && db && mb.w >= db.w - 1 && mb.h >= db.h - 1, `desktop: the mockup fills the pane (${mb?.w}x${mb?.h} in ${db?.w}x${db?.h})`);
   await page.screenshot({ path: path.join(out, 'doc-desktop-mock.png') });
+
+  // A link inside a mockup stays inside it (a `#` link used to load the panel itself into the frame).
+  await page.click('#p-head .doc-row[data-name="links.html"]');
+  const lf = await frameOf(page);
+  const len0 = await page.evaluate(() => history.length);
+  await lf.click('#h'); await settle(300);
+  await lf.click('#o'); await settle(300);
+  const ls = await lf.evaluate(() => ({ t: document.getElementById('t')?.textContent ?? null, href: location.href, y: Math.round(scrollY) })).catch(() => ({ t: null, href: 'gone', y: 0 }));
+  check(ls.t === 'links mock' && ls.href === 'about:srcdoc#one', `desktop: a # link in a mockup stays in the mockup, and #one still takes it there (${JSON.stringify(ls.t)}, ${ls.href}, scrolled to ${ls.y})`);
+  check(ls.y > 50 && await page.evaluate((n) => history.length === n, len0), `desktop: and a link in a mockup adds nothing to the history (${len0} entries before, ${await page.evaluate(() => history.length)} after)`);
+  check(await page.evaluate(() => document.body.classList.contains('has-doc') && Boolean(document.querySelector('#doc-body iframe.mock'))), 'desktop: and the document is still open');
+
+  // A large markdown is shown as text, at once (marked is quadratic on input like this one).
+  const t0 = Date.now();
+  await page.click('#p-head .doc-row[data-name="big.md"]');
+  await page.waitForSelector('#doc-body pre.raw', { timeout: 10_000 });
+  const took = Date.now() - t0;
+  check(took < 300 && await page.evaluate(() => document.getElementById('doc-body').textContent.includes('shown as text (large)')), `desktop: a 200 KB markdown is shown as text, with a note, in ${took} ms`);
 
   // Three columns: the list, the session, the document.
   const geo = await page.evaluate(() => { const r = (s) => { const b = document.querySelector(s).getBoundingClientRect(); return { x: Math.round(b.x), r: Math.round(b.right), w: Math.round(b.width) }; }; return { doc: r('#doc'), pane: r('#pane'), main: r('main') }; });
@@ -458,6 +493,99 @@ async function docsOverlay() {
   await browser.close();
 }
 
+/** The session's width is yours too, but a stored 900 must not push it off the screen or the list to nothing while a document is open. */
+async function docsClamp() {
+  const browser = await launch('chromium');
+  for (const [w, h] of [[1100, 800], [1440, 900]]) {
+    const page = await (await browser.newContext({ viewport: { width: w, height: h } })).newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await page.goto(url);
+    await page.evaluate(() => localStorage.setItem('fleet.pane.width', '900'));
+    await page.reload();
+    await page.waitForSelector(rowOf(SID[0]), { timeout: 30_000 });
+    await settle(600);
+    await page.click(rowOf(SID[0]));
+    await page.waitForSelector('#p-head .doc-row', { timeout: 10_000 });
+    await page.click('#p-head .doc-row[data-name="brief.md"]');
+    await page.waitForSelector('#doc-body h1', { timeout: 10_000 }).catch(() => {});
+    await settle(300);
+    const g = await page.evaluate(() => { const r = (s) => { const b = document.querySelector(s).getBoundingClientRect(); return { x: Math.round(b.x), r: Math.round(b.right), w: Math.round(b.width) }; }; return { doc: r('#doc'), pane: r('#pane'), main: r('main'), over: document.documentElement.scrollWidth > innerWidth }; });
+    check(g.pane.x >= 240 && g.main.w >= 200 && g.doc.w >= 360 && g.pane.r <= g.doc.x + 1 && !g.over,
+      `clamp: a stored session width of 900 at ${w} px: the session starts at ${g.pane.x} (${g.pane.w} wide), the list is ${g.main.w}, the document ${g.doc.w}`);
+    check(errors.length === 0, `clamp ${w}: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
+    await page.context().close();
+  }
+  await browser.close();
+}
+
+/** Drawn again (a write, a minute going by), the strip keeps its place. */
+async function docsStrip() {
+  const docsFile = path.join(fx, 'home', '.claude', 'fleet-state', `${SID[2]}.docs.jsonl`);
+  const write = (n) => fs.appendFileSync(docsFile, JSON.stringify({ p: path.join(WORK, 'many', n), t: 'Edit', at: Date.now() }) + '\n');
+  for (const [type, label, prop, scroll] of [['chromium', 'desktop', 'scrollTop', 30], ['webkit', 'phone', 'scrollLeft', 300]]) {
+    const browser = await launch(type);
+    const ctx = await browser.newContext(type === 'webkit' ? { ...pw.devices['iPhone 14'], viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } : { viewport: { width: 1440, height: 900 } });
+    const page = await ctx.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await page.goto(url);
+    await page.waitForSelector(type === 'webkit' ? '#machines .fold-sec' : rowOf(SID[2]), { timeout: 30_000 });
+    await settle(600);
+    if (type === 'webkit') for (const f of await page.$$('.fold-sec[aria-expanded="false"]')) { await f.tap().catch(() => {}); await settle(150); }
+    await page.click(rowOf(SID[2]));
+    await page.waitForSelector('#p-head .docs .doc-row', { timeout: 10_000 });
+    await settle(400);
+    if (type === 'chromium') {
+      // A press on a document is not cut short by the strip being drawn again: it is let go after a write, and opens that document.
+      const first = await page.evaluate(() => document.querySelector('#p-head .doc-row').dataset.name), b = await box(page, '#p-head .doc-row');
+      await page.mouse.move(b.x + b.w / 2, b.y + b.h / 2); await page.mouse.down();
+      write('n31.txt'); await settle(900);
+      await page.mouse.up();
+      await settle(500);
+      const opened = await page.evaluate(() => document.querySelector('#doc-head .doc-name')?.textContent ?? null);
+      check(opened === first, `${label}: a press held while a write redraws the strip still opens that document (pressed ${first}, opened ${opened})`);
+      await page.keyboard.press('Escape');
+      await settle(2600); // the dot of that write goes out
+    }
+    const before = await page.evaluate(([prop, scroll]) => { const e = document.querySelector('#p-head .docs'); e[prop] = scroll; return { at: e[prop], room: prop === 'scrollTop' ? e.scrollHeight - e.clientHeight : e.scrollWidth - e.clientWidth }; }, [prop, scroll]);
+    check(before.room > scroll && before.at === scroll, `${label}: a session with sixty documents has a strip that scrolls (${prop} ${before.at} of ${before.room})`);
+    write('n30.txt'); // the strip is drawn again, with a dot
+    await page.waitForSelector('#p-head .doc-row[data-name="n30.txt"] .live', { timeout: 4000 });
+    const held = await page.evaluate((prop) => document.querySelector('#p-head .docs')[prop], prop);
+    check(held === scroll, `${label}: a write draws the strip again and it keeps its place (${held})`);
+    await page.waitForFunction(() => !document.querySelector('#p-head .docs .live'), null, { timeout: 5000 });
+    const held2 = await page.evaluate((prop) => document.querySelector('#p-head .docs')[prop], prop);
+    check(held2 === scroll, `${label}: and again when the dot goes out (${held2})`);
+    check(errors.length === 0, `${label} strip: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
+    await browser.close();
+  }
+}
+
+/** A document opened on a phone, then the window widened: its history step must not be left in the state once it closes. */
+async function docsResize() {
+  const browser = await launch('chromium');
+  const page = await (await browser.newContext({ viewport: { width: 390, height: 844 } })).newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  await page.goto(url);
+  await page.waitForSelector('#machines .fold-sec', { timeout: 30_000 });
+  await settle(600);
+  for (const f of await page.$$('.fold-sec[aria-expanded="false"]')) { await f.click().catch(() => {}); await settle(150); }
+  await page.click(rowOf(SID[0]));
+  await page.waitForSelector('#p-head .doc-row', { timeout: 10_000 });
+  await page.click('#p-head .doc-row[data-name="brief.md"]');
+  await page.waitForFunction(() => document.body.classList.contains('has-doc'));
+  check(await page.evaluate(() => Boolean(history.state?.fleetDoc)), 'resize: opened narrow, the document has its history step');
+  await page.setViewportSize({ width: 900, height: 800 });
+  await settle(400);
+  await page.keyboard.press('Escape');
+  await settle(400);
+  check(await page.evaluate(() => !document.body.classList.contains('has-doc') && !history.state?.fleetDoc), `resize: widened, then closed with Esc, no fleetDoc is left in the history state (${await page.evaluate(() => JSON.stringify(history.state))})`);
+  check(errors.length === 0, `resize: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
+  await browser.close();
+}
+
 async function docsPhone() {
   const browser = await launch('webkit');
   const ctx = await browser.newContext({ ...pw.devices['iPhone 14'], viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
@@ -507,6 +635,34 @@ async function docsPhone() {
   await page.goBack();
   await settle(450);
   check(await page.evaluate(() => !document.body.classList.contains('has-pane') && history.state === null), 'phone: and one more back is the queues');
+
+  // A # link inside a mockup stays inside it, and one back still closes the document and nothing else.
+  await open();
+  await page.tap('#p-head .doc-row[data-name="links.html"]');
+  await page.waitForFunction(() => document.body.classList.contains('has-doc'));
+  await settle(450);
+  const lf = await frameOf(page);
+  await lf.locator('#h').tap(); await settle(300);
+  const ls = await lf.evaluate(() => ({ t: document.getElementById('t')?.textContent ?? null, href: location.href })).catch(() => ({ t: null, href: 'gone' }));
+  check(ls.t === 'links mock' && ls.href === 'about:srcdoc#', `phone: a # link in a mockup stays in the mockup (${JSON.stringify(ls.t)}, ${ls.href})`);
+  await page.goBack();
+  await settle(450);
+  check(await page.evaluate(() => !document.body.classList.contains('has-doc') && document.body.classList.contains('has-pane') && !history.state?.fleetDoc), 'phone: and one back closes the document and leaves the session');
+  await page.goBack();
+  await settle(450);
+
+  // Reload with a document open: the page boots on the queues with nothing dead in the history, so one back leaves it.
+  await open();
+  await page.tap('#p-head .doc-row[data-name="brief.md"]');
+  await page.waitForFunction(() => document.body.classList.contains('has-doc'));
+  await settle(300);
+  await page.reload();
+  await page.waitForSelector('#machines .fold-sec', { timeout: 30_000 });
+  await settle(1500); // the boot may step back over the session's own step
+  check(await page.evaluate(() => history.state === null && !document.body.classList.contains('has-pane') && !document.body.classList.contains('has-doc')), `phone: after a reload with a document open the page is on the queues with history.state null (${await page.evaluate(() => JSON.stringify(history.state))})`);
+  await page.goBack().catch(() => {});
+  await settle(800);
+  check(page.url() === 'about:blank', `phone: and the first back leaves the page (${page.url().replace(/\?k=.*/, '')})`);
   check(errors.length === 0, `phone: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
   await browser.close();
 }
@@ -531,7 +687,12 @@ if (!pw) {
   chromeShots(); process.exit(2);
 }
 try {
-  if (docMode) await withFixturePanel(async () => { await docsDesktop(); await docsOverlay(); await docsPhone(); await phone(); await desktop(); });
+  // ACP_DOC_ONLY=clamp,strip runs just those (desktop, overlay, clamp, strip, resize, phone, and `all` for the two above); the checks above run with none named.
+  const only = (process.env.ACP_DOC_ONLY ?? '').split(',').filter(Boolean), want = (n) => !only.length || only.includes(n);
+  if (docMode) await withFixturePanel(async () => {
+    for (const [n, fn] of [['desktop', docsDesktop], ['overlay', docsOverlay], ['clamp', docsClamp], ['strip', docsStrip], ['resize', docsResize], ['phone', docsPhone]]) if (want(n)) await fn();
+    if (!only.length) { await phone(); await desktop(); }
+  });
   else { await phone(); await desktop(); }
 } catch (e) {
   console.error(`\n*** playwright failed: ${String(e.stack ?? e).split('\n').slice(0, 3).join(' | ')}\n*** pictures only (headless Chrome); exiting 1 ***`);

@@ -353,6 +353,7 @@ body.has-doc { --doc: clamp(360px, min(var(--doc-w, 520px), 100vw - var(--pane-e
 #doc-body.mockup { padding: 0; overflow: hidden; }
 #doc-body iframe.mock { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; } /* a mockup is a page of its own: on white, as it was drawn */
 #doc-body .doc-note { color: var(--grey); font-size: 13px; }
+#doc-body .doc-note + pre.raw { margin-top: 10px; }
 #doc-body pre.raw { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
 /* markdown, as the rest of the panel writes: one typeface, tone for rank, no boxes but the tint behind code */
 #doc-body.md > :first-child { margin-top: 0; }
@@ -377,6 +378,8 @@ body.has-doc { --doc: clamp(360px, min(var(--doc-w, 520px), 100vw - var(--pane-e
 #doc-body.md .noimg { color: var(--grey); }
 #doc-body.md strong { font-weight: 500; }
 @media (min-width: 1100px) {
+  /* a width kept from a wide window must not push the session off the screen: with a document open it leaves the document its 360 and the list its 304 */
+  body.has-doc { --pane: max(340px, min(var(--pane-w, 460px), 100vw - 664px)); }
   body.has-doc #pane { right: var(--doc); }
   body.has-pane.has-doc main { width: calc(100% - var(--pane) - var(--doc) - 64px); margin-left: 32px; }
   body.has-pane.has-doc.pane-min main { width: calc(100% - var(--rail) - var(--doc) - 64px); }
@@ -1629,8 +1632,14 @@ function renderHead(x, term) {
     .filter(Boolean);
   const box = h('div', {}, ...parts), sig = `${pane.key}\n${box.innerHTML}`;
   if (sig === headSig) return;
+  // A press on a document is not cut short: the strip is drawn once it is let go.
+  if (docPress && Date.now() - docPress < 3000) { clearTimeout(pressT); pressT = setTimeout(renderPane, 250); return; }
+  const was = headSig.startsWith(`${pane.key}\n`) ? $('p-head').querySelector('.docs') : null, at = was && [was.scrollLeft, was.scrollTop];
   headSig = sig;
   $('p-head').replaceChildren(...box.childNodes);
+  // The strip is a new element each time (the sort of a write, a minute going by): it keeps the place it was scrolled to.
+  const now = was && $('p-head').querySelector('.docs');
+  if (now) { now.scrollLeft = at[0]; now.scrollTop = at[1]; }
 }
 let headSig = '';
 
@@ -1638,10 +1647,26 @@ let headSig = '';
 // The session's head lists what it wrote (hook.sh keeps a line per write), newest first. A tap reads the file where the
 // session runs (only paths from that list are served) and shows it beside the session: markdown through the vendored marked
 // and context-render's renderSafe (raw HTML in it is text, links are checked, images are not loaded), HTML in an iframe that
-// runs its own scripts and can reach nothing of the panel: sandbox="allow-scripts" without allow-same-origin gives it an origin
-// of its own, so the token and the cookie are out of its reach. A write while it is open reads it again, in place.
-let docSeq = 0, docHeadSig = '', docT = null, dotT = null, renderer = null;
+// runs its own scripts but cannot read the panel: sandbox="allow-scripts" without allow-same-origin gives it an origin of its
+// own, so the panel's DOM, storage, cookie and token are out of its reach, and the panel refuses what it POSTs (a blind GET may
+// carry the cookie on WebKit; the answer is unreadable). A mockup that loops forever still blocks the page: a reload recovers.
+// A write while it is open reads it again, in place.
+let docSeq = 0, docHeadSig = '', docT = null, dotT = null, renderer = null, docPress = 0, pressT = null;
 const FRESH_MS = 2000; // a document written this recently is marked as being written
+const RAW_OVER = 100_000; // a markdown larger than this is shown as text: marked is quadratic on some inputs (`*a *a ...`: 6 s at 32 KB)
+/** A mockup's source with two lines put ahead of it (after its doctype, if it has one). Its base is its own page: in an srcdoc
+ *  a link takes the panel's address as its base, so `href="#"` would load the panel inside the frame. And a click on an in-page
+ *  link (`#top`, `#section`) goes to its place by replacing the frame's history entry, as the browser would by adding one: that
+ *  entry is one more back before the phone's back reaches the document, and the page cannot see or take it off. :target and
+ *  hashchange work as before. */
+const MOCK_HEAD = '<base href="about:srcdoc"><script>addEventListener("click",function(e){var a=e.target&&e.target.closest&&e.target.closest("a[href^=\'#\']");'
+  + 'if(!a||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||(a.target&&a.target!=="_self"))return;e.preventDefault();'
+  + 'location.replace(location.href.split("#")[0]+a.getAttribute("href"))})<\/script>';
+const mockSrc = (text) => { const at = /^\uFEFF?\s*<!doctype[^>]*>/i.exec(text)?.[0].length ?? 0; return text.slice(0, at) + MOCK_HEAD + text.slice(at); };
+// A press on a document in the strip is not cut short by the strip being drawn again: that waits for the release.
+$('p-head').addEventListener('pointerdown', (e) => { if (e.target.closest?.('.docs')) docPress = Date.now(); });
+addEventListener('pointerup', () => { docPress = 0; }, true);
+addEventListener('pointercancel', () => { docPress = 0; }, true);
 /** Their names, the folder added to those that would read alike. */
 function docNames(list) {
   const base = list.map((d) => lastPart(d.path) ?? d.path);
@@ -1705,12 +1730,15 @@ async function renderDoc(keep = false) {
   if (d.error) kids = [h('div', { class: 'doc-note', text: d.error })];
   else if (d.text == null) kids = [h('div', { class: 'doc-note', text: '…' })];
   else if (d.source || d.kind === 'text') kids = [h('pre', { class: 'raw', text: d.text })];
-  else if (d.kind === 'html') { kids = [h('iframe', { class: 'mock', sandbox: 'allow-scripts', srcdoc: d.text, title: lastPart(d.path) ?? 'Document', referrerpolicy: 'no-referrer' })]; cls = 'mockup'; }
+  else if (d.kind === 'md' && d.text.length > RAW_OVER) kids = [h('div', { class: 'doc-note', text: 'shown as text (large)' }), h('pre', { class: 'raw', text: d.text })];
+  else if (d.kind === 'html') { kids = [h('iframe', { class: 'mock', sandbox: 'allow-scripts', srcdoc: mockSrc(d.text), title: lastPart(d.path) ?? 'Document', referrerpolicy: 'no-referrer' })]; cls = 'mockup'; }
   else {
     const render = await docRenderer().catch(() => null);
     if (pane.doc !== d) return; // closed or replaced while marked loaded
-    if (render) { body.className = 'md'; body.innerHTML = render(d.text); body.scrollTop = at; return; } // safe by construction: see context-render.mjs
-    kids = [h('pre', { class: 'raw', text: d.text })]; // marked did not load: the text, readable
+    let html = null;
+    try { html = render ? render(d.text) : null; } catch { html = null; }
+    if (html != null) { body.className = 'md'; body.innerHTML = html; body.scrollTop = at; return; } // safe by construction: see context-render.mjs
+    kids = [h('div', { class: 'doc-note', text: 'shown as text (could not be rendered)' }), h('pre', { class: 'raw', text: d.text })]; // marked did not load, or failed: the text, readable
   }
   body.className = cls;
   body.replaceChildren(...kids);
@@ -1723,7 +1751,15 @@ function closeDoc({ step = true } = {}) {
   pane.doc = null; pane.docBack = false;
   inPlace(pane.key, applyPaneUi);
   renderPane();
-  if (step && phone.matches && history.state?.fleetDoc) setTimeout(() => { if (!pane.doc && history.state?.fleetDoc) history.back(); }, 0);
+  if (step && history.state?.fleetDoc) {
+    if (phone.matches) setTimeout(() => { if (!pane.doc && history.state?.fleetDoc) history.back(); }, 0);
+    else dropDocState(); // narrowed and widened again: the step is left in the state, not taken off
+  }
+}
+/** The history state without the document's step, for a document that is closed: the entry stays, as the session's. */
+function dropDocState() {
+  if (pane.doc || !history.state?.fleetDoc) return;
+  history.replaceState(history.state.fleetPane ? { fleetPane: history.state.fleetPane } : null, '', location.pathname + location.search);
 }
 /** The session wrote the document that is open: read it again and draw it in place. Debounced; a read that finds the same
  *  text changes nothing (a mockup would start over). */
@@ -2161,6 +2197,7 @@ phone.addEventListener('change', () => {
   // A session opened at desktop width has no history step; the phone's back gesture needs one.
   if (phone.matches && pane.key && history.state?.fleetPane !== pane.key) history.pushState({ fleetPane: pane.key }, '');
   if (phone.matches && pane.doc && !history.state?.fleetDoc) history.pushState({ fleetPane: pane.key, fleetDoc: pane.doc.path }, '');
+  dropDocState();
   if (snap) { renderMachines(); renderPane(); if (pane.doc) renderDoc(true); }
 });
 // A link into one session (`/#<machine>:<sessionId>`, the way Satellite's agent cell points here): it opens once the list has it.
@@ -2174,7 +2211,13 @@ function openWanted() {
 }
 // A reload keeps the history step of the session that was open, but the page boots with none open: take it off, or the first
 // back press would go nowhere.
-if (history.state?.fleetPane && !pane.key) history.replaceState(null, '', location.pathname + location.search);
+if (history.state?.fleetPane && !pane.key) {
+  // With a document open there were two steps (the session's, then its own): both go, or the first back would land on a
+  // session that is not there. This one is cleared and the page steps back over the session's.
+  const withDoc = Boolean(history.state.fleetDoc);
+  history.replaceState(null, '', location.pathname + location.search);
+  if (withDoc) history.go(-2);
+}
 const fromHash = () => {
   if (location.hash.length <= 1) return;
   let k = ''; try { k = decodeURIComponent(location.hash.slice(1)); } catch {}
