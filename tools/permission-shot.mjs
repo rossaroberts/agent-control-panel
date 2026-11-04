@@ -143,7 +143,7 @@ async function phone(url) {
   await page.waitForSelector(rowOf(A), { timeout: 30_000 });
   await settle(600);
   check(await page.evaluate(() => document.body.classList.contains('phone')), 'phone: body.phone is set at 390 px');
-  for (const f of await page.$$('.fold-sec[aria-expanded="false"]')) { await f.tap(); await settle(250); } // the quiet session is under its fold
+  for (const f of await page.$$('.fold-sec[aria-expanded="false"], .fold-closed[aria-expanded="false"]')) { await f.tap(); await settle(250); } // the quiet session is under its fold
 
   // A request for A, with B open: B has no card, A does.
   await page.tap(rowOf(B));
