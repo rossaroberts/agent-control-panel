@@ -128,7 +128,7 @@ async function phone() {
   check(await page.evaluate(() => !document.body.classList.contains('has-pane') && history.state === null), 'and a reload then back leaves the queues with history.state null');
 
   // Open A, then a link to B (#<key>): one back goes to the queues, nothing dead left behind.
-  for (const f of await page.$$('.fold-sec[aria-expanded="false"]')) { await f.tap().catch(() => {}); await settle(150); } // folded sections hold the other rows
+  for (let f, n = 0; n < 20 && (f = await page.$('.fold-sec[aria-expanded="false"], .fold-closed[aria-expanded="false"]')); n++) { await f.tap().catch(() => {}); await settle(150); } // folded sections hold the other rows
   const rowKeys = await page.$$eval('#machines .s, #machines .c', (els) => els.map((e) => e.dataset.key));
   if (rowKeys.length >= 2) {
     await (await page.$(`#machines [data-key="${rowKeys[0]}"]`)).tap();
@@ -532,7 +532,7 @@ async function docsStrip() {
     await page.goto(url);
     await page.waitForSelector(type === 'webkit' ? '#machines .fold-sec' : rowOf(SID[2]), { timeout: 30_000 });
     await settle(600);
-    if (type === 'webkit') for (const f of await page.$$('.fold-sec[aria-expanded="false"]')) { await f.tap().catch(() => {}); await settle(150); }
+    if (type === 'webkit') for (let f, n = 0; n < 20 && (f = await page.$('.fold-sec[aria-expanded="false"], .fold-closed[aria-expanded="false"]')); n++) { await f.tap().catch(() => {}); await settle(150); }
     await page.click(rowOf(SID[2]));
     await page.waitForSelector('#p-head .docs .doc-row', { timeout: 10_000 });
     await settle(400);
@@ -571,7 +571,7 @@ async function docsResize() {
   await page.goto(url);
   await page.waitForSelector('#machines .fold-sec', { timeout: 30_000 });
   await settle(600);
-  for (const f of await page.$$('.fold-sec[aria-expanded="false"]')) { await f.click().catch(() => {}); await settle(150); }
+  for (let f, n = 0; n < 20 && (f = await page.$('.fold-sec[aria-expanded="false"], .fold-closed[aria-expanded="false"]')); n++) { await f.click().catch(() => {}); await settle(150); }
   await page.click(rowOf(SID[0]));
   await page.waitForSelector('#p-head .doc-row', { timeout: 10_000 });
   await page.click('#p-head .doc-row[data-name="brief.md"]');
@@ -595,7 +595,7 @@ async function docsPhone() {
   await page.goto(url);
   await page.waitForSelector('#machines .fold-sec', { timeout: 30_000 });
   await settle(600);
-  for (const f of await page.$$('.fold-sec[aria-expanded="false"]')) { await f.tap().catch(() => {}); await settle(150); }
+  for (let f, n = 0; n < 20 && (f = await page.$('.fold-sec[aria-expanded="false"], .fold-closed[aria-expanded="false"]')); n++) { await f.tap().catch(() => {}); await settle(150); }
   const open = async () => { await page.tap(rowOf(SID[0])); await page.waitForFunction(() => document.body.classList.contains('has-pane')); await settle(350); };
   await open();
   const tap = await page.evaluate(() => Math.min(...[...document.querySelectorAll('#p-head .docs .doc-row')].map((e) => e.getBoundingClientRect().height)));
