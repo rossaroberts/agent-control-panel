@@ -79,6 +79,16 @@ pub struct Session {
     /// The roster's 8-hex `id` of a background job: what `claude attach` takes, so a client can build an
     /// `AttachTarget::Claude` from a board row. `None` for an interactive session.
     pub job_id: Option<String>,
+    /// What the board calls it: your own title (`fleet-labels.json`), else Claude Code's own name, else the written title
+    /// (`fleet-titles.json`), else `name` (`fleet.mjs` `named`).
+    pub title: Option<String>,
+    /// Its group on the board: yours (`fleet-labels.json` `group`), else the written epic.
+    pub epic: Option<String>,
+    /// You archived it (`fleet-archived.json`) and it has not been started again or needed you since: not shown.
+    pub archived: bool,
+    /// The display name of the account it runs under (`fleet.json` `names`, else the email's local part); `None` for
+    /// Muse and for an account whose email is not known.
+    pub account: Option<String>,
 }
 
 /// What a terminal attaches to (the wire form of `fleet/term.mjs`'s `command()` inputs). The strings are validated by
@@ -104,4 +114,48 @@ pub struct Delta {
     pub seq: u64,
     pub upsert: Vec<Session>,
     pub remove: Vec<SessionKey>,
+}
+
+/// One plan-limit window of an account, as its status line (Claude Code) or its newest `token_count` event (Codex) last
+/// reported it. Not corrected for the clock: a window whose `resets_at` has passed reads as 0 used (`fleet.html`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Limit {
+    /// `5h`, `7d`, or `<n>h` for another Codex window.
+    pub window: String,
+    /// Percent used, 0-100.
+    pub used_pct: u8,
+    /// When it resets, epoch milliseconds.
+    pub resets_at: Option<i64>,
+}
+
+/// A signed-in account of this machine, with the limits it last reported.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Account {
+    /// The display name: what `Session.account` says.
+    pub name: String,
+    pub engine: Engine,
+    /// The profile it was read from (`default`, a `.claude-<name>` suffix, or `codex`).
+    pub profile: String,
+    pub limits: Vec<Limit>,
+}
+
+/// How loaded this machine is, in whole percent, and the devices' counts (filled by the health probe).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Health {
+    pub cpu_pct: u8,
+    pub mem_pct: u8,
+    pub disk_pct: u8,
+    pub dev: u16,
+    pub db: u16,
+}
+
+/// What the board shows besides the sessions: the groups and the accounts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Meta {
+    /// The epics of `fleet.json`, in its order.
+    pub epics: Vec<String>,
+    /// Groups you made (labels' groups that are not an epic), sorted.
+    pub groups: Vec<String>,
+    pub accounts: Vec<Account>,
+    pub health: Option<Health>,
 }

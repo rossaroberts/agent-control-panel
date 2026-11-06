@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
 pub use fleet_model::types::Delta;
-use fleet_model::types::{Session, SessionKey};
-use tokio::sync::broadcast;
+use fleet_model::types::{Meta, Session, SessionKey};
+use tokio::sync::{broadcast, watch};
 
 /// How many deltas `since` can replay; older readers get a snapshot.
 pub const RING: usize = 4096;
@@ -35,6 +35,9 @@ pub struct Store {
     run: u64,
     inner: Mutex<Inner>,
     tx: broadcast::Sender<Delta>,
+    /// The board's groups, accounts and health: not per session, so not in the deltas. A connection sends the current
+    /// one right after its first frame and again whenever it changes.
+    meta: watch::Sender<Meta>,
 }
 
 impl Default for Store {
@@ -70,7 +73,38 @@ impl Store {
                 ring: VecDeque::with_capacity(RING),
             }),
             tx: broadcast::channel(RING).0,
+            meta: watch::channel(Meta::default()).0,
         }
+    }
+
+    /// The board's meta now.
+    pub fn meta(&self) -> Meta {
+        self.meta.borrow().clone()
+    }
+
+    /// A receiver of the meta: subscribe before sending the first frame, then send `borrow_and_update()` and wait on
+    /// `changed()`, so that no change falls between.
+    pub fn subscribe_meta(&self) -> watch::Receiver<Meta> {
+        self.meta.subscribe()
+    }
+
+    /// Changes the meta in place; `f` says whether it changed anything. Readers are woken only when it did. Whether it
+    /// did.
+    pub fn modify_meta(&self, f: impl FnOnce(&mut Meta) -> bool) -> bool {
+        self.meta.send_if_modified(f)
+    }
+
+    /// The board's groups and accounts as read (the health, which the probe owns, is kept). Whether they changed.
+    pub fn set_board_meta(&self, m: Meta) -> bool {
+        self.modify_meta(|cur| {
+            let m = Meta {
+                health: cur.health,
+                ..m
+            };
+            let changed = *cur != m;
+            *cur = m;
+            changed
+        })
     }
 
     /// This board's run id.

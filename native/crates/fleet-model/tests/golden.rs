@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 
-use fleet_model::types::{AttachTarget, Delta, Engine, Session, SessionKey, State};
+use fleet_model::types::{
+    Account, AttachTarget, Delta, Engine, Health, Limit, Meta, Session, SessionKey, State,
+};
 use fleet_model::wire::{decode, encode, hello_proto, Frame, Role, PROTO};
 
 fn key(sid: &str) -> SessionKey {
@@ -41,6 +43,10 @@ fn full() -> Session {
         hook_at: Some(1_793_966_400_500),
         written_at: Some(1_793_966_401_250),
         job_id: Some("a1b2c3d4".into()),
+        title: Some("Fix the fixture loader".into()),
+        epic: Some("Fixtures".into()),
+        archived: true,
+        account: Some("work".into()),
     }
 }
 
@@ -68,6 +74,10 @@ fn bare() -> Session {
         hook_at: None,
         written_at: None,
         job_id: None,
+        title: None,
+        epic: None,
+        archived: false,
+        account: None,
     }
 }
 
@@ -93,7 +103,7 @@ fn frames() -> Vec<(&'static str, Frame)> {
         (
             "error",
             Frame::Error {
-                message: "protocol 2 not supported; this is proto 3".into(),
+                message: "protocol 3 not supported; this is proto 4".into(),
             },
         ),
         (
@@ -165,6 +175,54 @@ fn frames() -> Vec<(&'static str, Frame)> {
                 cols: 132,
                 rows: 43,
             },
+        ),
+        (
+            "meta",
+            Frame::Meta(Meta {
+                epics: vec!["Fixtures".into(), "Other work".into()],
+                groups: vec!["Experiments".into()],
+                accounts: vec![
+                    Account {
+                        name: "work".into(),
+                        engine: Engine::Claude,
+                        profile: "default".into(),
+                        limits: vec![
+                            Limit {
+                                window: "5h".into(),
+                                used_pct: 37,
+                                resets_at: Some(1_793_970_000_000),
+                            },
+                            Limit {
+                                window: "7d".into(),
+                                used_pct: 100,
+                                resets_at: None,
+                            },
+                        ],
+                    },
+                    Account {
+                        name: "codex".into(),
+                        engine: Engine::Codex,
+                        profile: "codex".into(),
+                        limits: vec![],
+                    },
+                ],
+                health: Some(Health {
+                    cpu_pct: 12,
+                    mem_pct: 64,
+                    disk_pct: 81,
+                    dev: 3,
+                    db: 1,
+                }),
+            }),
+        ),
+        (
+            "meta-bare",
+            Frame::Meta(Meta {
+                epics: vec![],
+                groups: vec![],
+                accounts: vec![],
+                health: None,
+            }),
         ),
         ("term-close", Frame::TermClose { r#ref: 7 }),
         (

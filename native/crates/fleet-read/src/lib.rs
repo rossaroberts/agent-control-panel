@@ -4,6 +4,7 @@ pub mod codex;
 pub mod home;
 pub mod hookfile;
 mod json;
+pub mod panelmeta;
 pub mod profiles;
 pub mod roster;
 pub mod statusfile;

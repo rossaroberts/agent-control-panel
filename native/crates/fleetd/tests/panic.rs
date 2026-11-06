@@ -62,10 +62,16 @@ async fn a_panicking_watcher_thread_ends_the_process_non_zero() {
         err.contains("fleetd: panic on thread fleetd-reconcile"),
         "{err}"
     );
-    // The client sees the daemon go.
-    let e = tokio::time::timeout(Duration::from_secs(5), c.next())
-        .await
-        .unwrap()
-        .unwrap_err();
+    // The client sees the daemon go (after the Meta that followed its snapshot).
+    let e = loop {
+        match tokio::time::timeout(Duration::from_secs(5), c.next())
+            .await
+            .unwrap()
+        {
+            Ok(Frame::Meta(_)) => continue,
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => break e,
+        }
+    };
     assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
 }

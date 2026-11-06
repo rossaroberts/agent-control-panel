@@ -225,6 +225,7 @@ async fn handle(
     // Subscribe before reading the board: a delta between the two is then in the receiver, not lost; the `seq` check
     // below drops the ones the board already holds.
     let mut rx = store.subscribe();
+    let mut meta = store.subscribe_meta();
     let mut last = match since.and_then(|n| store.since(n).map(|d| (n, d))) {
         Some((_, d)) => {
             // Caught up gets the same empty delta as an acknowledgement (Ruling R18).
@@ -239,9 +240,20 @@ async fn handle(
         }
     };
 
+    // The groups and accounts follow the first frame, and again whenever they change.
+    let first = meta.borrow_and_update().clone();
+    send(&mut w, &Frame::Meta(first)).await?;
+
     let mut scratch = [0u8; 64];
     loop {
         tokio::select! {
+            changed = meta.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                let m = meta.borrow_and_update().clone();
+                send(&mut w, &Frame::Meta(m)).await?;
+            }
             got = rx.recv() => match got {
                 Ok(d) => {
                     if d.seq > last {
@@ -253,6 +265,8 @@ async fn handle(
                     let (seq, f) = snapshot(&store, &machine);
                     last = seq;
                     send(&mut w, &f).await?;
+                    let m = meta.borrow_and_update().clone();
+                    send(&mut w, &Frame::Meta(m)).await?;
                 }
                 Err(RecvError::Closed) => return Ok(()),
             },

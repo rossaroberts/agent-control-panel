@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod common;
 
-use fleet_model::types::{Delta, Engine, Session, SessionKey, State};
+use fleet_model::types::{Delta, Engine, Limit, Session, SessionKey, State};
 use fleetd::store::Store;
 use fleetd::watch::{watch, WatchHandle};
 use serde_json::json;
@@ -82,6 +82,8 @@ impl Home {
         fs::write(&bin, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir_all(root.join("panel")).unwrap();
+        std::env::set_var("FLEETD_PANEL_DIR", root.join("panel"));
         std::env::set_var("FLEETD_HOME", &root);
         std::env::set_var("HOME", &root);
         std::env::set_var("FLEETD_MACHINE", "fixture-mac");
@@ -96,6 +98,37 @@ impl Home {
 
     fn profile(&self) -> PathBuf {
         self.root.join(".claude")
+    }
+
+    /// The Node panel's folder (`FLEETD_PANEL_DIR`).
+    fn panel(&self) -> PathBuf {
+        self.root.join("panel")
+    }
+
+    /// A panel file, written as the panel writes them: a temp file renamed over it.
+    fn panel_file(&self, name: &str, body: &str) {
+        let d = self.panel();
+        fs::write(d.join(".tmp"), body).unwrap();
+        fs::rename(d.join(".tmp"), d.join(name)).unwrap();
+    }
+
+    /// `~/.claude.json`: the account the default profile is logged in as.
+    fn login(&self, email: &str) {
+        fs::write(
+            self.root.join(".claude.json"),
+            json!({"oauthAccount": {"emailAddress": email}}).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// A status-line snapshot of session `n` (written `at`), with these plan-limit windows: (used %, resets in s).
+    fn status_limits(&self, n: usize, at: i64, five: (f64, i64), seven: (f64, i64)) {
+        let d = self.profile().join("fleet-status");
+        let snap = json!({"at": at, "session_id": sid(n),
+            "rate_limits": {"five_hour": {"used_percentage": five.0, "resets_at": five.1},
+                            "seven_day": {"used_percentage": seven.0, "resets_at": seven.1}}});
+        fs::write(d.join(".tmp"), snap.to_string()).unwrap();
+        fs::rename(d.join(".tmp"), d.join(format!("{}.json", sid(n)))).unwrap();
     }
 
     fn stand_in(&self) -> PathBuf {
@@ -440,6 +473,10 @@ fn since_reaches_back_4096_deltas() {
         hook_at: None,
         written_at: None,
         job_id: None,
+        title: None,
+        epic: None,
+        archived: false,
+        account: None,
     };
     assert_eq!(store.since(0), Some(Delta::default()));
     for i in 0..5000 {
@@ -903,6 +940,7 @@ fn context_prefers_a_fresh_status_line() {
         window,
         used_tokens: used,
         used_pct: pct,
+        limits: None,
     };
     let t = Some(100_000);
     assert_eq!(
@@ -1369,4 +1407,334 @@ async fn a_background_job_carries_its_roster_id_as_job_id() {
     };
     assert_eq!(by(0).job_id.as_deref(), Some("a1b2c3d4"));
     assert_eq!(by(1).job_id, None);
+}
+
+// ------------------------------------------------------------------------------------------------- board metadata
+
+fn key(n: usize) -> String {
+    format!("fixture-mac:{}", sid(n))
+}
+
+fn session(store: &Store, n: usize) -> Session {
+    store
+        .snapshot()
+        .1
+        .into_iter()
+        .find(|s| s.key.session_id == sid(n))
+        .expect("the session is on the board")
+}
+
+/// The titles, epics, archive marks and accounts are in the first snapshot, and so are the groups and accounts of the
+/// Meta.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_panel_s_files_are_laid_over_the_first_snapshot() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(4);
+    home.login("ada@example.com");
+    home.panel_file(
+        "fleet.json",
+        &json!({"self": "fixture-mac", "names": {"claude:ada@example.com": "work"},
+                "epics": [{"name": "Fixtures", "about": "the fixtures"}, {"name": "Other work"}]})
+        .to_string(),
+    );
+    home.panel_file(
+        "fleet-labels.json",
+        &json!({key(0): {"title": "My title", "group": "Experiments"}, key(2): {"group": "Fixtures"}}).to_string(),
+    );
+    home.panel_file(
+        "fleet-titles.json",
+        &json!({key(1): {"title": "Written", "stage": "building", "epic": "Other work"}})
+            .to_string(),
+    );
+    home.panel_file("fleet-archived.json", &json!({key(3): STARTED}).to_string());
+    home.status_limits(0, now_ms(), (37.4, 1_793_970_000), (100.0, 1_794_400_000));
+    let (store, _h, _rx) = home.start();
+
+    let s0 = session(&store, 0);
+    assert_eq!(s0.title.as_deref(), Some("My title"), "yours first");
+    assert_eq!(s0.epic.as_deref(), Some("Experiments"));
+    assert_eq!(s0.account.as_deref(), Some("work"));
+    assert!(!s0.archived);
+    let s1 = session(&store, 1);
+    assert_eq!(
+        s1.title.as_deref(),
+        Some("fixture 1"),
+        "Claude Code's own name beats the written title"
+    );
+    assert_eq!(s1.epic.as_deref(), Some("Other work"), "the written epic");
+    assert_eq!(session(&store, 2).epic.as_deref(), Some("Fixtures"));
+    assert_eq!(session(&store, 2).title.as_deref(), Some("fixture 2"));
+    // Hidden at STARTED, live, and started at STARTED (not after): archived.
+    assert!(session(&store, 3).archived);
+
+    let m = store.meta();
+    assert_eq!(m.epics, ["Fixtures", "Other work"]);
+    assert_eq!(m.groups, ["Experiments"]);
+    assert_eq!(m.accounts.len(), 1);
+    let a = &m.accounts[0];
+    assert_eq!(
+        (a.name.as_str(), a.engine.clone(), a.profile.as_str()),
+        ("work", Engine::Claude, "default")
+    );
+    assert_eq!(
+        a.limits,
+        [
+            Limit {
+                window: "5h".into(),
+                used_pct: 37,
+                resets_at: Some(1_793_970_000_000)
+            },
+            Limit {
+                window: "7d".into(),
+                used_pct: 100,
+                resets_at: Some(1_794_400_000_000)
+            },
+        ]
+    );
+}
+
+/// Without a name in `fleet.json`, an account is its email's local part.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_without_a_name_is_its_email_s_local_part() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    home.login("bob.smith@example.com");
+    let (store, _h, _rx) = home.start();
+    assert_eq!(session(&store, 0).account.as_deref(), Some("bob.smith"));
+    assert_eq!(store.meta().accounts[0].name, "bob.smith");
+    assert!(
+        store.meta().accounts[0].limits.is_empty(),
+        "no status line has reported any"
+    );
+}
+
+/// Changing `fleet-labels.json` is a delta for that session within 50 ms, and the groups follow in a Meta.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_label_change_is_a_delta_within_50ms() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(2);
+    let (store, _h, mut rx) = home.start();
+    let mut meta = store.subscribe_meta();
+    let mut worst = Duration::ZERO;
+    for i in 0..10 {
+        let title = format!("Renamed {i}");
+        let t0 = Instant::now();
+        home.panel_file(
+            "fleet-labels.json",
+            &json!({key(0): {"title": title, "group": format!("Group {i}")}}).to_string(),
+        );
+        let (s, at) = wait_for(&mut rx, Duration::from_secs(2), |s| {
+            s.key.session_id == sid(0) && s.title.as_deref() == Some(title.as_str())
+        })
+        .await
+        .expect("a delta with the new title");
+        assert_eq!(s.epic, Some(format!("Group {i}")));
+        worst = worst.max(at.duration_since(t0));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    eprintln!(
+        "label write -> delta: worst {:.2} ms (10 writes)",
+        worst.as_secs_f64() * 1000.0
+    );
+    assert!(worst < Duration::from_millis(50), "worst {worst:?}");
+    // Only the changed session was sent: the other one has nothing new.
+    assert_eq!(session(&store, 1).epic, None);
+    meta.changed().await.unwrap();
+    assert_eq!(store.meta().groups, ["Group 9"]);
+}
+
+/// Archiving and un-archiving are deltas; so is a change of `fleet.json` (names and epics).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_marks_and_names_follow_their_files() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(2);
+    home.login("ada@example.com");
+    let (store, _h, mut rx) = home.start();
+    assert!(!session(&store, 1).archived);
+    home.panel_file("fleet-archived.json", &json!({key(1): STARTED}).to_string());
+    wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.key.session_id == sid(1) && s.archived
+    })
+    .await
+    .expect("archived");
+    assert!(!session(&store, 0).archived);
+    home.panel_file("fleet-archived.json", "{}");
+    wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.key.session_id == sid(1) && !s.archived
+    })
+    .await
+    .expect("no longer archived");
+    home.panel_file(
+        "fleet.json",
+        &json!({"names": {"claude:ada@example.com": "renamed"}, "epics": [{"name": "Fresh"}]})
+            .to_string(),
+    );
+    wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.account.as_deref() == Some("renamed")
+    })
+    .await
+    .expect("the account's new name");
+    assert_eq!(store.meta().epics, ["Fresh"]);
+    assert_eq!(store.meta().accounts[0].name, "renamed");
+}
+
+/// Review Focus 5 at run time: a truncated or non-JSON panel file, or a missing folder, is empty: the board keeps
+/// going, and the next good write is taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_damaged_panel_file_is_empty_and_the_next_good_one_is_taken() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    home.panel_file(
+        "fleet-labels.json",
+        &json!({key(0): {"title": "Mine"}}).to_string(),
+    );
+    let (store, _h, mut rx) = home.start();
+    assert_eq!(session(&store, 0).title.as_deref(), Some("Mine"));
+    home.panel_file("fleet-labels.json", "{\"fixture-mac:sess-0000-fixt");
+    wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.title.as_deref() == Some("fixture 0")
+    })
+    .await
+    .expect("a truncated file is nothing: the name shows");
+    home.panel_file("fleet.json", "not json at all");
+    home.panel_file(
+        "fleet-labels.json",
+        &json!({key(0): {"title": "Mine again"}}).to_string(),
+    );
+    wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.title.as_deref() == Some("Mine again")
+    })
+    .await
+    .expect("the next good write is taken");
+
+    // A home with no panel folder at all: the board starts, with nothing from it.
+    let bare = Home::new(1);
+    fs::remove_dir_all(bare.panel()).unwrap();
+    let (store, _h, _rx) = bare.start();
+    let s = session(&store, 0);
+    assert_eq!(
+        (s.title.as_deref(), s.epic, s.archived),
+        (Some("fixture 0"), None, false)
+    );
+    assert_eq!(store.meta().epics, Vec::<String>::new());
+}
+
+/// An account's limits follow its newest status-line snapshot, and a Meta is sent when they move, not when a snapshot
+/// brings nothing new.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_status_line_limit_change_is_a_new_meta() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(2);
+    home.login("ada@example.com");
+    let at = now_ms();
+    home.status_limits(0, at, (10.0, 1_793_970_000), (20.0, 1_794_400_000));
+    let (store, _h, _rx) = home.start();
+    let mut meta = store.subscribe_meta();
+    meta.borrow_and_update();
+    let used = |store: &Store| {
+        store.meta().accounts[0]
+            .limits
+            .iter()
+            .map(|l| l.used_pct)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(used(&store), [10, 20]);
+
+    // Another session's newer reading is the account's (the budget is shared), though that session is not the first.
+    home.status_limits(1, at + 1000, (11.0, 1_793_970_000), (21.0, 1_794_400_000));
+    tokio::time::timeout(Duration::from_secs(2), meta.changed())
+        .await
+        .expect("a Meta")
+        .unwrap();
+    assert_eq!(used(&store), [11, 21]);
+
+    // An older reading changes nothing.
+    home.status_limits(0, at - 5000, (90.0, 1_793_970_000), (90.0, 1_794_400_000));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), meta.changed())
+            .await
+            .is_err()
+    );
+    assert_eq!(used(&store), [11, 21]);
+}
+
+/// Codex's account is its id token's email; its limits are the newest `token_count` of its logs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_s_account_and_limits_come_from_its_login_and_its_logs() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    let codex = home.root.join(".codex");
+    // A JWT whose payload is {"email":"cora@example.com"}; the signature is not read.
+    fs::write(
+        codex.join("auth.json"),
+        json!({"tokens": {"id_token": "e30.eyJlbWFpbCI6ImNvcmFAZXhhbXBsZS5jb20ifQ.sig"}})
+            .to_string(),
+    )
+    .unwrap();
+    let f = codex.join("sessions/2026/11/06/rollout-2026-11-06T09-00-00-fixture.jsonl");
+    let id = "00000000-0000-4000-8000-000000000002";
+    let line = |t: &str, p: serde_json::Value| json!({"timestamp": "2026-11-06T09:00:02.000Z", "type": t, "payload": p});
+    append(
+        &f,
+        &line(
+            "session_meta",
+            json!({"id": id, "timestamp": "2026-11-06T09:00:00.000Z", "cwd": "/work/fixture-app",
+                   "originator": "codex_cli_rs", "source": "cli"}),
+        ),
+    );
+    append(&f, &line("event_msg", json!({"type": "task_started"})));
+    let (store, _h, mut rx) = home.start();
+    let codex_account = |store: &Store| {
+        store
+            .meta()
+            .accounts
+            .into_iter()
+            .find(|a| a.engine == Engine::Codex)
+    };
+    let a = codex_account(&store).expect("the codex account");
+    assert_eq!((a.name.as_str(), a.profile.as_str()), ("cora", "codex"));
+    assert!(a.limits.is_empty());
+    assert_eq!(
+        store
+            .snapshot()
+            .1
+            .iter()
+            .find(|s| s.key.session_id == id)
+            .unwrap()
+            .account
+            .as_deref(),
+        Some("cora")
+    );
+
+    let mut meta = store.subscribe_meta();
+    meta.borrow_and_update();
+    append(
+        &f,
+        &line(
+            "event_msg",
+            json!({"type": "token_count", "info": null, "rate_limits": {
+                "primary": {"used_percent": 12.0, "window_minutes": 300, "resets_at": 1_793_970_000},
+                "secondary": {"used_percent": 55.0, "window_minutes": 10080, "resets_at": 1_794_400_000}}}),
+        ),
+    );
+    wait_for(&mut rx, Duration::from_secs(2), |s| s.key.session_id == id).await;
+    tokio::time::timeout(Duration::from_secs(2), meta.changed())
+        .await
+        .expect("a Meta with the limits")
+        .unwrap();
+    assert_eq!(
+        codex_account(&store).unwrap().limits,
+        [
+            Limit {
+                window: "5h".into(),
+                used_pct: 12,
+                resets_at: Some(1_793_970_000_000)
+            },
+            Limit {
+                window: "7d".into(),
+                used_pct: 55,
+                resets_at: Some(1_794_400_000_000)
+            },
+        ]
+    );
 }

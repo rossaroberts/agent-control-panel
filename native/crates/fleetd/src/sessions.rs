@@ -22,6 +22,7 @@ use fleet_read::statusfile::{context_tokens, StatusSnap};
 use fleet_read::transcript::Tail;
 use std::sync::Arc;
 
+use crate::board_meta::{BoardMeta, Reading};
 use crate::procscan::{MuseProc, Scan};
 pub use crate::reads::{
     gone, hook_path, jobs_signature, new_rollout, new_tail, read_capped, read_hook_file,
@@ -172,11 +173,14 @@ pub struct Fleet {
     pub muse: Vec<MuseProc>,
     /// Files the hot path follows at most (`follow_cap` of the open-files limit).
     pub max_followed: usize,
+    /// Titles, epics, archive marks, accounts and limits: laid over every session this builds.
+    pub board: BoardMeta,
 }
 
 impl Fleet {
     pub fn new(machine: String, codex_home: PathBuf) -> Fleet {
         Fleet {
+            board: BoardMeta::new(machine.clone()),
             machine,
             profiles: vec![],
             codex: CodexState {
@@ -224,7 +228,7 @@ impl Fleet {
         let of =
             |f: fn(&fleet_read::transcript::TranscriptSummary) -> Option<String>| t.and_then(f);
         let model = of(|t| t.model.clone());
-        Some(Session {
+        let mut s = Session {
             key: SessionKey {
                 machine: self.machine.clone(),
                 profile: ps.profile.id.clone(),
@@ -255,7 +259,13 @@ impl Fleet {
             hook_at: c.hook.as_ref().map(|h| h.at),
             written_at: facts.written_at,
             job_id: job_id(&c.row),
-        })
+            title: None,
+            epic: None,
+            archived: false,
+            account: None,
+        };
+        self.board.overlay(&mut s);
+        Some(s)
     }
 
     pub fn profile_sessions(&self, pi: usize, now: i64) -> Vec<Session> {
@@ -278,6 +288,7 @@ impl Fleet {
         for (f, (_, seen)) in &self.codex.tails {
             let mut s = seen.v.session(self.codex.open.contains(f), now);
             s.key.machine = self.machine.clone();
+            self.board.overlay(&mut s);
             let newer = by_id
                 .get(&s.key.session_id)
                 .is_none_or(|o| s.written_at > o.written_at);
@@ -297,6 +308,7 @@ impl Fleet {
             .map(|m| {
                 let mut s = muse_session(m.pid, m.cwd.as_deref(), m.since, &m.args);
                 s.key.machine = self.machine.clone();
+                self.board.overlay(&mut s);
                 s
             })
             .collect()
@@ -355,6 +367,40 @@ impl Fleet {
             .take(self.max_followed)
             .map(|(_, f)| f)
             .collect()
+    }
+
+    // ------------------------------------------------------------ the board's groups and accounts
+
+    /// Codex's newest plan-limit reading among the logs held (`codexHome`'s: the newest log that reported any).
+    fn codex_reading(&self) -> Option<Reading> {
+        self.codex
+            .tails
+            .values()
+            .filter_map(|(_, seen)| seen.v.limits())
+            .max_by_key(|(at, _)| *at)
+            .map(|(at, l)| (at, l.to_vec()))
+    }
+
+    /// The groups and accounts as they are now (no health: that is the store's).
+    pub fn meta(&self) -> fleet_model::types::Meta {
+        let profiles: Vec<String> = self.profiles.iter().map(|p| p.profile.id.clone()).collect();
+        self.board.meta(&profiles, self.codex_reading().as_ref())
+    }
+
+    /// A status file's limits, as read for one session: kept as the profile's when no older than what it holds. Whether
+    /// the profile's limits changed.
+    pub fn note_limits(&mut self, pi: usize, snap: &StatusSnap) -> bool {
+        let (Some(at), Some(l)) = (snap.at, snap.limits.as_ref()) else {
+            return false;
+        };
+        let id = self.profiles[pi].profile.id.clone();
+        match self.board.claude_limits.get(&id) {
+            Some((was, old)) if *was > at || (*was == at && old == l) => false,
+            _ => {
+                self.board.claude_limits.insert(id, (at, l.clone()));
+                true
+            }
+        }
     }
 
     // ------------------------------------------------------------ the clock and the processes

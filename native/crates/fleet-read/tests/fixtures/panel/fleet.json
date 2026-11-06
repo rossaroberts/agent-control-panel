@@ -1,0 +1,40 @@
+{
+ "self": "fixture-mac",
+ "machines": [
+  {
+   "name": "remote",
+   "ssh": "remote-host"
+  }
+ ],
+ "names": {
+  "claude:ada@example.com": "work",
+  "codex:ada@example.com": "codex-work",
+  "claude:bob@example.com": 5,
+  "claude:long@example.com": "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"
+ },
+ "epics": [
+  {
+   "name": "Fixtures",
+   "about": "The fixture work",
+   "test": "https://test.example.com/app"
+  },
+  {
+   "name": "Other work",
+   "about": null
+  },
+  {
+   "name": "bad/name",
+   "about": "dropped: not a NAME"
+  },
+  {
+   "name": "Third",
+   "about": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "test": "http://insecure.example.com"
+  }
+ ],
+ "logins": {
+  "fixture-mac:alt": "real@example.com",
+  "bad key!:x": "x@y.z",
+  "fixture-mac:nomail": "not-an-email"
+ }
+}

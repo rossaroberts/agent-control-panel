@@ -167,6 +167,7 @@ fn run_watch() {
                     sessions,
                 } => println!("{}", out::snapshot(run, seq, &machine, &sessions)),
                 Frame::Delta(d) => println!("{}", out::delta(&d)),
+                Frame::Meta(m) => println!("{}", out::meta(&m)),
                 Frame::Error { message } => return Err(std::io::Error::other(message)),
                 _ => {}
             }

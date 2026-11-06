@@ -56,6 +56,10 @@ fn sess(
         hook_at: None,
         written_at: None,
         job_id: job.map(String::from),
+        title: None,
+        epic: None,
+        archived: false,
+        account: None,
     }
 }
 

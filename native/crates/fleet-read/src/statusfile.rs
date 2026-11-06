@@ -2,6 +2,7 @@
 //! fleet/statusline.mjs at each status-line refresh). Only what the session board uses is kept: when it was written, the
 //! model, and the context window's size and use. Read-only.
 
+use fleet_model::types::Limit;
 use serde_json::Value;
 
 use crate::json::read_json;
@@ -21,6 +22,9 @@ pub struct StatusSnap {
     pub used_tokens: Option<u64>,
     /// `context_window.used_percentage`.
     pub used_pct: Option<f64>,
+    /// `rate_limits`: the account's plan-limit windows as this status line saw them; `None` when the file has no
+    /// `rate_limits` object (the account's limits are those of its newest snapshot that has one, by `at`).
+    pub limits: Option<Vec<Limit>>,
 }
 
 /// The snapshot of a session, or `None`: a bad id, no file, one over 64 KiB, not JSON, or naming another session.
@@ -84,7 +88,39 @@ fn snap_of(session_id: &str, d: &Value) -> Option<StatusSnap> {
         used_pct: cw
             .and_then(|c| c.get("used_percentage"))
             .and_then(Value::as_f64),
+        limits: d
+            .get("rate_limits")
+            .filter(|v| v.is_object())
+            .map(claude_limits),
     })
+}
+
+/// One window of a limits object: `None` unless its percentage is a number (`windows` in `fleet.html`).
+pub fn window(
+    label: &str,
+    used_pct: Option<&Value>,
+    resets_at_secs: Option<&Value>,
+) -> Option<Limit> {
+    let pct = used_pct?.as_f64()?;
+    let resets = resets_at_secs
+        .and_then(Value::as_f64)
+        .filter(|s| *s != 0.0 && !s.is_nan());
+    Some(Limit {
+        window: label.to_string(),
+        used_pct: pct.round().clamp(0.0, 100.0) as u8,
+        resets_at: resets.map(|s| (s * 1000.0) as i64),
+    })
+}
+
+/// A Claude Code `rate_limits` object as windows: `five_hour` is `5h`, `seven_day` is `7d`.
+pub fn claude_limits(rate_limits: &Value) -> Vec<Limit> {
+    [("5h", "five_hour"), ("7d", "seven_day")]
+        .into_iter()
+        .filter_map(|(label, k)| {
+            let w = rate_limits.get(k)?;
+            window(label, w.get("used_percentage"), w.get("resets_at"))
+        })
+        .collect()
 }
 
 /// `contextOf`'s token count: the status line's when it is fresh (written no more than a minute before the transcript's

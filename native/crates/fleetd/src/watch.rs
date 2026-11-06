@@ -50,16 +50,18 @@ use std::time::{Duration, Instant};
 
 use fleet_model::types::State;
 use fleet_read::codex::{is_yours, muse_installed, RolloutTail};
+use fleet_read::panelmeta::read_panel_meta;
 use fleet_read::profiles::claude_profiles;
 use fleet_read::roster::{default_source, RosterSource};
 use fleet_read::transcript::Tail;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::board_meta::{read_accounts, read_claude_limits};
 use crate::machine::machine_name;
 use crate::procscan::scan;
 use crate::sessions::{
     follow_cap, gone, jobs_signature, new_rollout, new_tail, now_ms, read_hook_file,
-    read_status_file, reconcile_read, sig_of, transcript_of, DueKey, Fleet, RosterGot,
+    read_status_file, reconcile_read, sig_of, transcript_of, DueKey, FileRead, Fleet, RosterGot,
 };
 use crate::store::Store;
 
@@ -108,6 +110,9 @@ enum Job {
 struct Shared {
     /// The home folder as the file events name it (symlinks resolved).
     home: PathBuf,
+    /// The Node panel's folder (`FLEETD_PANEL_DIR`, else `Library/Application Support/Agent Panel` under the home), as the
+    /// file events name it when it exists: read-only, watched for its four board files.
+    panel_dir: PathBuf,
     store: Arc<Store>,
     fleet: Mutex<Fleet>,
     roster: Box<dyn RosterSource + Send + Sync>,
@@ -321,8 +326,14 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         }
     })
     .map_err(io::Error::other)?;
+    let panel_dir = std::env::var_os("FLEETD_PANEL_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("Library/Application Support/Agent Panel"));
+    let panel_dir = panel_dir.canonicalize().unwrap_or(panel_dir);
     let shared = Arc::new(Shared {
         home,
+        panel_dir,
         store,
         fleet: Mutex::new(fleet),
         roster: opts.roster,
@@ -351,6 +362,8 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         .lock()
         .unwrap()
         .add_profiles(claude_profiles(&shared.home));
+    // The titles, epics, archive marks and accounts are in the board before the first session is built.
+    refresh_board(&shared, Refresh::ALL, false);
     arm(&shared);
     thread::scope(|s| {
         for &pi in &added {
@@ -363,6 +376,7 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         f.open_codex(found, now);
         let os = f.others(now);
         shared.store.replace(f.in_others(), os);
+        shared.store.set_board_meta(f.meta());
     });
     sync_follows(&shared);
 
@@ -405,11 +419,17 @@ fn arm(sh: &Shared) {
         let f = sh.fleet.lock().unwrap();
         f.profiles.iter().map(|p| p.profile.dir.clone()).collect()
     };
-    let mut want: Vec<PathBuf> = profiles
+    let mut want: Vec<(PathBuf, RecursiveMode)> = profiles
         .iter()
         .flat_map(|d| ["fleet-state", "fleet-status", "jobs", "projects"].map(|s| d.join(s)))
+        .map(|d| (d, RecursiveMode::Recursive))
         .collect();
-    want.push(sh.home.join(".codex").join("sessions"));
+    want.push((
+        sh.home.join(".codex").join("sessions"),
+        RecursiveMode::Recursive,
+    ));
+    // The panel's folder holds the four board files and, below, a lot the board does not read.
+    want.push((sh.panel_dir.clone(), RecursiveMode::NonRecursive));
     #[cfg(target_os = "macos")]
     for d in profiles
         .iter()
@@ -422,9 +442,9 @@ fn arm(sh: &Shared) {
         }
     }
     let mut watched = sh.watched.lock().unwrap();
-    let new: Vec<PathBuf> = want
+    let new: Vec<(PathBuf, RecursiveMode)> = want
         .into_iter()
-        .filter(|d| !watched.contains(d) && d.is_dir())
+        .filter(|(d, _)| !watched.contains(d) && d.is_dir())
         .collect();
     if new.is_empty() {
         return;
@@ -432,8 +452,8 @@ fn arm(sh: &Shared) {
     let mut w = sh.watcher.lock().unwrap();
     let Some(w) = w.as_mut() else { return };
     let mut paths = w.paths_mut();
-    for d in new {
-        if paths.add(&d, RecursiveMode::Recursive).is_ok() {
+    for (d, mode) in new {
+        if paths.add(&d, mode).is_ok() {
             watched.insert(d);
         }
     }
@@ -463,9 +483,26 @@ enum Route {
     Transcript(usize, String, PathBuf),
     Jobs(usize),
     Codex(PathBuf),
+    /// One of the panel's board files (`fleet.json`, `fleet-titles.json`, `fleet-labels.json`, `fleet-archived.json`).
+    Panel,
 }
 
-fn route(home: &Path, f: &Fleet, path: &Path) -> Option<Route> {
+/// The files of the Node panel the board reads.
+const PANEL_FILES: [&str; 4] = [
+    "fleet.json",
+    "fleet-titles.json",
+    "fleet-labels.json",
+    "fleet-archived.json",
+];
+
+fn route(home: &Path, panel: &Path, f: &Fleet, path: &Path) -> Option<Route> {
+    if path.parent() == Some(panel) {
+        return path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| PANEL_FILES.contains(&n))
+            .then_some(Route::Panel);
+    }
     let rel = path.strip_prefix(home).ok()?;
     let parts: Vec<&str> = rel
         .components()
@@ -512,7 +549,7 @@ fn dispatch(sh: &Arc<Shared>, rx: mpsc::Receiver<Vec<PathBuf>>) {
             let f = sh.fleet.lock().unwrap();
             paths
                 .iter()
-                .filter_map(|p| route(&sh.home, &f, p))
+                .filter_map(|p| route(&sh.home, &sh.panel_dir, &f, p))
                 .collect()
         };
         // kqueue has these: FSEvents is only discovery for them.
@@ -535,17 +572,23 @@ fn handle(sh: &Arc<Shared>, routes: Vec<Route>) {
     let mut statuses: HashMap<usize, Vec<String>> = HashMap::new();
     let mut transcripts = vec![];
     let mut rollouts = vec![];
+    let mut panel = false;
     for r in routes {
         if !seen.insert(r.clone()) {
             continue;
         }
         match r {
+            Route::Panel => panel = true,
             Route::Hook(pi, sid) => hooks.entry(pi).or_default().push(sid),
             Route::Status(pi, sid) => statuses.entry(pi).or_default().push(sid),
             Route::Transcript(pi, sid, p) => transcripts.push((pi, sid, p)),
             Route::Jobs(pi) => request(sh, Job::Roster(pi)),
             Route::Codex(p) => rollouts.push(p),
         }
+    }
+    // The board's own files first: a label you just typed is the thing waited on.
+    if panel {
+        refresh_board(sh, Refresh::PANEL, true);
     }
     for (pi, sids) in hooks {
         on_hooks(sh, pi, sids);
@@ -603,7 +646,8 @@ fn on_hooks(sh: &Arc<Shared>, pi: usize, sids: Vec<String>) {
     }
 }
 
-/// Status files changed: as hooks, without a roster read.
+/// Status files changed: as hooks, without a roster read. A file of a session not listed has no row to show it on, but
+/// its plan limits are the account's all the same.
 fn on_statuses(sh: &Arc<Shared>, pi: usize, sids: Vec<String>) {
     let (profile, held) = {
         let f = sh.fleet.lock().unwrap();
@@ -613,11 +657,15 @@ fn on_statuses(sh: &Arc<Shared>, pi: usize, sids: Vec<String>) {
         .into_iter()
         .zip(held)
         .filter_map(|(sid, h)| {
-            let held = h?; // a session not listed has no row to show it on
-            (sig_of(&crate::sessions::status_path(&profile, &sid)) != held).then(|| {
-                let r = read_status_file(&profile, &sid);
-                (sid, r)
-            })
+            let path = crate::sessions::status_path(&profile, &sid);
+            let listed = h.is_some();
+            if let Some(held) = h {
+                if sig_of(&path) == held {
+                    return None;
+                }
+            }
+            let r = read_status_file(&profile, &sid);
+            Some((sid, listed, r))
         })
         .collect();
     if reads.is_empty() {
@@ -626,12 +674,19 @@ fn on_statuses(sh: &Arc<Shared>, pi: usize, sids: Vec<String>) {
     let mut f = sh.fleet.lock().unwrap();
     let now = now_ms();
     let mut out = vec![];
-    for (sid, r) in reads {
-        if f.merge_status(pi, &sid, r) {
+    let mut limits = false;
+    for (sid, listed, r) in reads {
+        if let FileRead::Read { v: Some(snap), .. } = &r {
+            limits |= f.note_limits(pi, snap);
+        }
+        if listed && f.merge_status(pi, &sid, r) {
             out.extend(f.claude_session(pi, &sid, now));
         }
     }
     sh.store.upsert(out);
+    if limits {
+        sh.store.set_board_meta(f.meta());
+    }
 }
 
 /// Transcripts changed: each listed session's `Tail` advances under its own lock, or a new transcript's first read is
@@ -777,6 +832,7 @@ fn on_rollouts(sh: &Arc<Shared>, paths: Vec<PathBuf>) {
         let now = now_ms();
         let os = f.others(now);
         sh.store.replace(f.in_others(), os);
+        sh.store.set_board_meta(f.meta()); // Codex's limits ride on its logs
     }
     poke(sh);
     #[cfg(target_os = "macos")]
@@ -817,12 +873,12 @@ fn kq_loop(sh: &Arc<Shared>) {
                     routes.extend(
                         changed
                             .iter()
-                            .filter_map(|n| route(&sh.home, &f, &d.join(n))),
+                            .filter_map(|n| route(&sh.home, &sh.panel_dir, &f, &d.join(n))),
                     );
                 }
                 Target::File(p) => {
                     let f = sh.fleet.lock().unwrap();
-                    routes.extend(route(&sh.home, &f, &p));
+                    routes.extend(route(&sh.home, &sh.panel_dir, &f, &p));
                 }
                 Target::Pid(p) => exited.push(p),
             }
@@ -1054,11 +1110,76 @@ fn run_scan(sh: &Arc<Shared>) {
     sync_follows(sh);
 }
 
+/// Which of the board's inputs to read again.
+#[derive(Clone, Copy)]
+struct Refresh {
+    /// The panel's four files.
+    panel: bool,
+    /// Who each profile is logged in as, and each profile's limits (these read `~/.claude.json`, which is big).
+    accounts: bool,
+}
+
+impl Refresh {
+    const PANEL: Refresh = Refresh {
+        panel: true,
+        accounts: false,
+    };
+    const ACCOUNTS: Refresh = Refresh {
+        panel: false,
+        accounts: true,
+    };
+    const ALL: Refresh = Refresh {
+        panel: true,
+        accounts: true,
+    };
+}
+
+/// Reads the board's inputs again (without the board lock), lays them into the board, and sends what changed: the
+/// sessions whose title, epic, archive mark or account moved (`publish`; the start has no sessions yet), and the groups
+/// and accounts.
+fn refresh_board(sh: &Arc<Shared>, what: Refresh, publish: bool) {
+    let (profiles, codex_home) = {
+        let f = sh.fleet.lock().unwrap();
+        (
+            f.profiles
+                .iter()
+                .map(|p| p.profile.clone())
+                .collect::<Vec<_>>(),
+            f.codex.home.clone(),
+        )
+    };
+    let panel = what.panel.then(|| read_panel_meta(&sh.panel_dir));
+    let accounts = what.accounts.then(|| {
+        let limits: HashMap<_, _> = profiles
+            .iter()
+            .filter_map(|p| Some((p.id.clone(), read_claude_limits(p)?)))
+            .collect();
+        (read_accounts(&profiles, &codex_home, now_ms()), limits)
+    });
+    let mut f = sh.fleet.lock().unwrap();
+    if let Some(p) = panel {
+        f.board.panel = p;
+    }
+    if let Some((a, limits)) = accounts {
+        f.board.set_accounts(a);
+        f.board.claude_limits = limits;
+    }
+    if publish {
+        let all = f.all_sessions(now_ms());
+        sh.store.replace(f.in_machine(), all);
+    }
+    sh.store.set_board_meta(f.meta());
+}
+
 /// The reconcile pass: a plan taken under the lock, every read without it, the results merged, then one write of
 /// everything that really changed. `rosters`: also re-read each roster (the 5-minute safety run).
 fn reconcile(sh: &Arc<Shared>, rosters: bool) {
     let found = claude_profiles(&sh.home);
     let added = sh.fleet.lock().unwrap().add_profiles(found);
+    // A new profile's login is looked up now; everyone's with the 5-minute safety run.
+    if rosters || !added.is_empty() {
+        refresh_board(sh, Refresh::ACCOUNTS, false);
+    }
     #[cfg(target_os = "macos")]
     let plan = sh
         .fleet

@@ -43,3 +43,9 @@ pub fn snapshot(run: u64, seq: u64, machine: &str, list: &[Session]) -> Value {
 pub fn delta(d: &Delta) -> Value {
     json!({"type": "delta", "seq": d.seq, "upsert": sessions(&d.upsert), "remove": d.remove})
 }
+
+pub fn meta(m: &fleet_model::types::Meta) -> Value {
+    let mut v = serde_json::to_value(m).expect("a Meta serializes");
+    v["type"] = json!("meta");
+    v
+}

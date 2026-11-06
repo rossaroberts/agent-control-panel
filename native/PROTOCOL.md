@@ -1,4 +1,4 @@
-# fleetd socket protocol (PROTO 3)
+# fleetd socket protocol (PROTO 4)
 
 The contract between `fleetd` and its clients (the Swift app, `fleetd watch`, the bench). The Rust definition is
 `crates/fleet-model/src/wire.rs`; the bytes are pinned by the golden frames in `crates/fleet-model/tests/golden/`.
@@ -28,11 +28,17 @@ Variant indexes are part of the format:
 | 7 | `TermClose` | client to server (Terminals) | `ref: u32` |
 | 8 | `TermOut` | server to client (Terminals) | `ref: u32`, `data: Vec<u8>` |
 | 9 | `TermEnd` | server to client (Terminals) | `ref: u32`, `error: Option<String>` |
+| 10 | `Meta` | server to client (Board) | `epics: Vec<String>`, `groups: Vec<String>`, `accounts: Vec<Account>`, `health: Option<Health>` |
 
 `Session`, `SessionKey`, `Engine` and `State` are in `crates/fleet-model/src/types.rs`, fields in declaration order.
 Enums are sent by variant index (`State`: 0 NeedsYou, 1 Working, 2 Waiting, 3 Capped, 4 Done, 5 Ended, 6 Unreachable;
 `Engine`: 0 Claude, 1 Codex, 2 Muse; `Role`: 0 Board, 1 Terminals). `Session` ends with `job_id: Option<String>`: the
-roster's 8-hex `id` of a background job (what `claude attach` takes), `None` for an interactive session.
+roster's 8-hex `id` of a background job (what `claude attach` takes), `None` for an interactive session; then, new in
+proto 4, `title: Option<String>`, `epic: Option<String>`, `archived: bool`, `account: Option<String>` (below).
+
+`Account` is `name: String`, `engine: Engine`, `profile: String`, `limits: Vec<Limit>`; `Limit` is `window: String`
+(`5h`, `7d`, or `<n>h`), `used_pct: u8` (0-100), `resets_at: Option<i64>` (epoch milliseconds); `Health` is `cpu_pct: u8`,
+`mem_pct: u8`, `disk_pct: u8`, `dev: u16`, `db: u16`.
 
 `AttachTarget` (what `TermOpen` attaches to): 0 `Claude { profile: String, job: String }`, 1
 `Codex { profile: String, session_id: String, cwd: String }`, 2 `Trust { profile: String, dir: String }`.
@@ -42,11 +48,11 @@ and its first field is `proto`; `Error` is variant 3 with one `message` string.
 
 ## The conversation
 
-1. The client connects and sends `Hello { proto: 3, since, run, role }` within 10 s.
+1. The client connects and sends `Hello { proto: 4, since, run, role }` within 10 s.
 2. The server answers with one of:
-   - `Error` naming the versions (`protocol 2 not supported; this is proto 3`), then closes, when `proto` is not 3. A
+   - `Error` naming the versions (`protocol 3 not supported; this is proto 4`), then closes, when `proto` is not 4. A
      `Hello` of an older shape is still read as far as its `proto`.
-   - `Error` (`malformed Hello`) when the bytes of a `proto` 3 `Hello` do not decode.
+   - `Error` (`malformed Hello`) when the bytes of a `proto` 4 `Hello` do not decode.
    - `Error` (`expected Hello`) when the first frame is not a `Hello`.
    - nothing, when `role` is `Terminals`: the connection is a Terminals connection from here on (below).
    - a `Delta` holding everything changed since `since` (each session as it is now, each one gone), when `since` is
@@ -54,8 +60,28 @@ and its first field is `proto`; `Error` is variant 3 with one `message` string.
      client is already current that delta is empty (`upsert` and `remove` both empty, `seq` = the client's `since`):
      the "caught up" acknowledgement.
    - otherwise a `Snapshot`: the whole board.
-3. For `role: Board`, then every change, as a `Delta`, for as long as the client stays connected. The client sends nothing after `Hello`;
-   the server treats a closed socket as the client gone.
+3. For `role: Board`, then a `Meta` (below), then every change, as a `Delta` or a `Meta`, for as long as the client stays
+   connected. The client sends nothing after `Hello`; the server treats a closed socket as the client gone.
+
+## Board metadata: `Session` fields and `Meta`
+
+`fleetd` reads, and never writes, the Node panel's files in `~/Library/Application Support/Agent Panel/` (or
+`FLEETD_PANEL_DIR`): `fleet.json`, `fleet-titles.json`, `fleet-labels.json`, `fleet-archived.json`. Each is optional, and a
+missing, truncated or non-JSON one counts as empty. A session is keyed `<machine>:<session_id>` in them.
+
+- **`title`** is `fleet.mjs`'s: your label's `title`, else (a Claude session only) Claude Code's own `name` unless it is a
+  made-up placeholder (`<folder>-<two hex digits>`), else the written title, else `name`.
+- **`epic`** is your label's `group`, else the written epic.
+- **`archived`** is true when you archived the session and it is not live-and-started-since, nor needs you; the board does
+  not show an archived row.
+- **`account`** is the display name of the account the session runs under: `fleet.json` `names["claude:<email>"]` (or
+  `codex:<email>`), else the email's local part; `None` for Muse and where no email is known.
+- A change to any of the four files re-sends the sessions it changes, as a `Delta`, within milliseconds.
+- **`Meta`** is sent right after a board connection's first frame (the `Snapshot`, or the caught-up `Delta`), again after
+  every `Snapshot` sent later, and whenever it changes. `epics` are `fleet.json`'s, in its order; `groups` are the groups
+  you made (labels' groups that are not an epic), sorted; `accounts` hold one per engine and email with the newest plan
+  limits its status lines (Claude Code) or logs (Codex) reported. A `Limit` is as last reported: a client shows a window
+  whose `resets_at` has passed as 0 used. `health` is `None` until the machine's health is read.
 
 ## Terminals connections (`role: Terminals`)
 
@@ -132,4 +158,4 @@ frame with `ref` 0 is ignored (no answer, as `term.mjs`).
 Any change to the bytes of a frame (a field added, removed or moved, a variant added anywhere but the end, a type
 changed) is a `PROTO` bump, with new golden files (`FLEET_BLESS=1 cargo test -p fleet-model --test golden`, then review
 the diff). Version history: 1, the first; 2, `run` in `Hello` and `Snapshot` (Ruling R24); 3, `role` in `Hello`, the
-terminal frames, `job_id` in `Session`.
+terminal frames, `job_id` in `Session`; 4, `title`, `epic`, `archived`, `account` in `Session`, and the `Meta` frame.

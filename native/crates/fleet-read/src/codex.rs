@@ -14,7 +14,7 @@ use crate::json::read_json;
 use crate::transcript::js::{self, one_line, truthy};
 use crate::transcript::reader::{LineReader, Step};
 use crate::transcript::{HEAD, TAIL};
-use fleet_model::types::{Engine, Session, SessionKey, State};
+use fleet_model::types::{Engine, Limit, Session, SessionKey, State};
 use serde_json::{Map, Value};
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -68,6 +68,23 @@ fn base64url(s: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// A Codex `rate_limits` object as windows: `primary` and `secondary`, each named by its length (`7d` from a week, else
+/// `<n>h`, 5 hours where it does not say).
+pub fn codex_limits(rate_limits: &Value) -> Vec<Limit> {
+    ["primary", "secondary"]
+        .into_iter()
+        .filter_map(|k| {
+            let w = rate_limits.get(k).filter(|w| truthy(Some(w)))?;
+            let minutes = w.get("window_minutes").and_then(Value::as_f64);
+            let label = match minutes {
+                Some(m) if m >= 10080.0 => "7d".to_string(),
+                _ => format!("{}h", (minutes.unwrap_or(300.0) / 60.0).round()),
+            };
+            crate::statusfile::window(&label, w.get("used_percent"), w.get("resets_at"))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- the rollouts
@@ -318,6 +335,8 @@ struct Scan {
     /// The newest token_count with an info: the context tokens it reports (`None` when the window or the usage is missing).
     tokens: Option<At<Option<u64>>>,
     done: Option<At<DoneEv>>,
+    /// The newest token_count that carries `rate_limits`: the account's plan-limit windows.
+    limits: Option<Vec<Limit>>,
     /// The newest function_call or function_call_output: whether it is a question to you, and the call's name.
     last_call: Option<At<(bool, String)>>,
     /// The newest function_call, in the words it has if it is a question to you.
@@ -427,6 +446,11 @@ impl Scan {
                     .then(|| number(used))
                     .flatten();
                 self.tokens = Some(At { pos, v: tokens });
+            }
+        }
+        if type_is(&p, "token_count") {
+            if let Some(rl) = p.get("rate_limits").filter(|v| v.is_object()) {
+                self.limits = Some(codex_limits(rl));
             }
         }
         let kind = match p.get("type").and_then(Value::as_str) {
@@ -687,6 +711,7 @@ impl RolloutTail {
             meta: self.meta.clone(),
             written: self.reader.written_at,
             first_ask: self.scan.first_ask.clone(),
+            limits: self.scan.limits.clone(),
         }
     }
 
@@ -712,9 +737,17 @@ pub struct RolloutView {
     meta: Meta,
     written: Option<i64>,
     first_ask: Option<String>,
+    limits: Option<Vec<Limit>>,
 }
 
 impl RolloutView {
+    /// The plan-limit windows of the newest `token_count` that carried any, and when that log last said anything (the
+    /// last record's time, else the file's): the account keeps the newest such reading (`readRollout`'s `limits`).
+    pub fn limits(&self) -> Option<(i64, &[Limit])> {
+        let l = self.limits.as_deref()?;
+        Some((self.r.last_at.or(self.written).unwrap_or(0), l))
+    }
+
     /// When the log was last written (epoch ms).
     pub fn written_at(&self) -> Option<i64> {
         self.written
@@ -808,6 +841,10 @@ impl RolloutView {
             hook_at: None,
             written_at: written,
             job_id: None,
+            title: None,
+            epic: None,
+            archived: false,
+            account: None,
         }
     }
 }
@@ -819,6 +856,20 @@ fn tilde(p: &str) -> String {
         Some(rest) if !home.is_empty() => format!("~{rest}"),
         _ => p.to_string(),
     }
+}
+
+/// The account's limits when no recent log has any: the newest of the 5 most recently written logs of the last two weeks
+/// that reports some (`codexHome`'s fallback), with when it said so.
+pub fn codex_limits_fallback(codex_home: &Path, now: i64) -> Option<(i64, Vec<Limit>)> {
+    recent_rollouts(codex_home, 14 * DAY, now)
+        .into_iter()
+        .take(5)
+        .find_map(|f| {
+            let t = RolloutTail::open(&f).ok()?;
+            let v = t.view();
+            let (at, l) = v.limits()?;
+            Some((at, l.to_vec()))
+        })
 }
 
 /// A rollout's session, read whole as of `now`.
@@ -870,6 +921,10 @@ fn unreadable(f: &Path) -> Session {
         hook_at: None,
         written_at: None,
         job_id: None,
+        title: None,
+        epic: None,
+        archived: false,
+        account: None,
     }
 }
 
@@ -926,5 +981,9 @@ pub fn muse_session(pid: u32, cwd: Option<&str>, since: i64, args: &str) -> Sess
         hook_at: None,
         written_at: None,
         job_id: None,
+        title: None,
+        epic: None,
+        archived: false,
+        account: None,
     }
 }

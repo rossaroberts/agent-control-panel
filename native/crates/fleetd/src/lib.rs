@@ -5,6 +5,7 @@ pub mod alarm;
 pub mod attach;
 pub mod attach_cmd;
 pub mod bench;
+pub mod board_meta;
 pub mod client;
 #[cfg(target_os = "macos")]
 pub mod kq;

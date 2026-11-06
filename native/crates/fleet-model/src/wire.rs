@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::types::{AttachTarget, Delta, Session};
+use crate::types::{AttachTarget, Delta, Meta, Session};
 
 /// 2: `run` in `Hello` and `Snapshot` (Ruling R24). 3: `role` in `Hello`, the terminal frames, `job_id` in `Session`.
-pub const PROTO: u16 = 3;
+/// 4: `title`, `epic`, `archived`, `account` in `Session`, and the `Meta` frame.
+pub const PROTO: u16 = 4;
 
 /// What a connection is for, said in its `Hello`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +89,9 @@ pub enum Frame {
         r#ref: u32,
         error: Option<String>,
     },
+    /// Server to client on a board connection: the groups and accounts, sent right after the first frame and again
+    /// whenever any of it changes.
+    Meta(Meta),
 }
 
 /// A frame as it goes on the wire: length, then body.

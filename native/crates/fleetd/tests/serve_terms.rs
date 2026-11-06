@@ -75,6 +75,10 @@ fn sess(n: u64) -> Session {
         hook_at: None,
         written_at: None,
         job_id: None,
+        title: None,
+        epic: None,
+        archived: false,
+        account: None,
     }
 }
 

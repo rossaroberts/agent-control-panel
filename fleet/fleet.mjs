@@ -61,6 +61,22 @@ export const WORKER_BOOT = "import readline from 'node:readline'; const ALLOWED 
   + ".then((r) => process.stdout.write(JSON.stringify({ id: q.id, r }) + '\\n')); running.add(job); job.finally(() => running.delete(job)); }"
   + " await Promise.allSettled([...running]); process.exit(0);";
 
+/** A session's title, epic and stage, by the rule `named` applies: yours (`label`), else Claude Code's own name where it is not a
+ *  placeholder (Claude sessions only), else the written one (`titled`), else the engine's name. Exported for the native port's golden. */
+export function nameOf(label, titled, engine, x) {
+  const own = engine === 'claude' && typeof x.name === 'string' && x.name.trim() && !PLACEHOLDER.test(x.name.trim()) ? x.name.trim() : null;
+  return { title: label?.title ?? own ?? titled?.title ?? x.name ?? null, stage: x.stage ?? titled?.stage ?? null, epic: label?.group ?? titled?.epic ?? null };
+}
+/** Groups you made, after the epics in fleet.json. Exported for the native port's golden. */
+export const groupsOf = (labels, epics) => [...new Set(Object.values(labels).map((l) => l.group).filter((g) => g && !epics.some((e) => e.name === g)))].sort();
+/** Whether a session hidden at `hid` (ms) is on the page: not hidden, or live and started since, or waiting on you. */
+export function showable(x, hid) {
+  if (!hid) return true;
+  if (!x.live) return false;
+  const started = Number(x.startedAt) || Date.parse(x.startedAt ?? '') || 0;
+  return started > hid || x.state === 'needs-you';
+}
+
 /** How long an overloaded machine's last read stands, by its load per core: 0 (read every time) under 2×, 30 s to 4×, 60 s over. */
 export const easeMs = (ratio) => (ratio > 4 ? 60_000 : ratio > 2 ? 30_000 : 0);
 
@@ -320,11 +336,10 @@ export function createFleet({ dir, quiet = () => {}, notifier = {}, phonesChange
    *  (A Codex session's "name" is only the app that ran it.) */
   function named(machine, engine, x) {
     const t = titles[`${machine}:${x.sessionId}`], l = labels[`${machine}:${x.sessionId}`];
-    const own = engine === 'claude' && typeof x.name === 'string' && x.name.trim() && !PLACEHOLDER.test(x.name.trim()) ? x.name.trim() : null;
-    return Object.assign(x, { title: l?.title ?? own ?? t?.title ?? x.name ?? null, stage: x.stage ?? t?.stage ?? null, epic: l?.group ?? t?.epic ?? null });
+    return Object.assign(x, nameOf(l, t, engine, x));
   }
   /** Groups you made, after the epics in fleet.json. */
-  const groupsMade = (epics) => [...new Set(Object.values(labels).map((l) => l.group).filter((g) => g && !epics.some((e) => e.name === g)))].sort();
+  const groupsMade = (epics) => groupsOf(labels, epics);
   /** Why a Codex thread must not be resumed in a terminal here: it runs somewhere (the Codex app), by the last read. */
   function codexBusy(machine, sessionId) {
     if (!last || Date.now() - last.at > 60_000) { soon(); return 'Checking it is not open in Codex: try again in a few seconds.'; }
@@ -452,13 +467,6 @@ export function createFleet({ dir, quiet = () => {}, notifier = {}, phonesChange
     if (seenDirty && Date.now() - seenWritten > 20_000) writeSeen();
   }
 
-  /** Whether a session hidden at `hid` (ms) is on the page: not hidden, or live and started since, or waiting on you. */
-  function showable(x, hid) {
-    if (!hid) return true;
-    if (!x.live) return false;
-    const started = Number(x.startedAt) || Date.parse(x.startedAt ?? '') || 0;
-    return started > hid || x.state === 'needs-you';
-  }
   /** A session's row leaves the page (its record and conversation stay). Started again after this, it is back. */
   function hide(machine, key) {
     if (!key) return;
