@@ -180,6 +180,21 @@ impl Pty {
     pub fn wait(&self) -> Option<ExitStatus> {
         self.inner.wait()
     }
+
+    /// Test seam: a handle in the state a recycled pid leaves `self` in: reaped (with `self`'s status), finished, and
+    /// its pid now `other`'s live child.
+    #[doc(hidden)]
+    pub fn __reaped_with_pid_of(&self, other: &Pty) -> io::Result<Pty> {
+        let st = *self.inner.reaped.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(Pty {
+            master: self.master.try_clone()?,
+            inner: Arc::new(Inner {
+                pid: other.inner.pid,
+                reaped: Mutex::new(st),
+                finished: AtomicBool::new(true),
+            }),
+        })
+    }
 }
 
 impl Inner {
@@ -242,6 +257,10 @@ impl Inner {
     }
 
     fn wait(&self) -> Option<ExitStatus> {
+        // Once reaped, the pid may be another child's by now: never wait on it again.
+        if let Some(st) = *self.reaped.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Some(st);
+        }
         let mut raw = 0;
         loop {
             let r = unsafe { libc::waitpid(self.pid, &mut raw, 0) };

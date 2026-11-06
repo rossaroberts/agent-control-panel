@@ -305,3 +305,21 @@ fn cold_spawn_time_with_a_big_fd_limit() {
     times.sort();
     eprintln!("spawn p50 {:?} max {:?}", times[15], times[29]);
 }
+
+#[test]
+fn wait_after_reap_returns_the_cached_status_and_never_waits_on_a_recycled_pid() {
+    let a = Pty::spawn(&sh("exit 3"), 80, 24).unwrap();
+    assert_eq!(a.wait().unwrap().code(), Some(3));
+    // Another Pty's child, and a handle on `a` whose pid has been recycled to it (as the kernel may do once `a` is reaped).
+    let b = Pty::spawn(&sh("sleep 1; exit 7"), 80, 24).unwrap();
+    let recycled = a.__reaped_with_pid_of(&b).unwrap();
+    let t = Instant::now();
+    assert_eq!(recycled.wait().unwrap().code(), Some(3), "the cached status");
+    assert!(
+        t.elapsed() < Duration::from_millis(200),
+        "waited {:?} on someone else's child",
+        t.elapsed()
+    );
+    drop(recycled);
+    assert_eq!(b.wait().unwrap().code(), Some(7), "b's status is b's to reap");
+}
