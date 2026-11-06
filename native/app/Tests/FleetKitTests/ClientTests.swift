@@ -241,6 +241,19 @@ private final class RefusingServer: @unchecked Sendable {
     }
 }
 
+/// Watches only a terminal's end (its output is left unread).
+private final class EndWatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var endedWith: String??
+
+    init(_ t: Terminal) {
+        let end = t.end
+        Task { for await e in end { self.lock.withLock { self.endedWith = .some(e) } } }
+    }
+
+    var ended: String?? { lock.withLock { endedWith } }
+}
+
 /// This process's CPU time (user + system), in milliseconds.
 private func cpuMs() -> Double {
     var u = rusage()
@@ -473,6 +486,74 @@ private func cpuMs() -> Double {
             let growth = Int64(peak) - Int64(base)
             print("flood: \(chunks) chunks, resident growth \(growth / 1024) KiB")
             #expect(growth < 8 * 1024 * 1024, "resident memory grew \(growth) bytes")
+        } then: {
+            await terms.stop()
+            fx.stopDaemon()
+        }
+    }
+
+    /// NB1: a terminal flooded past its limit with nobody reading, then closed and its ref opened again: the close
+    /// discards its output, so the connection reads on, the old terminal's end arrives, and the new one shows.
+    @Test func closingAFloodedTerminalNobodyReadsFreesTheConnection() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let terms = TermClient()
+        await terms.start(socket: fx.socket)
+        try await cleaning {
+            let old = await terms.open(1, target: .claude(profile: "default", job: floodJob), cols: 100, rows: 30)
+            let oldEnd = EndWatch(old)
+            #expect(await until(15) { old.output.unread > TermClient.outputLimit }, "the flood never backed up")
+            await terms.close(1)
+            let t0 = ContinuousClock.now
+            let new = Screen(await terms.open(1, target: .claude(profile: "default", job: rawJob), cols: 100, rows: 30))
+            #expect(await until(2) { new.has("BANNER \(rawJob)") }, "the new terminal stalled behind the old one")
+            #expect(await until(2) { oldEnd.ended != nil }, "the old terminal's end never came")
+            #expect(oldEnd.ended == .some(nil))
+            print("closed flood -> new banner in \(ContinuousClock.now - t0)")
+            #expect(old.output.unread == 0)
+            #expect(new.ended == nil)
+        } then: {
+            await terms.stop()
+            fx.stopDaemon()
+        }
+    }
+
+    /// NB1: a flooded terminal whose view is cancelled (or let go of) without a close: it is closed for it, and
+    /// another terminal's output flows again.
+    @Test func anAbandonedFloodedViewDoesNotHoldTheConnection() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let terms = TermClient()
+        await terms.start(socket: fx.socket)
+        try await cleaning {
+            let other = Screen(await terms.open(2, target: .claude(profile: "default", job: rawJob), cols: 100, rows: 30))
+            #expect(await until(15) { other.has("BANNER \(rawJob)") })
+
+            // A view that takes one chunk and then stalls, until it is cancelled.
+            let flood = await terms.open(1, target: .claude(profile: "default", job: floodJob), cols: 100, rows: 30)
+            let view = Task {
+                for await _ in flood.output { try? await Task.sleep(for: .seconds(600)) }
+            }
+            #expect(await until(15) { flood.output.unread > TermClient.outputLimit })
+            // The connection is held: the other terminal's echo waits.
+            await terms.input(2, Data("one".utf8))
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(!other.has("one"), "the connection was not held by the stalled view")
+
+            view.cancel()
+            #expect(await until(2) { other.has("one") }, "the cancelled view still holds the connection")
+            await terms.input(2, Data("two".utf8))
+            #expect(await until(2) { other.has("two") })
+
+            // And one let go of without iterating, past its limit: it is closed too, and holds nothing.
+            do {
+                let dropped = await terms.open(3, target: .claude(profile: "default", job: floodJob), cols: 100, rows: 30)
+                #expect(await until(15) { dropped.output.unread > TermClient.outputLimit })
+                await terms.input(2, Data("three".utf8))
+                try await Task.sleep(for: .milliseconds(300))
+                #expect(!other.has("three"))
+            }  // the last reference to it goes here
+            #expect(await until(2) { other.has("three") }, "a view let go of still holds the connection")
         } then: {
             await terms.stop()
             fx.stopDaemon()

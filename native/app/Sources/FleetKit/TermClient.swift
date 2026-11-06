@@ -6,23 +6,25 @@
 //
 // Output is bounded (Ruling P3-R5): a terminal's output not yet taken by its view is held up to `outputLimit` (1 MiB).
 // Past that the client stops reading the socket until that terminal is down to half, so fleetd's own backpressure
-// reaches the program, and nothing is dropped or reordered.
+// reaches the program, and nothing is dropped or reordered. So a live terminal's view must keep draining its output:
+// one that stops holds every terminal of the connection behind it, by design (as fleetd holds a connection whose reader
+// stops). A terminal that is closed, replaced, or whose view is cancelled or let go of is retired at once: its held
+// output and anything more it is sent are discarded, so it holds nothing up.
 
 import Foundation
 import Synchronization
 
-/// A terminal's output, in order, never dropped: an `AsyncSequence` of chunks for one consumer, which finishes when the
-/// terminal ends. What is held and not yet taken is `unread` bytes; taking it is what lets the client read on. Past
-/// `limit` unread it is over, until a take brings it under half (then `onDrain` runs once).
-public final class TermOutput: AsyncSequence, Sendable {
-    public typealias Element = Data
-
+/// A terminal's held output, the client's side of it. What is held and not yet taken is `unread` bytes. Past `limit`
+/// unread it is over, until a take brings it under half (then `onDrain` runs once). Once discarded it holds nothing and
+/// takes nothing more.
+final class OutputBuffer: Sendable {
     private struct State {
         var chunks: [Data] = []
         var head = 0
         var unread = 0
         var finished = false
         var over = false
+        var discarded = false
         var waiter: CheckedContinuation<Data?, Never>?
     }
 
@@ -36,13 +38,14 @@ public final class TermOutput: AsyncSequence, Sendable {
     }
 
     /// Bytes held that the consumer has not taken.
-    public var unread: Int { state.withLock { $0.unread } }
+    var unread: Int { state.withLock { $0.unread } }
 
     var isOver: Bool { state.withLock { $0.over } }
 
     /// Adds a chunk; whether this made it go over the limit.
     func append(_ d: Data) -> Bool {
         let (waiter, crossed): (CheckedContinuation<Data?, Never>?, Bool) = state.withLock { s in
+            if s.discarded { return (nil, false) }
             if let w = s.waiter {
                 s.waiter = nil
                 return (w, false)
@@ -66,7 +69,31 @@ public final class TermOutput: AsyncSequence, Sendable {
         waiter?.resume(returning: nil)
     }
 
-    private func take() async -> Data? {
+    /// Drops what is held and anything sent later; the consumer's next take ends it.
+    func discard() {
+        let waiter = state.withLock { s -> CheckedContinuation<Data?, Never>? in
+            s.discarded = true
+            s.finished = true
+            s.over = false
+            s.chunks = []
+            s.head = 0
+            s.unread = 0
+            defer { s.waiter = nil }
+            return s.waiter
+        }
+        waiter?.resume(returning: nil)
+    }
+
+    /// A take that is waiting gives up (its consumer was cancelled).
+    func cancelWait() {
+        let waiter = state.withLock { s -> CheckedContinuation<Data?, Never>? in
+            defer { s.waiter = nil }
+            return s.waiter
+        }
+        waiter?.resume(returning: nil)
+    }
+
+    func take() async -> Data? {
         let (got, drained): (Data??, Bool) = state.withLock { s in
             guard s.head < s.chunks.count else { return (s.finished ? .some(nil) : nil, false) }
             let d = s.chunks[s.head]
@@ -99,12 +126,46 @@ public final class TermOutput: AsyncSequence, Sendable {
         }
     }
 
+}
+
+/// A terminal's output, in order, never dropped: an `AsyncSequence` of chunks for one consumer, which finishes when the
+/// terminal ends. Taking it is what lets the client read on (`unread` is what is held). A consumer that is cancelled,
+/// or lets go of this (and of its `Terminal`), closes the terminal: an abandoned view must not hold the connection.
+public final class TermOutput: AsyncSequence, Sendable {
+    public typealias Element = Data
+
+    let buffer: OutputBuffer
+    private let onAbandon: @Sendable () -> Void
+
+    init(_ buffer: OutputBuffer, onAbandon: @escaping @Sendable () -> Void) {
+        self.buffer = buffer
+        self.onAbandon = onAbandon
+    }
+
+    deinit { onAbandon() }
+
+    /// Bytes held that the consumer has not taken.
+    public var unread: Int { buffer.unread }
+
     public struct AsyncIterator: AsyncIteratorProtocol {
         let output: TermOutput
 
         public mutating func next() async -> Data? {
             while true {
-                guard let d = await output.take() else { return nil }
+                if Task.isCancelled {
+                    output.onAbandon()
+                    return nil
+                }
+                let buffer = output.buffer
+                let d = await withTaskCancellationHandler {
+                    await buffer.take()
+                } onCancel: {
+                    buffer.cancelWait()
+                }
+                guard let d else {
+                    if Task.isCancelled { output.onAbandon() }
+                    return nil
+                }
                 if !d.isEmpty { return d }
             }
         }
@@ -133,10 +194,10 @@ public actor TermClient {
         var target: AttachTarget
         var cols: UInt16
         var rows: UInt16
-        let output: TermOutput
+        let output: OutputBuffer
         let end: AsyncStream<String?>.Continuation
 
-        init(id: UInt64, target: AttachTarget, cols: UInt16, rows: UInt16, output: TermOutput,
+        init(id: UInt64, target: AttachTarget, cols: UInt16, rows: UInt16, output: OutputBuffer,
              end: AsyncStream<String?>.Continuation) {
             (self.id, self.target, self.cols, self.rows, self.output, self.end) = (id, target, cols, rows, output, end)
         }
@@ -196,14 +257,18 @@ public actor TermClient {
         retire(ref)
         nextId += 1
         let id = nextId
-        let output = TermOutput(limit: Self.outputLimit) { [weak self] in
+        let output = OutputBuffer(limit: Self.outputLimit) { [weak self] in
             guard let self else { return }
             Task { await self.drained(id) }
+        }
+        let view = TermOutput(output) { [weak self] in
+            guard let self else { return }
+            Task { await self.abandoned(id) }
         }
         let (end, ends) = AsyncStream<String?>.makeStream()
         terms[ref] = Open(id: id, target: target, cols: cols, rows: rows, output: output, end: ends)
         post([.termOpen(ref: ref, target: target, cols: cols, rows: rows)])
-        return Terminal(ref: ref, output: output, end: end)
+        return Terminal(ref: ref, output: view, end: end)
     }
 
     /// Keystrokes or a paste, split into `TermIn`s of at most 64 KiB that go out back to back. Returns once they are on
@@ -228,14 +293,24 @@ public actor TermClient {
 
     /// The open terminal of `ref`, if any, is closed: with a `TermClose` whose `TermEnd` is then owed (connected), or
     /// at once.
+    /// Its output is discarded at once (what is held, and what the daemon sends before its end): a closed terminal's
+    /// bytes are not wanted, and its view no longer reads, so it must not hold the connection.
     private func retire(_ ref: UInt32) {
         guard let t = terms.removeValue(forKey: ref) else { return }
+        t.output.discard()
+        if over.remove(t.id) != nil, over.isEmpty { socket?.resume() }
         if socket == nil {
             end(t, nil)
         } else {
             closing[ref, default: []].append(t)
             post([.termClose(ref: ref)])
         }
+    }
+
+    /// Terminal `id`'s view was cancelled or let go of: it is closed, if it is still open.
+    private func abandoned(_ id: UInt64) {
+        guard let ref = terms.first(where: { $0.value.id == id })?.key else { return }
+        retire(ref)
     }
 
     private func end(_ t: Open, _ error: String?) {
