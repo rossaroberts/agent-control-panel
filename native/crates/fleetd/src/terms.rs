@@ -121,14 +121,23 @@ pub fn term_sink() -> (TermSink, TermSource) {
     (TermSink(core.clone()), TermSource(core))
 }
 
+/// The bytes a frame weighs against `SINK_HIGH`: its output, or the words of an end (so a client that is sent refusals
+/// it does not read is held back like one that is sent output).
 fn payload(f: &Frame) -> usize {
     match f {
         Frame::TermOut { data, .. } => data.len(),
+        Frame::TermEnd { error, .. } => error.as_ref().map_or(0, String::len),
         _ => 0,
     }
 }
 
 impl TermSink {
+    /// Queues `TermEnd { ref, error }` behind whatever is queued already (the socket layer's answer to an open that
+    /// `Terms::open` refused, in order with the output of an earlier terminal of the same `ref`).
+    pub fn end(&self, r#ref: u32, error: Option<String>) {
+        self.push(Frame::TermEnd { r#ref, error });
+    }
+
     fn push(&self, f: Frame) {
         let mut q = lock(&self.0.q);
         if q.closed {

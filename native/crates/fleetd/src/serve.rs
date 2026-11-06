@@ -8,23 +8,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_model::wire::{
-    decode, hello_proto, read_body, write_frame, Frame, Role, PROTO, TERM_CLIENT_MAX, TERM_IN_MAX,
-};
-
-/// The most a Hello can weigh.
-const HELLO_MAX: u32 = 4096;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::io::AsyncReadExt;
+use fleet_model::wire::{
+    decode, encode, hello_proto, read_body, write_frame, Frame, Role, PROTO, TERM_CLIENT_MAX,
+    TERM_IN_MAX,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::store::Store;
-use crate::terms::{term_sink, ConnId, TermSink, Terms};
+use crate::terms::{term_sink, ConnId, TermSink, TermSource, Terms, SINK_HIGH};
+
+/// The most a Hello can weigh.
+const HELLO_MAX: u32 = 4096;
 
 /// How long a client has to say Hello, and how long one write may wait on a client that reads nothing.
 const HELLO_WITHIN: Duration = Duration::from_secs(10);
@@ -265,9 +267,30 @@ async fn handle(
 /// Numbers terminal connections for `Terms`.
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
-/// A `role: Terminals` connection: frames from the client drive `terms`; the connection's sink (pty output and ends) and
-/// this layer's own answers go back. No write timeout: a client that reads slowly only stops its own ptys (backpressure in
-/// `Terms`), so it is kept. Nothing here takes the board's lock.
+/// How long a terminal connection whose sink is full may take nothing at all before it is closed (Ruling P2-R5: the
+/// board's `WRITE_WITHIN`). Debug builds take `FLEETD_TEST_TERM_STALL_MS` instead, for the tests.
+fn term_stall() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = test_ms("FLEETD_TEST_TERM_STALL_MS") {
+        return ms;
+    }
+    WRITE_WITHIN
+}
+
+/// A test-only duration from the environment (debug builds only).
+#[cfg(debug_assertions)]
+fn test_ms(var: &str) -> Option<Duration> {
+    std::env::var(var)
+        .ok()?
+        .parse()
+        .ok()
+        .map(Duration::from_millis)
+}
+
+/// A `role: Terminals` connection: frames from the client drive `terms`; the connection's sink (pty output, ends and
+/// refused opens, in one order) goes back, and this layer's last word (an `Error`) before it closes. A client that reads
+/// slowly only stops its own ptys (backpressure in `Terms`), so it is kept; one whose sink is full and that has taken
+/// nothing for `term_stall()` is closed. Nothing here takes the board's lock.
 async fn terminals(
     mut r: OwnedReadHalf,
     mut w: OwnedWriteHalf,
@@ -275,13 +298,16 @@ async fn terminals(
 ) -> io::Result<()> {
     let conn: ConnId = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     let (sink, source) = term_sink();
-    // This layer's answers (a refused open, an `Error`). Bounded: a client that sends opens it cannot all be answered
-    // for, because it does not read, stops being read.
-    let (ctl, mut ctl_rx) = mpsc::channel::<Frame>(16);
-    // In a block of its own: both halves (and their borrow of `source`) are gone before the cleanup.
+    // The reader's last word, an `Error`, just before it closes.
+    let (ctl, mut ctl_rx) = mpsc::channel::<Frame>(1);
+    // An open still running on the blocking pool when the connection ends: awaited before `drop_conn`, so a terminal it
+    // registers late is released too.
+    let mut inflight: Option<JoinHandle<Result<(), String>>> = None;
+    // In a block of its own: both halves (and their borrows) are gone before the cleanup.
     let res = {
-        let reader = read_terms(&mut r, &terms, conn, sink, ctl);
+        let reader = read_terms(&mut r, &terms, conn, &sink, &source, ctl, &mut inflight);
         let writer = async {
+            let stall = term_stall();
             loop {
                 let f = tokio::select! {
                     biased;
@@ -291,7 +317,7 @@ async fn terminals(
                     },
                     f = source.recv() => f,
                 };
-                write_frame(&mut w, &f).await?;
+                write_term(&mut w, &f, &source, stall).await?;
             }
         };
         tokio::pin!(reader, writer);
@@ -304,10 +330,41 @@ async fn terminals(
             w = &mut writer => w,
         }
     };
+    if let Some(open) = inflight.take() {
+        let _ = open.await;
+    }
     let t = terms.clone();
     let _ = tokio::task::spawn_blocking(move || t.drop_conn(conn)).await;
     drop(source);
     res
+}
+
+/// Writes one frame. Partial writes are progress; `stall` with no progress at all while the sink is full too (its ptys
+/// stopped on it) ends the connection (Ruling P2-R5). A stall with room in the sink is waited out: the programs still run.
+async fn write_term(
+    w: &mut OwnedWriteHalf,
+    f: &Frame,
+    source: &TermSource,
+    stall: Duration,
+) -> io::Result<()> {
+    let buf = encode(f)?;
+    let in_hand = buf.len();
+    let mut off = 0;
+    while off < buf.len() {
+        match timeout(stall, w.write(&buf[off..])).await {
+            Ok(Ok(0)) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(Ok(n)) => off += n,
+            Ok(Err(e)) => return Err(e),
+            Err(_) if source.pending_bytes() + in_hand > SINK_HIGH => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "terminal client not reading",
+                ))
+            }
+            Err(_) => {}
+        }
+    }
+    w.flush().await
 }
 
 /// Reads the client's frames until it hangs up or breaks a rule (then its `Error` is the last thing queued).
@@ -315,8 +372,10 @@ async fn read_terms(
     r: &mut OwnedReadHalf,
     terms: &Arc<Terms>,
     conn: ConnId,
-    sink: TermSink,
+    sink: &TermSink,
+    source: &TermSource,
     ctl: mpsc::Sender<Frame>,
+    inflight: &mut Option<JoinHandle<Result<(), String>>>,
 ) -> io::Result<()> {
     let refuse = |message: String| {
         let ctl = ctl.clone();
@@ -345,21 +404,25 @@ async fn read_terms(
                 cols,
                 rows,
             } => {
-                // A spawn blocks (~1 ms, under the terminals' lock): off the runtime. The next frame waits for it, so a
-                // `TermIn` right behind its `TermOpen` finds the terminal open.
+                // A spawn blocks for the spawn's duration, under the terminals' lock: off the runtime. The next frame waits
+                // for it, so a `TermIn` right behind its `TermOpen` finds the terminal open.
                 let (t, s) = (terms.clone(), sink.clone());
-                let opened =
-                    tokio::task::spawn_blocking(move || t.open(conn, r#ref, target, cols, rows, s))
-                        .await
-                        .map_err(io::Error::other)?;
-                if let Err(error) = opened {
-                    let end = Frame::TermEnd {
-                        r#ref,
-                        error: Some(error),
-                    };
-                    if ctl.send(end).await.is_err() {
+                let open = inflight.insert(tokio::task::spawn_blocking(move || {
+                    #[cfg(debug_assertions)]
+                    if let Some(d) = test_ms("FLEETD_TEST_OPEN_DELAY_MS") {
+                        std::thread::sleep(d);
+                    }
+                    t.open(conn, r#ref, target, cols, rows, s)
+                }));
+                let opened = open.await.map_err(io::Error::other);
+                *inflight = None;
+                if let Err(error) = opened? {
+                    // Through the sink, behind any output of an earlier terminal of this `ref`; and not past a full sink,
+                    // so a client sent refusals it does not read stops being read.
+                    if !wait_room(r, source).await {
                         return Ok(());
                     }
+                    sink.end(r#ref, Some(error));
                 }
             }
             Frame::TermIn { r#ref, data } => {
@@ -382,6 +445,17 @@ async fn read_terms(
     }
 }
 
+/// Waits (every 5 ms) until the sink is at or below `SINK_HIGH`. False when the client hung up meanwhile.
+async fn wait_room(r: &OwnedReadHalf, source: &TermSource) -> bool {
+    while source.pending_bytes() > SINK_HIGH {
+        tokio::time::sleep(STALL_POLL).await;
+        if hung_up(r) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Hands `data` to terminal `ref`, holding it (and reading nothing more from this client) while the terminal's input queue
 /// is full: it is offered again every 5 ms until it is taken, or the terminal has ended (then it is let go). Keystrokes are
 /// never dropped (Ruling P2-R4). Re-offering is what "until `input_pending` drops" comes to for this one terminal: the
@@ -397,19 +471,16 @@ async fn offer(r: &OwnedReadHalf, terms: &Terms, conn: ConnId, r#ref: u32, data:
     true
 }
 
-/// The client has closed its end (read without taking anything: a frame waiting is left for the reader).
+/// The client has closed the connection: `POLLHUP` (or an error) on the socket. Unlike a read, this sees the hang-up
+/// even while frames the client sent before it are still unread.
 fn hung_up(r: &OwnedReadHalf) -> bool {
     use std::os::fd::AsRawFd;
-    let fd = r.as_ref().as_raw_fd();
-    let mut b = 0u8;
-    // SAFETY: a one-byte peek into a local, on an fd the stream owns for as long as `r` lives.
-    let n = unsafe {
-        libc::recv(
-            fd,
-            (&mut b as *mut u8).cast(),
-            1,
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
+    let mut p = libc::pollfd {
+        fd: r.as_ref().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
     };
-    n == 0
+    // SAFETY: one pollfd on the stack, for an fd the stream owns for as long as `r` lives; a timeout of 0 never blocks.
+    let n = unsafe { libc::poll(&mut p, 1, 0) };
+    n > 0 && p.revents & (libc::POLLHUP | libc::POLLERR) != 0
 }

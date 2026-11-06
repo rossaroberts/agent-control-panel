@@ -131,6 +131,8 @@ struct TClient {
     outs: HashMap<u32, Vec<u8>>,
     ends: Vec<(u32, Option<String>)>,
     errors: Vec<String>,
+    /// Each output or end, in arrival order: (ref, None) for output, (ref, Some(error)) for an end.
+    log: Vec<(u32, Option<Option<String>>)>,
 }
 
 impl TClient {
@@ -149,6 +151,7 @@ impl TClient {
             outs: HashMap::new(),
             ends: vec![],
             errors: vec![],
+            log: vec![],
         }
     }
 
@@ -189,10 +192,12 @@ impl TClient {
             Err(_) => None,
             Ok(Err(_)) => Some(false),
             Ok(Ok(Frame::TermOut { r#ref, data })) => {
+                self.log.push((r#ref, None));
                 self.outs.entry(r#ref).or_default().extend(data);
                 Some(true)
             }
             Ok(Ok(Frame::TermEnd { r#ref, error })) => {
+                self.log.push((r#ref, Some(error.clone())));
                 self.ends.push((r#ref, error));
                 Some(true)
             }
@@ -311,8 +316,30 @@ async fn open_type_and_see_the_echo_over_the_socket() {
 
 /// Board latency while `during` runs: deltas are upserted one by one and timed to the board client.
 async fn board_latencies(store: &Store, board: &mut Client, from: u64, n: u64) -> Vec<Duration> {
+    let none = std::sync::atomic::AtomicBool::new(false);
+    let count = std::sync::atomic::AtomicUsize::new(0);
+    board_pings(store, board, from, Some(n), &none, &count)
+        .await
+        .into_iter()
+        .map(|(_, d)| d)
+        .collect()
+}
+
+/// Board pings (when each started, how long its delta took): `n` of them, or until `stop` is set. `count` counts them
+/// as they complete.
+async fn board_pings(
+    store: &Store,
+    board: &mut Client,
+    from: u64,
+    n: Option<u64>,
+    stop: &std::sync::atomic::AtomicBool,
+    count: &std::sync::atomic::AtomicUsize,
+) -> Vec<(Instant, Duration)> {
     let mut out = vec![];
-    for i in from..from + n {
+    for i in from.. {
+        if n.is_some_and(|n| i >= from + n) || stop.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         let t = Instant::now();
         store.upsert(vec![sess(i)]);
         loop {
@@ -325,7 +352,8 @@ async fn board_latencies(store: &Store, board: &mut Client, from: u64, n: u64) -
                 _ => {}
             }
         }
-        out.push(t.elapsed());
+        out.push((t, t.elapsed()));
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     out
@@ -387,17 +415,23 @@ async fn a_client_dropping_mid_flood_frees_its_pty_and_the_board_never_notices()
     let mut c = d.term_client().await;
     c.open(1, claude("000000b1")).await;
     assert!(c.until_has(1, "BANNER", 5.0).await);
-    c.type_in(1, b"flood50\n").await;
     // Some of it, then gone; the board is timed throughout, and for a while after.
     let flooding = {
         // Its own task, so the test's own reading and waiting cannot delay it.
+        // It runs from before the flood until after the post-drop check.
         let store = d.store.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (stop2, count2) = (stop.clone(), count.clone());
         let pinger = tokio::spawn(async move {
-            let mut v = board_latencies(&store, &mut board, 1000, 30).await;
-            v.extend(board_latencies(&store, &mut board, 2000, 60).await);
-            v
+            board_pings(&store, &mut board, 1000, None, &stop2, &count2).await
         });
-        {
+        let pinged = || count.load(std::sync::atomic::Ordering::Relaxed);
+        while pinged() < 5 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        c.type_in(1, b"flood50\n").await;
+        let dropped = {
             assert!(c.until(30.0, |c| c.output(1).len() > 4 << 20).await);
             let dropped = Instant::now();
             drop(c);
@@ -417,8 +451,20 @@ async fn a_client_dropping_mid_flood_frees_its_pty_and_the_board_never_notices()
                 d.terms.live_count(),
                 fds()
             );
+            dropped
+        };
+        // And on for a while after the drop and the check.
+        let at = pinged();
+        while pinged() < at + 20 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        pinger.await.unwrap()
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let pings = pinger.await.unwrap();
+        assert!(
+            pings.iter().any(|(t, _)| *t < dropped) && pings.iter().any(|(t, _)| *t > dropped),
+            "the board was pinged before and after the drop"
+        );
+        pings.into_iter().map(|(_, d)| d).collect::<Vec<_>>()
     };
     let worst = *flooding.iter().max().unwrap();
     eprintln!(
@@ -467,10 +513,11 @@ async fn a_slow_client_costs_bounded_memory() {
     c.open(1, codex(SID)).await;
     assert!(c.until_has(1, "BANNER", BOOT).await);
     let pid = pid_of(&d.home, SID);
+    let before = rss();
     c.type_in(1, b"flood50\n").await;
     let TClient { mut r, w, .. } = c;
     use tokio::io::AsyncReadExt;
-    let mut peak = rss();
+    let mut peak = before;
     let mut buf = [0u8; 1024];
     let mut got = 0usize;
     let end = Instant::now() + Duration::from_secs(6);
@@ -481,6 +528,12 @@ async fn a_slow_client_costs_bounded_memory() {
     }
     assert!(got <= 8 * 1024, "read {got}");
     assert!(peak < 64 << 20, "resident {} MB while flooding", peak >> 20);
+    assert!(
+        peak.saturating_sub(before) < 8 << 20,
+        "resident grew {} KiB while flooding (from {} MB)",
+        peak.saturating_sub(before) >> 10,
+        before >> 20
+    );
     assert!(terms_home::alive(pid), "the program is blocked, not gone");
     drop((r, w));
     assert!(terms_home::gone_within(pid, Duration::from_secs(3)));
@@ -549,6 +602,19 @@ async fn a_term_in_over_64_kib_is_refused() {
         .terms
         .warm_count()
         == 1));
+    // Its ring holds everything the program printed and echoed: none of the refused frame is there.
+    let mut c = d.term_client().await;
+    c.open(1, claude("000000e1")).await;
+    assert!(c.until_has(1, "REDRAW", 5.0).await, "replay, then the kick");
+    assert!(
+        has(c.output(1), &last),
+        "the replay holds the accepted input"
+    );
+    assert!(
+        !has(c.output(1), "M000000"),
+        "none of the refused frame reached the program"
+    );
+    assert_eq!(d.home.starts_of("000000e1").len(), 1);
 }
 
 /// P2-R4: input past the program's 1 MiB queue is held, not dropped, and nothing more is read from that client until it
@@ -736,4 +802,167 @@ async fn keystroke_echo_through_the_socket_during_cold_opens() {
     );
     assert!(opens >= 30, "cold opens ran meanwhile: {opens}");
     assert!(sp < Duration::from_millis(50), "{sp:?}");
+}
+
+/// Sets a test-only environment variable for the life of the guard (the tests here run one at a time).
+struct EnvVar(&'static str);
+
+impl EnvVar {
+    fn set(k: &'static str, v: &str) -> EnvVar {
+        std::env::set_var(k, v);
+        EnvVar(k)
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        std::env::remove_var(self.0);
+    }
+}
+
+/// P2-R5: a client whose sink is full and that takes nothing for the stall time (30 s; 300 ms here) is closed, and its
+/// terminal released. One that reads slowly but steadily is kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_that_takes_nothing_with_a_full_sink_is_closed() {
+    let _s = serial().await;
+    let _stall = EnvVar::set("FLEETD_TEST_TERM_STALL_MS", "300");
+    let d = Daemon::start();
+
+    let mut c = d.term_client().await;
+    c.open(1, codex(SID)).await;
+    assert!(c.until_has(1, "BANNER", BOOT).await);
+    let pid = pid_of(&d.home, SID);
+    c.type_in(1, b"flood50\n").await;
+    // Nothing read: the program is stopped, so the stall closes the connection and the release stops it.
+    assert!(
+        terms_home::gone_within(pid, Duration::from_secs(5)),
+        "released"
+    );
+    assert!(
+        c.until_closed(10.0).await,
+        "the server closed the connection"
+    );
+
+    // Slow but steady (4 KiB every 50 ms): kept.
+    let mut c = d.term_client().await;
+    let sid = "0199aaaa-bbbb-4ccc-8ddd-000000000005";
+    c.open(1, codex(sid)).await;
+    assert!(c.until_has(1, "BANNER", BOOT).await);
+    let pid = pid_of(&d.home, sid);
+    c.type_in(1, b"flood50\n").await;
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 4096];
+    let end = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < end {
+        assert!(
+            c.r.read(&mut buf).await.unwrap() > 0,
+            "closed while reading"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(terms_home::alive(pid), "a slow reader is kept");
+}
+
+/// M1: an open still running when the connection ends (its writer failed first) is waited for, and released with the
+/// rest: nothing it registers late is left attached to a gone connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_in_flight_when_the_connection_dies_is_released() {
+    let _s = serial().await;
+    let d = Daemon::start();
+    let mut c = d.term_client().await;
+    c.open(1, claude("000000c1")).await;
+    assert!(c.until_has(1, "BANNER", BOOT).await);
+    let _delay = EnvVar::set("FLEETD_TEST_OPEN_DELAY_MS", "800");
+    c.type_in(1, b"flood\n").await;
+    c.open(2, claude("000000c2")).await;
+    // Output is flowing for ref 1; the open of ref 2 is held on the blocking pool. Gone: the writer fails first.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(c);
+    let terms = d.terms.clone();
+    let both_warm = tokio::task::spawn_blocking(move || {
+        terms_home::wait_for(Duration::from_secs(5), || terms.warm_count() == 2)
+    })
+    .await
+    .unwrap();
+    assert!(
+        both_warm,
+        "warm {}, live {} (ref 2 left attached to a gone connection)",
+        d.terms.warm_count(),
+        d.terms.live_count()
+    );
+}
+
+/// M2: a refused open of a reused `ref` is answered behind that ref's earlier output and its close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_reopen_of_a_ref_comes_after_its_old_output() {
+    let _s = serial().await;
+    let d = Daemon::start();
+    let mut c = d.term_client().await;
+    c.open(1, claude("000000c3")).await;
+    assert!(c.until_has(1, "BANNER", BOOT).await);
+    c.type_in(1, b"flood\n").await;
+    // Not read for a while: the sink fills with ref 1's output. Then close it and reopen ref 1 on a bad target.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    c.send(Frame::TermClose { r#ref: 1 }).await;
+    c.open(
+        1,
+        AttachTarget::Claude {
+            profile: "default".into(),
+            job: "not a job".into(),
+        },
+    )
+    .await;
+    assert!(c.until(20.0, |c| c.ends.len() == 2).await, "{:?}", c.ends);
+    c.drain_for(0.3).await;
+    let ends: Vec<usize> = (0..c.log.len()).filter(|&i| c.log[i].1.is_some()).collect();
+    assert_eq!(ends.len(), 2);
+    assert_eq!(c.log[ends[0]], (1, Some(None)), "the close's end first");
+    assert_eq!(
+        c.log[ends[1]],
+        (1, Some(Some(fleetd::terms::ERR_PICK.to_string()))),
+        "then the refusal"
+    );
+    assert!(
+        ends[0] > 0 && c.log[..ends[0]].iter().all(|e| *e == (1, None)),
+        "output before"
+    );
+    assert_eq!(ends[1], c.log.len() - 1, "nothing after the refusal");
+    assert_eq!(ends[1], ends[0] + 1, "nothing between the two ends");
+}
+
+/// M3: a client that hangs up while its input is held, with frames it sent still unread, is noticed: the stall ends and
+/// its terminal is released, though the program stays stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hang_up_while_input_is_held_releases_the_terminal() {
+    let _s = serial().await;
+    let d = Daemon::start();
+    let mut c = d.term_client().await;
+    c.open(1, claude("000000c4")).await;
+    assert!(c.until_has(1, "BANNER", BOOT).await);
+    let pid = pid_of(&d.home, "000000c4");
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    let per = TERM_IN_MAX / 512;
+    let (_, spare) = UnixStream::pair().unwrap().0.into_split();
+    let mut w = std::mem::replace(&mut c.w, spare);
+    let writer = tokio::spawn(async move {
+        for i in 0..24 {
+            let data = numbered('L', i * per, per, 512);
+            let _ = write_frame(&mut w, &Frame::TermIn { r#ref: 1, data }).await;
+        }
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    });
+    c.drain_for(1.0).await;
+    assert_eq!(d.terms.warm_count(), 0, "attached while held");
+    // Gone, with frames it sent still in the server's socket buffer.
+    writer.abort();
+    let _ = writer.await;
+    drop(c);
+    let terms = d.terms.clone();
+    let released = tokio::task::spawn_blocking(move || {
+        terms_home::wait_for(Duration::from_secs(2), || terms.warm_count() == 1)
+    })
+    .await
+    .unwrap();
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    assert!(released, "the held stall ended when the client went");
 }

@@ -67,7 +67,8 @@ asks. Frames carry a client-chosen `ref` naming one terminal of this connection.
   output, in order, never dropped) and, when it is over, one `TermEnd { ref, error: None }`. An open that cannot be
   served is answered with `TermEnd { ref, error }`, `error` being `term.mjs`'s words (`Pick a background session, or a
   folder that exists.`, `Too many terminals open.`, `Too many terminals open in this tab.`, `It is open in another
-  Fleet terminal already.`, or the busy reason). A `ref` already open on this connection is left as it is (no answer).
+  Fleet terminal already.`, or the busy reason). That `TermEnd` comes in order with the connection's output: after
+  everything already sent for an earlier terminal of the same `ref` (its output, then its own `TermEnd`). A `ref` already open on this connection is left as it is (no answer).
   The server handles the open before it reads the next frame, so a `TermIn` sent right behind it finds it open. At most
   8 terminals per connection and 24 in all; cols are clamped to 20-400 and rows to 5-200.
 - **`TermIn { ref, data }`** is keystrokes, **at most 64 KiB** (65,536 bytes) of `data`. A `TermIn` of more is a client
@@ -85,12 +86,16 @@ asks. Frames carry a client-chosen `ref` naming one terminal of this connection.
 **Backpressure, both ways; nothing is dropped.**
 
 - Output: when more than 1 MiB of a connection's output is waiting to be written to it, the server stops reading every
-  pty of that connection until it is down to 512 KiB, so the programs block on their output. A slow reader is never
-  disconnected for being slow on this connection (there is no 30 s write limit here) and never costs unbounded memory.
+  pty of that connection until it is down to 512 KiB, so the programs block on their output (refusals' words count
+  toward the 1 MiB too, and past it the server stops reading the client). A slow reader is kept and never costs
+  unbounded memory. A client whose output is over 1 MiB and that has taken nothing at all for 30 s is closed (Ruling
+  P2-R5, as the board's 30 s write limit); its terminals are released as at a hang-up.
 - Input: when a terminal holds 1 MiB of input its program has not read, the server keeps the `TermIn` that did not fit
   and **stops reading this connection's frames** until it fits (offered again every 5 ms while held, and only then): a
   `TermSize`, `TermClose` or another terminal's `TermIn` behind it waits too, and the client's own writes block once the
   socket's buffer is full. If that terminal ends while its input is held, the held frame is let go and reading resumes.
+  If the client hangs up while its input is held, the server notices (even with frames of its still unread) and
+  releases its terminals.
 
 ## Rules a client relies on
 
@@ -107,7 +112,8 @@ asks. Frames carry a client-chosen `ref` naming one terminal of this connection.
   drop each key in `remove`.
 - **`Unreachable` is never produced by `fleetd` for its own machine.** It is the state a client gives a session of a
   machine it cannot reach (another Mac's daemon, a lost connection); a local board never holds it.
-- On a board connection, a write the client cannot keep up with for 30 s ends the connection.
+- A write the client takes nothing of for 30 s ends the connection (on a Terminals connection, only while its output
+  is over 1 MiB).
 
 ## Versioning
 
