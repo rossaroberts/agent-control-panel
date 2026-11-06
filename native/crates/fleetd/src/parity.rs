@@ -67,7 +67,7 @@ pub fn run(args: &[String]) {
             let b = files.read(p);
             file_ms += t.elapsed().as_secs_f64() * 1000.0;
             let (a, b) = match (a, b) {
-                (Ok(a), Ok(b)) => (a, b),
+                (Ok(a), Ok(b)) => (a.rows, b.rows),
                 (a, b) => {
                     eprintln!(
                         "round {round} {}: cli {:?} files {:?}",

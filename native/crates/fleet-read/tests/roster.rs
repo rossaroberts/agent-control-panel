@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use fleet_read::profiles::Profile;
-use fleet_read::roster::{child_env, pid_alive, CliRoster, FileRoster, RosterError, RosterSource};
+use fleet_read::roster::{
+    child_env, pid_alive, source_for, CliRoster, FileRoster, RosterError, RosterSource,
+};
 
 fn script(dir: &Path, body: &str) -> PathBuf {
     let f = dir.join("claude");
@@ -43,7 +45,8 @@ fn cli_roster_parses_rows_and_marks_running_ones_active() {
     let dir = tempfile::tempdir().unwrap();
     let rows = CliRoster::with_claude(c)
         .read(&profile(dir.path(), false))
-        .unwrap();
+        .unwrap()
+        .rows;
     assert_eq!(rows.len(), 4, "a row with no sessionId is not a session");
 
     let run = &rows[0];
@@ -81,7 +84,8 @@ fn a_pidless_running_job_with_a_stale_record_is_not_active() {
     .unwrap();
     let rows = CliRoster::with_claude(c)
         .read(&profile(dir.path(), false))
-        .unwrap();
+        .unwrap()
+        .rows;
     assert!(!rows[0].active);
 }
 
@@ -95,12 +99,12 @@ fn config_dir_is_set_unless_plain_and_markers_are_stripped() {
     );
     let dir = tempfile::tempdir().unwrap();
     let r = CliRoster::with_claude(c);
-    let named = r.read(&profile(dir.path(), false)).unwrap()[0]
+    let named = r.read(&profile(dir.path(), false)).unwrap().rows[0]
         .name
         .clone()
         .unwrap();
     assert_eq!(named, format!("cfg={} leaked=0", dir.path().display()));
-    let plain = r.read(&profile(dir.path(), true)).unwrap()[0]
+    let plain = r.read(&profile(dir.path(), true)).unwrap().rows[0]
         .name
         .clone()
         .unwrap();
@@ -190,7 +194,7 @@ fn file_roster_joins_jobs_with_their_process_records() {
     );
     w("jobs/not-a-job/state.json", "{}".into());
 
-    let mut rows = FileRoster.read(&profile(dir.path(), false)).unwrap();
+    let mut rows = FileRoster.read(&profile(dir.path(), false)).unwrap().rows;
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     assert_eq!(
         rows.len(),
@@ -207,4 +211,164 @@ fn file_roster_joins_jobs_with_their_process_records() {
     let d = &rows[1];
     assert!(!d.active && d.pid.is_none());
     assert_eq!(d.started_at, Some(1_793_923_200_000)); // 2026-11-06T00:00:00Z
+}
+
+fn alive(pid: u32) -> bool {
+    pid_alive(pid)
+}
+
+#[test]
+fn timeout_kills_the_whole_process_group() {
+    let bin = tempfile::tempdir().unwrap();
+    let out = bin.path().join("pids");
+    let c = script(
+        bin.path(),
+        &format!("sleep 30 &\necho \"$$ $!\" > {}\nsleep 30", out.display()),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let r = CliRoster::with_claude(c).read(&profile(dir.path(), false));
+    assert_eq!(r.unwrap_err(), RosterError::Timeout);
+    let text = fs::read_to_string(&out).unwrap();
+    let pids: Vec<u32> = text
+        .split_whitespace()
+        .map(|n| n.parse().unwrap())
+        .collect();
+    assert_eq!(pids.len(), 2);
+    std::thread::sleep(Duration::from_millis(200));
+    for p in pids {
+        assert!(!alive(p), "pid {p} survived the timeout");
+    }
+}
+
+#[test]
+fn a_failed_running_list_means_active_is_unknown() {
+    let bin = tempfile::tempdir().unwrap();
+    let c = script(
+        bin.path(),
+        r#"case "$*" in *--all*) echo '[{"id":"aaaaaaaa","sessionId":"s1","state":"working"}]';; *) echo oops >&2; exit 1;; esac"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let r = CliRoster::with_claude(c)
+        .read(&profile(dir.path(), false))
+        .unwrap();
+    assert!(!r.active_known);
+    assert_eq!(r.rows.len(), 1);
+    assert!(!r.rows[0].active);
+    // And a good one says so.
+    let c = script(bin.path(), "echo '[]'");
+    assert!(
+        CliRoster::with_claude(c)
+            .read(&profile(dir.path(), false))
+            .unwrap()
+            .active_known
+    );
+}
+
+fn iso_now() -> String {
+    let o = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%S.000Z"])
+        .output()
+        .unwrap();
+    String::from_utf8(o.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn pidless_running_jobs_are_checked_with_claude_logs_in_parallel_and_kept() {
+    let bin = tempfile::tempdir().unwrap();
+    let calls = bin.path().join("calls");
+    let row = |id: &str, sid: &str| {
+        format!(r#"{{"id":"{id}","sessionId":"{sid}","state":"blocked","kind":"background"}}"#)
+    };
+    let list = format!(
+        "[{},{}]",
+        row("aaaaaaaa", "s-here"),
+        row("bbbbbbbb", "s-gone")
+    );
+    let c = script(
+        bin.path(),
+        &format!(
+            "case \"$1\" in\n agents) echo '{list}';;\n logs) echo \"$2\" >> {}\n  if [ \"$2\" = bbbbbbbb ]; then echo 'Error: job not found' >&2; exit 1; fi;;\nesac",
+            calls.display()
+        ),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for id in ["aaaaaaaa", "bbbbbbbb"] {
+        let d = dir.path().join("jobs").join(id);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("state.json"),
+            format!(r#"{{"updatedAt":"{}"}}"#, iso_now()),
+        )
+        .unwrap();
+    }
+    let r = CliRoster::with_claude(c);
+    let rows = r.read(&profile(dir.path(), false)).unwrap().rows;
+    assert!(rows[0].active, "fresh and not gone");
+    assert!(!rows[1].active, "job not found");
+    // A second read inside 30 s asks nothing again.
+    let rows = r.read(&profile(dir.path(), false)).unwrap().rows;
+    assert!(rows[0].active && !rows[1].active);
+    let asked = fs::read_to_string(&calls).unwrap();
+    assert_eq!(asked.lines().count(), 2, "{asked}");
+}
+
+#[test]
+fn empty_session_ids_and_pid_zero_are_dropped() {
+    let bin = tempfile::tempdir().unwrap();
+    let c = script(
+        bin.path(),
+        r#"echo '[{"id":"aaaaaaaa","sessionId":"","pid":5},{"id":"bbbbbbbb","sessionId":"s1","pid":0}]'"#,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let rows = CliRoster::with_claude(c)
+        .read(&profile(dir.path(), false))
+        .unwrap()
+        .rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].pid, rows[0].pid_alive), (None, false));
+}
+
+#[test]
+fn file_roster_prefers_a_live_record_over_a_dead_older_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let me = std::process::id();
+    let w = |rel: &str, body: String| {
+        let f = dir.path().join(rel);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, body).unwrap();
+    };
+    w(
+        "jobs/aaaaaaaa/state.json",
+        r#"{"state":"working","sessionId":"s-job"}"#.into(),
+    );
+    w(
+        "sessions/999999.json",
+        r#"{"pid":999999,"sessionId":"s-job","jobId":"aaaaaaaa","status":"idle","startedAt":2000}"#
+            .into(),
+    );
+    w(
+        &format!("sessions/{me}.json"),
+        format!(
+            r#"{{"pid":{me},"sessionId":"s-job","jobId":"aaaaaaaa","status":"busy","startedAt":1000}}"#
+        ),
+    );
+    let r = FileRoster.read(&profile(dir.path(), false)).unwrap();
+    assert!(r.active_known);
+    assert_eq!(
+        r.rows.len(),
+        1,
+        "the losing record is not an interactive row"
+    );
+    assert_eq!(
+        (r.rows[0].pid, r.rows[0].status.as_deref()),
+        (Some(me), Some("busy"))
+    );
+}
+
+#[test]
+fn the_default_source_is_the_cli_and_files_are_opt_in() {
+    assert_eq!(source_for(None).kind(), "cli");
+    assert_eq!(source_for(Some("cli")).kind(), "cli");
+    assert_eq!(source_for(Some("")).kind(), "cli");
+    assert_eq!(source_for(Some("files")).kind(), "files");
 }

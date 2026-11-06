@@ -1,11 +1,13 @@
 //! A profile's roster of sessions: what `claude agents --json --all` lists (`CliRoster`), or what Claude Code's own records
 //! under the profile say (`FileRoster`). Read-only: nothing here writes to Claude Code's records.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fleet_model::decide::RosterRow;
 use serde_json::Value;
@@ -21,8 +23,27 @@ pub enum RosterError {
     Parse(String),
 }
 
+/// One read of a profile's roster.
+#[derive(Debug, PartialEq)]
+pub struct RosterRead {
+    pub rows: Vec<RosterRow>,
+    /// Whether `active` was decided. False when the list of what runs could not be read: every row then has `active`
+    /// false, and the caller keeps its last good running set (as Node's `runningWas` does).
+    pub active_known: bool,
+}
+
 pub trait RosterSource {
-    fn read(&self, p: &Profile) -> Result<Vec<RosterRow>, RosterError>;
+    fn read(&self, p: &Profile) -> Result<RosterRead, RosterError>;
+    /// `cli` or `files`.
+    fn kind(&self) -> &'static str;
+}
+
+/// A pid of 0 is no pid (Node's `!r.pid`).
+fn pid_of(v: &Value) -> Option<u32> {
+    v.get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
 }
 
 /// Whether a process with this pid exists (`kill(pid, 0)`; a process we may not signal still exists).
@@ -181,76 +202,141 @@ impl CliRoster {
     }
 
     fn run(&self, p: &Profile, args: &[&str], timeout: Duration) -> Result<String, RosterError> {
-        let mut cmd = Command::new(&self.claude);
-        cmd.args(args)
-            .env_clear()
-            .envs(child_env(std::env::vars(), &self.home, p))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = cmd.spawn().map_err(|e| RosterError::Spawn(e.to_string()))?;
-        let pid = child.id();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(child.wait_with_output());
-        });
-        match rx.recv_timeout(timeout) {
-            Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into()),
-            Ok(Ok(out)) => Err(RosterError::Failed(
+        let out = run_child(
+            &self.claude,
+            &child_env(std::env::vars(), &self.home, p),
+            args,
+            timeout,
+        )?;
+        if out.success {
+            Ok(String::from_utf8_lossy(&out.stdout).into())
+        } else {
+            Err(RosterError::Failed(
                 String::from_utf8_lossy(&out.stderr)
                     .trim()
                     .chars()
                     .take(200)
                     .collect(),
-            )),
-            Ok(Err(e)) => Err(RosterError::Failed(e.to_string())),
-            Err(_) => {
-                // SAFETY: the pid is our own child's, which the waiting thread has not yet reaped.
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-                Err(RosterError::Timeout)
-            }
+            ))
         }
     }
 
-    /// `claude logs <id>` says "job not found" for a job that is gone. Any other failure proves nothing.
+    /// `claude logs <id>` says "job not found" for a job that is gone. A timeout or any other failure proves nothing and
+    /// is not kept; a definite answer is kept for 30 s.
     fn job_gone(&self, p: &Profile, id: &str) -> bool {
-        let mut cmd = Command::new(&self.claude);
-        cmd.args(["logs", id])
-            .env_clear()
-            .envs(child_env(std::env::vars(), &self.home, p))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let Ok(child) = cmd.spawn() else {
-            return false;
-        };
-        let pid = child.id();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(child.wait_with_output());
-        });
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(out)) => {
-                !out.status.success()
-                    && String::from_utf8_lossy(&out.stderr)
-                        .to_lowercase()
-                        .contains("job not found")
-            }
-            Ok(Err(_)) => false,
-            Err(_) => {
-                // SAFETY: as in `run`.
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-                false
+        static KEPT: OnceLock<Mutex<GoneCache>> = OnceLock::new();
+        let kept = KEPT.get_or_init(Default::default);
+        let key = (p.dir.clone(), id.to_string());
+        if let Some((at, gone)) = kept.lock().unwrap().get(&key) {
+            if at.elapsed() < Duration::from_secs(30) {
+                return *gone;
             }
         }
+        let Ok(out) = run_child(
+            &self.claude,
+            &child_env(std::env::vars(), &self.home, p),
+            &["logs", id],
+            Duration::from_secs(5),
+        ) else {
+            return false;
+        };
+        let gone = !out.success
+            && String::from_utf8_lossy(&out.stderr)
+                .to_lowercase()
+                .contains("job not found");
+        if out.success || gone {
+            let mut k = kept.lock().unwrap();
+            if k.len() > 500 {
+                k.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(600));
+            }
+            k.insert(key, (Instant::now(), gone));
+        }
+        gone
     }
 }
 
+/// `claude logs` answers kept 30 s, by (profile folder, job id): when asked, and whether the job is gone.
+type GoneCache = HashMap<(PathBuf, String), (Instant, bool)>;
+
+struct ChildOut {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+const MAX_STDOUT: u64 = 8_000_000;
+
+fn drain(mut r: impl Read + Send + 'static, cap: u64) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = r.by_ref().take(cap + 1).read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+/// Run `bin` in its own process group with `env` only, and give up after `timeout`: the whole group is killed (a
+/// grandchild must not outlive us) and the child reaped. Output beyond 8 MB is an error, as Node's `maxBuffer`.
+fn run_child(
+    bin: &Path,
+    env: &[(String, String)],
+    args: &[&str],
+    timeout: Duration,
+) -> Result<ChildOut, RosterError> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| RosterError::Spawn(e.to_string()))?;
+    let pgid = child.id() as libc::pid_t;
+    let out_rx = drain(child.stdout.take().unwrap(), MAX_STDOUT);
+    let err_rx = drain(child.stderr.take().unwrap(), 64 * 1024);
+    let kill_group = |child: &mut std::process::Child| {
+        // SAFETY: the group was created by this child and the child is not yet reaped, so its id cannot be reused.
+        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        let _ = child.wait();
+    };
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {}
+            Err(e) => {
+                kill_group(&mut child);
+                return Err(RosterError::Failed(e.to_string()));
+            }
+        }
+        if Instant::now() >= deadline {
+            kill_group(&mut child);
+            return Err(RosterError::Timeout);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    // Anything the child left running in its group goes with it; the readers then see EOF.
+    // SAFETY: as above; the child was reaped by try_wait, but a group id stays unused while any member lives, and a
+    // group with no members makes this a harmless ESRCH.
+    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    let grace = Duration::from_secs(2);
+    let stdout = out_rx.recv_timeout(grace).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(grace).unwrap_or_default();
+    if stdout.len() as u64 > MAX_STDOUT {
+        return Err(RosterError::Failed("output over 8 MB".into()));
+    }
+    Ok(ChildOut {
+        success: status.success(),
+        stdout,
+        stderr,
+    })
+}
+
 fn row_of(v: &Value) -> RosterRow {
-    let pid = v
-        .get("pid")
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n).ok());
+    let pid = pid_of(v);
     RosterRow {
         id: str_of(v, "id"),
         session_id: str_of(v, "sessionId"),
@@ -268,7 +354,11 @@ fn row_of(v: &Value) -> RosterRow {
 }
 
 impl RosterSource for CliRoster {
-    fn read(&self, p: &Profile) -> Result<Vec<RosterRow>, RosterError> {
+    fn kind(&self) -> &'static str {
+        "cli"
+    }
+
+    fn read(&self, p: &Profile) -> Result<RosterRead, RosterError> {
         let (all, running) = std::thread::scope(|s| {
             let a = s.spawn(|| self.run(p, &["agents", "--json", "--all"], self.timeout));
             let r = s.spawn(|| self.run(p, &["agents", "--json"], self.timeout));
@@ -277,40 +367,51 @@ impl RosterSource for CliRoster {
         let all = all?;
         let list: Vec<Value> =
             serde_json::from_str(&all).map_err(|e| RosterError::Parse(e.to_string()))?;
-        // What runs, by the list without --all. When that can't be read, nothing is known to run: the caller's last good
-        // roster is the fallback, not a guess here.
-        let mut active: HashSet<String> = running
+        // What runs, by the list without --all. When that can't be read, `active` is not known.
+        let running = running
             .ok()
-            .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|r| str_of(r, "sessionId").or_else(|| str_of(r, "id")))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok());
+        let active_known = running.is_some();
+        let mut active: HashSet<String> = running
+            .iter()
+            .flatten()
+            .filter_map(|r| str_of(r, "sessionId").or_else(|| str_of(r, "id")))
+            .collect();
         let mut rows: Vec<RosterRow> = list
             .iter()
-            .filter(|v| v.get("sessionId").and_then(Value::as_str).is_some())
+            .filter(|v| {
+                v.get("sessionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            })
             .map(row_of)
             .collect();
         // Listed as running but with no process: only a job whose screen Claude Code can still show is live.
         let now = now_ms();
-        for r in &rows {
-            let (Some(sid), Some(id)) = (&r.session_id, &r.id) else {
-                continue;
-            };
-            if r.pid.is_none()
-                && active.contains(sid)
-                && is_job_id(id)
-                && (!job_fresh(p, id, now) || self.job_gone(p, id))
-            {
-                active.remove(sid);
-            }
+        let doubtful: Vec<(&str, &str)> = rows
+            .iter()
+            .filter_map(|r| Some((r.session_id.as_deref()?, r.id.as_deref()?, r.pid)))
+            .filter(|(sid, id, pid)| pid.is_none() && active.contains(*sid) && is_job_id(id))
+            .map(|(sid, id, _)| (sid, id))
+            .collect();
+        let dropped: Vec<String> = std::thread::scope(|s| {
+            let hs: Vec<_> = doubtful
+                .iter()
+                .map(|&(sid, id)| {
+                    s.spawn(move || {
+                        (!job_fresh(p, id, now) || self.job_gone(p, id)).then(|| sid.to_string())
+                    })
+                })
+                .collect();
+            hs.into_iter().filter_map(|h| h.join().unwrap()).collect()
+        });
+        for sid in dropped {
+            active.remove(&sid);
         }
         for r in &mut rows {
             r.active = r.session_id.as_ref().is_some_and(|s| active.contains(s));
         }
-        Ok(rows)
+        Ok(RosterRead { rows, active_known })
     }
 }
 
@@ -330,7 +431,11 @@ fn listed_status(s: String) -> String {
 pub struct FileRoster;
 
 impl RosterSource for FileRoster {
-    fn read(&self, p: &Profile) -> Result<Vec<RosterRow>, RosterError> {
+    fn kind(&self) -> &'static str {
+        "files"
+    }
+
+    fn read(&self, p: &Profile) -> Result<RosterRead, RosterError> {
         // Session records by pid, newest first is not needed: a job's own record names its session.
         let mut records: Vec<Value> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(p.dir.join("sessions")) {
@@ -349,7 +454,7 @@ impl RosterSource for FileRoster {
                 }
             }
         }
-        let mut used = HashSet::new();
+        let mut used: HashSet<usize> = HashSet::new();
         let mut rows = Vec::new();
         if let Ok(rd) = std::fs::read_dir(p.dir.join("jobs")) {
             for e in rd.flatten() {
@@ -358,17 +463,27 @@ impl RosterSource for FileRoster {
                     continue;
                 };
                 let sid = str_of(&job, "sessionId");
-                let rec = records.iter().position(|r| {
-                    str_of(r, "jobId").as_deref() == Some(id.as_str())
-                        || (sid.is_some() && str_of(r, "sessionId") == sid)
-                });
-                let rec = rec.map(|i| {
-                    used.insert(i);
-                    &records[i]
-                });
-                let pid = rec
-                    .and_then(|r| r.get("pid")?.as_u64())
-                    .and_then(|n| u32::try_from(n).ok());
+                // Several records can name one job (a restarted process): the one with a live pid, then the newest.
+                let matches: Vec<usize> = (0..records.len())
+                    .filter(|&i| {
+                        let r = &records[i];
+                        str_of(r, "jobId").as_deref() == Some(id.as_str())
+                            || (sid.as_deref().is_some_and(|s| !s.is_empty())
+                                && str_of(r, "sessionId") == sid)
+                    })
+                    .collect();
+                used.extend(&matches);
+                let rec = matches
+                    .into_iter()
+                    .max_by_key(|&i| {
+                        let r = &records[i];
+                        (
+                            pid_of(r).is_some_and(pid_alive),
+                            r.get("startedAt").and_then(Value::as_i64).unwrap_or(0),
+                        )
+                    })
+                    .map(|i| &records[i]);
+                let pid = rec.and_then(pid_of);
                 // Claude Code lists a running job's state as `working` and a shell step as `busy`; the records say `running`/`shell`.
                 let state =
                     str_of(&job, "state")
@@ -400,11 +515,7 @@ impl RosterSource for FileRoster {
             if used.contains(&i) {
                 continue;
             }
-            let Some(pid) = r
-                .get("pid")
-                .and_then(Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok())
-            else {
+            let Some(pid) = pid_of(r) else {
                 continue;
             };
             if !pid_alive(pid) {
@@ -431,15 +542,24 @@ impl RosterSource for FileRoster {
                 started_at: r.get("startedAt").and_then(Value::as_i64),
             });
         }
-        Ok(rows)
+        rows.sort_by(|a, b| (&a.id, &a.session_id, a.pid).cmp(&(&b.id, &b.session_id, b.pid)));
+        Ok(RosterRead {
+            rows,
+            active_known: true,
+        })
     }
 }
 
-/// The roster the daemon reads by default: the files (the parity spike found no difference from the CLI over 10 rounds
-/// on three real profiles). `FLEETD_ROSTER=cli` keeps `claude agents` as the source.
-pub fn default_source() -> Box<dyn RosterSource + Send + Sync> {
-    match std::env::var("FLEETD_ROSTER").as_deref() {
-        Ok("cli") => Box::new(CliRoster::new()),
-        _ => Box::new(FileRoster),
+/// The roster source for a `FLEETD_ROSTER` value (Ruling R12): `claude agents` unless it is `files`. The files agreed with
+/// the CLI over 10 rounds, but not yet with a pending permission prompt, a failed job or a respawned one.
+pub fn source_for(choice: Option<&str>) -> Box<dyn RosterSource + Send + Sync> {
+    match choice {
+        Some("files") => Box::new(FileRoster),
+        _ => Box::new(CliRoster::new()),
     }
+}
+
+/// The roster the daemon reads: `FLEETD_ROSTER=files` opts into the files, else the CLI.
+pub fn default_source() -> Box<dyn RosterSource + Send + Sync> {
+    source_for(std::env::var("FLEETD_ROSTER").ok().as_deref())
 }
