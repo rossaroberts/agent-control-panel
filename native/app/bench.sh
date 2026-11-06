@@ -7,6 +7,10 @@
 # The absolute 120 / 200 ms are reported, not gated. The medians go to native/bench/results/app-launch.json
 # (FLEET_BENCH_OUT to put them elsewhere). Run against a running fleetd (FLEETD_SOCK to pick one); builds the app first
 # unless FLEET_BENCH_NOBUILD=1.
+# Then the interactions (Ruling ALL-R1): its --ui-bench mode (a synthetic board, an in-process echo pty; no fleetd)
+# runs 3 times, and every action's median of the 3 runs' medians is gated at 16 ms (one frame): a warm switch (⌘[ ⌘],
+# ↑/↓, ⌘1), a cold open's "connecting…", Return and ⌃`, a key's echo, ⌘K and each keystroke, ⌘⇧F, a delta. Return
+# typed in a terminal must reach its program. Results to native/bench/results/app-ui.json (FLEET_BENCH_UI_OUT).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 app="${FLEET_APP:-$HOME/Applications/Fleet.app}"
@@ -19,7 +23,8 @@ for i in 0 1 2 3; do
   "$bin" --floor "$work/floor$i.json" >/dev/null 2>&1
   "$bin" --bench "$work/run$i.json" >/dev/null 2>&1
 done
-/usr/bin/python3 - "$work" "$out" <<'PY'
+launch=0 ui=0
+/usr/bin/python3 - "$work" "$out" <<'PY' || launch=1
 import json, statistics, sys, pathlib
 work, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 runs = [json.loads((work / f"run{i}.json").read_text()) for i in (1, 2, 3)]
@@ -45,3 +50,29 @@ out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 sys.exit(0 if ok else 1)
 PY
+for i in 1 2 3; do "$bin" --ui-bench "$work/ui$i.json" >/dev/null 2>&1; done
+/usr/bin/python3 - "$work" "${FLEET_BENCH_UI_OUT:-$here/../bench/results/app-ui.json}" <<'PY' || ui=1
+import json, statistics, sys, pathlib
+work, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+runs = [json.loads((work / f"ui{i}.json").read_text()) for i in (1, 2, 3)]
+budget, ok, result = 16.0, True, {}
+for k in sorted(k for k in runs[0] if isinstance(runs[0][k], (int, float)) and not isinstance(runs[0][k], bool)):
+    vals = [r.get(k) for r in runs]
+    if any(v is None for v in vals):
+        print(f"{k}: not measured {vals}"); ok = False; continue
+    m = statistics.median(vals)
+    result[k] = m
+    print(f"{k:16} median {m:6.2f} ms of {[round(v, 2) for v in vals]} {'ok' if m <= budget else 'OVER 16'}")
+    ok &= m <= budget
+for r in runs:
+    if r.get("misses"): print(f"missed: {r['misses']}"); ok = False
+reaches = all(r.get("returnReachesTerminal") for r in runs)
+print(f"Return in a terminal reaches its program: {reaches}")
+ok &= reaches
+result["returnReachesTerminal"] = reaches
+result["ok"] = ok
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+sys.exit(0 if ok else 1)
+PY
+exit $(( launch || ui ))

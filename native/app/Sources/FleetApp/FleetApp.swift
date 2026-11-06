@@ -1,4 +1,4 @@
-// Fleet.app: the board window, all AppKit (Ruling P3-R6). Its launch is gated against the machine's own floor, measured
+// Fleet.app: the rail of sessions and the terminal pane (Ruling P3-R8), all AppKit (Ruling P3-R6). Its launch is gated against the machine's own floor, measured
 // in the same bench run (Ruling P3-R7): the last board on screen within floor + 60 ms of process start, the live board
 // within floor + 100 ms, the floor being this binary's `--floor` window. The absolute 120 / 200 ms are reported, not
 // gated. In order: the cached board is read, the window is made at its final frame with the board in it, drawn and
@@ -10,8 +10,11 @@
 //                               the "dev.fleet.app" subsystem mark the same points), write them as JSON, quit
 //   FleetApp --floor out.json   the floor: one empty titled window, made, ordered front, drawn and flushed the same
 //                               way, timed from process start ({"floorMs": …}), then quit. No board, no cache, no socket
-//   FleetApp --shot out.png     once the live board is drawn, capture the window (toolbar included) to a PNG and quit:
-//                               a screenshot that needs no Screen Recording permission
+//   FleetApp --shot out.png [--width <pt>] [--select <session or job id>]
+//                               once the live board is drawn (and the selected session's terminal has drawn), capture
+//                               the window (toolbar included) to a PNG and quit: a screenshot that needs no Screen
+//                               Recording permission. Nothing is selected without --select
+//   FleetApp --ui-bench out.json, --live-switch A B out.json   the interaction budgets (UIBench.swift)
 //
 // The socket is fleetd's default (`~/Library/Application Support/Fleet/fleetd.sock`) or FLEETD_SOCK. The app never
 // starts fleetd: with no socket the toolbar says "fleetd not running" and how to install it.
@@ -51,14 +54,22 @@ func socketURL() -> URL {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let bench: Bench?
+    private let uiBench = UIBench.fromArguments()
     private var model: BoardModel!
-    private var client: BoardClient!
+    private var client: BoardClient?
+    private var terms: TermClient?
+    private var backend: TermBackend!
     private var window: NSWindow!
+    private var split: NSSplitViewController!
     private var boardView: BoardController!
-    private var header: HeaderController!
+    private var pane: TerminalPaneController!
+    private var nav: Navigator!
     private let toolbar = BoardToolbar()
     private var watches: [AnyCancellable] = []
     private var ticker: Timer?
+
+    /// The rail's width range and default (Ruling P3-R8).
+    static let railMin: CGFloat = 320, railMax: CGFloat = 420, railDefault: CGFloat = 360
 
     init(bench: Bench?) {
         self.bench = bench
@@ -66,33 +77,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         bench?.mark("willFinishLaunching")
-        NSApp.mainMenu = mainMenu()
         launch()
     }
 
+    /// A run that must leave Ross's saved window frame and rail width as they are.
+    private var measuring: Bool {
+        uiBench != nil || LiveSwitch.arguments() != nil || CommandLine.arguments.contains("--width")
+    }
+
     /// Everything happens here, before AppKit finishes launching (its check-in with LaunchServices costs ~25 ms
-    /// that the board need not wait for): the window, its first paint, then the connection.
+    /// that the board need not wait for): the window, its first paint, then the connections.
     private func launch() {
         let board = Board()
-        let cache = BoardCache()
-        model = BoardModel(board: board, cache: cache, cached: cache.load())  // the last board, before connecting
+        if uiBench != nil {
+            model = BoardModel(board: board)  // synthetic: no cache, no fleetd
+            model.status = .live
+            backend = EchoBackend()
+        } else {
+            let cache = BoardCache()
+            model = BoardModel(board: board, cache: cache, cached: cache.load())  // the last board, before connecting
+            let terms = TermClient()
+            self.terms = terms
+            backend = LiveBackend(client: terms)
+        }
         bench?.mark("cache read")
 
         boardView = BoardController(model: model)
-        header = HeaderController()
-        let split = NSSplitViewController()
+        pane = TerminalPaneController(model: model, backend: backend)
+        split = NSSplitViewController()
         let side = NSSplitViewItem(sidebarWithViewController: boardView)
-        side.minimumThickness = 300
-        side.maximumThickness = 980
+        side.minimumThickness = Self.railMin
+        side.maximumThickness = Self.railMax
         side.canCollapse = true
-        let detail = NSSplitViewItem(viewController: header)
-        detail.minimumThickness = 200
+        let detail = NSSplitViewItem(viewController: pane)
+        detail.minimumThickness = 300
         split.addSplitViewItem(side)
         split.addSplitViewItem(detail)
+        nav = Navigator(model: model, rail: boardView, pane: pane)
+        nav.split = split
 
-        // The window is made at its final frame (the saved one, else 1320 × 800) and the sidebar at its width before
+        // The window is made at its final frame (the saved one, else 1320 × 800) and the rail at its width before
         // the board goes in, so nothing is laid out twice.
-        let saved = UserDefaults.standard.string(forKey: "NSWindow Frame FleetBoard").map { NSRectFromString($0) }
+        let saved = measuring ? nil : UserDefaults.standard.string(forKey: "NSWindow Frame FleetBoard").map { NSRectFromString($0) }
         let frame = saved.flatMap { $0.width > 100 ? $0 : nil }
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1320, height: 800),
@@ -104,20 +130,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.toolbar = toolbar.toolbar
         window.toolbarStyle = .unified
         split.view.frame = NSRect(origin: .zero, size: window.contentRect(forFrameRect: window.frame).size)
-        split.splitView.autosaveName = "FleetBoardSplit"
-        if UserDefaults.standard.object(forKey: "NSSplitView Subview Frames FleetBoardSplit") == nil {
-            split.splitView.setPosition(680, ofDividerAt: 0)
+        if !measuring { split.splitView.autosaveName = "FleetRail" }
+        if measuring || UserDefaults.standard.object(forKey: "NSSplitView Subview Frames FleetRail") == nil {
+            split.splitView.setPosition(Self.railDefault, ofDividerAt: 0)
         }
         window.contentViewController = split
         if let frame { window.setFrame(frame, display: false) }  // the controller's size must not win over it
-        window.setFrameAutosaveName("FleetBoard")
+        if !measuring { window.setFrameAutosaveName("FleetBoard") }
         bench?.mark("window made")
 
         // The toolbar's meters fit the room each side of the split has, now and on every resize.
-        let fit = { [weak self, weak split] in
-            guard let self, let split, split.splitView.arrangedSubviews.count == 2 else { return }
+        let fit = { [weak self] in
+            guard let self, let split = self.split, split.splitView.arrangedSubviews.count == 2 else { return }
             let panes = split.splitView.arrangedSubviews
-            self.toolbar.fit(sidebar: panes[0].frame.width, detail: panes[1].frame.width)
+            let rail = split.splitViewItems[0].isCollapsed ? 0 : panes[0].frame.width
+            self.toolbar.fit(sidebar: rail, detail: panes[1].frame.width)
+            if self.nav.switcherOpen { self.nav.switcher.place() }
         }
         watches.append(
             NotificationCenter.default.publisher(for: NSSplitView.didResizeSubviewsNotification, object: split.splitView)
@@ -142,14 +170,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 bench.livePaint()
             }
         }
+        window.makeFirstResponder(boardView.table)
 
-        header.build()
-        client = BoardClient(board: board)
-        let client = client!
+        // Once the live board is on screen (or after 300 ms, if fleetd does not answer): the menus and the keys
+        // (5–15 ms, measured), the pane's message line, the switcher and the text input system made ready. None of it
+        // is on screen at launch, so none of it holds the board back.
+        model.onRender { [weak self] cached in
+            if !cached { DispatchQueue.main.async { self?.afterLaunch() } }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.afterLaunch() }
+
+        if let uiBench, let echo = backend as? EchoBackend {
+            _ = board.apply(.snapshot(run: 1, seq: 0, machine: UIBench.machine, sessions: UIBench.sessions()))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [self] in
+                Task { await uiBench.run(window: window, model: model, nav: nav, pane: pane, backend: echo) }
+            }
+            return
+        }
+
+        let client = BoardClient(board: board)
+        self.client = client
         Task { @MainActor [weak model] in
             for await s in await client.statuses() { model?.status = s }
         }
         Task { await client.start(socket: socketURL()) }
+        if let terms { Task { await terms.start(socket: socketURL()) } }
 
         watches.append(model.$needsYou.sink { n in NSApp.dockTile.badgeLabel = n > 0 ? String(n) : nil })
         watches.append(model.$status.receive(on: RunLoop.main).sink { [weak self] _ in self?.showChrome() })
@@ -158,48 +203,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.boardView.tick() }
         }
         ticker?.tolerance = 5
+        if let (a, b, out) = LiveSwitch.arguments(), let live = backend as? LiveBackend {
+            Task { await LiveSwitch.run((a, b), out: out, window: window, model: model, nav: nav, pane: pane, backend: live) }
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--shot"), i + 1 < CommandLine.arguments.count {
-            // `--width <pt>`: the window that wide (the sidebar keeps 260 pt for the detail beside it), to check the
-            // board at a narrow window.
+            // `--width <pt>`: the window that wide (the rail at its default), to check the layout at a given width.
             if let j = CommandLine.arguments.firstIndex(of: "--width"), j + 1 < CommandLine.arguments.count,
                 let w = Double(CommandLine.arguments[j + 1])
             {
-                // Not saved: Ross's own frame and sidebar width stay as he left them.
-                window.setFrameAutosaveName("")
-                split.splitView.autosaveName = nil
                 var f = window.frame
                 f.size.width = w
                 window.setFrame(f, display: true)
-                split.splitView.setPosition(max(300, w - 260), ofDividerAt: 0)
+                split.splitView.setPosition(Self.railDefault, ofDividerAt: 0)
             }
-            shoot(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]), tries: 50)
+            // `--select <session or job id>`: that session open in the pane (the keyboard stays in the rail).
+            let select = CommandLine.arguments.firstIndex(of: "--select").flatMap {
+                $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil
+            }
+            shoot(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]), select: select, tries: 50)
         }
     }
 
-    /// The toolbar, the title and the detail, from the model (each skips the work when nothing it shows changed).
+    private var launched = false
+
+    private func afterLaunch() {
+        guard !launched else { return }
+        launched = true
+        NSApp.mainMenu = nav.mainMenu()
+        nav.installKeys()
+        pane.build()
+        nav.prepare()
+    }
+
+    /// The toolbar, the title and the pane's header, from the model (each skips the work when nothing it shows
+    /// changed).
     private func showChrome() {
         toolbar.show(meta: model.meta, machine: model.machine, status: model.status)
         let title = model.needsYou > 0 ? "Fleet (\(model.needsYou))" : "Fleet"
         if window.title != title { window.title = title }
-        header.show(model.selected, cachedAt: model.cachedAt)
+        pane.update(model.selected)
     }
 
-    /// `--shot`: waits for the live board (at most `tries` × 200 ms), lets it settle, captures the window into a PNG.
-    private func shoot(to url: URL, tries: Int) {
+    /// `--shot`: waits for the live board (at most `tries` × 200 ms), opens `select` if given and waits for its
+    /// terminal to draw, lets it settle, captures the window into a PNG.
+    private func shoot(to url: URL, select: String?, tries: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
-            guard tries > 0, model.cachedAt != nil || model.groups.isEmpty else {
-                // The first session selected, so the picture shows its header too.
-                model.selection = model.groups.first?.rows.first?.key
-                boardView.apply(cached: nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
-                    if let image = ownWindowImage(window.windowNumber) {
-                        try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: url)
+            guard tries > 0, model.board.run == nil else {
+                var wait = 1.5
+                if let select, let k = LiveSwitch.find(select, in: model) {
+                    nav.open(k, focus: false)
+                    wait = 4
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [self] in
+                    try? windowPNG(window)?.write(to: url)
+                    // The rail on its own as well (a view-drawn capture leaves the sidebar's vibrancy out).
+                    let t = boardView.table
+                    if let rep = t.bitmapImageRepForCachingDisplay(in: t.visibleRect) {
+                        t.cacheDisplay(in: t.visibleRect, to: rep)
+                        try? rep.representation(using: .png, properties: [:])?
+                            .write(to: url.deletingPathExtension().appendingPathExtension("rail.png"))
                     }
                     NSApp.terminate(nil)
                 }
                 return
             }
-            shoot(to: url, tries: tries - 1)
+            shoot(to: url, select: select, tries: tries - 1)
         }
     }
 
@@ -210,44 +278,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         model.cache?.flush()
-    }
-
-    private func mainMenu() -> NSMenu {
-        let bar = NSMenu()
-        func item(_ t: String, _ a: Selector?, _ k: String = "", _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
-            let i = NSMenuItem(title: t, action: a, keyEquivalent: k)
-            i.keyEquivalentModifierMask = mods
-            return i
-        }
-        @discardableResult func menu(_ title: String, _ items: [NSMenuItem]) -> NSMenu {
-            let m = NSMenu(title: title)
-            items.forEach(m.addItem)
-            let top = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            top.submenu = m
-            bar.addItem(top)
-            return m
-        }
-        menu("Fleet", [
-            item("About Fleet", #selector(NSApplication.orderFrontStandardAboutPanel(_:))), .separator(),
-            item("Hide Fleet", #selector(NSApplication.hide(_:)), "h"),
-            item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
-            item("Show All", #selector(NSApplication.unhideAllApplications(_:))), .separator(),
-            item("Quit Fleet", #selector(NSApplication.terminate(_:)), "q"),
-        ])
-        menu("Edit", [
-            item("Copy", #selector(NSText.copy(_:)), "c"),
-            item("Select All", #selector(NSText.selectAll(_:)), "a"),
-        ])
-        menu("View", [
-            item("Show Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]),
-            item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
-        ])
-        NSApp.windowsMenu = menu("Window", [
-            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
-            item("Zoom", #selector(NSWindow.performZoom(_:))),
-            item("Close", #selector(NSWindow.performClose(_:)), "w"),
-        ])
-        return bar
     }
 }
 
@@ -360,10 +390,31 @@ final class Floor: NSObject, NSApplicationDelegate {
     }
 }
 
+/// The window as a PNG: as the window server composites it, or, when that comes back blank (a locked screen gives
+/// every app a blank capture), as its own views draw it (no Metal layers then: run with FLEET_TERM_RENDERER=cg).
+@MainActor func windowPNG(_ window: NSWindow) -> Data? {
+    if let image = ownWindowImage(window.windowNumber), !blank(image) {
+        return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+    }
+    guard let frame = window.contentView?.superview, let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds)
+    else { return nil }
+    frame.cacheDisplay(in: frame.bounds, to: rep)
+    return rep.representation(using: .png, properties: [:])
+}
+
+/// Every sampled pixel the same.
+private func blank(_ image: CGImage) -> Bool {
+    guard let data = image.dataProvider?.data, let p = CFDataGetBytePtr(data) else { return true }
+    let n = CFDataGetLength(data), step = max(4, n / 4096 / 4 * 4)
+    let first = p[0]
+    for i in stride(from: 0, to: n, by: step) where p[i] != first { return false }
+    return true
+}
+
 /// The window as the window server composites it (vibrancy, toolbar and all). An app may read its own windows without
 /// Screen Recording permission; `CGWindowListCreateImage` is obsoleted in the SDK but still served, so it is looked up
 /// at run time. Used only by `--shot`.
-private func ownWindowImage(_ number: Int) -> CGImage? {
+func ownWindowImage(_ number: Int) -> CGImage? {
     typealias Create = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
     guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { return nil }
     let create = unsafeBitCast(sym, to: Create.self)

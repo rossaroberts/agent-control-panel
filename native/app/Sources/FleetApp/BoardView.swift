@@ -1,4 +1,4 @@
-// The board's sidebar: a view-based NSTableView with reused cells (Ruling P3-R6), grouped as `public/fleet.html` groups
+// The rail (Ruling P3-R8): a view-based NSTableView with reused cells (Ruling P3-R6), grouped as `public/fleet.html` groups
 // it (BoardModel). Each coalesced render (at most one per display frame) is turned into a row edit (BoardRows) and
 // applied as removals, insertions and in-place reloads, never a reloadData per frame. The selection is a SessionKey:
 // a row keeps it wherever it moves. Done or ended rows older than 48 h sit behind an "N older" line whose open state
@@ -11,7 +11,7 @@ import FleetKit
 @MainActor
 final class BoardController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     let model: BoardModel
-    let table = NSTableView()
+    let table = RailTable()
     private let scroll = NSScrollView()
     private let empty = label(Fonts.small, align: .center)
     private(set) var rows: [BoardRow] = []
@@ -22,6 +22,9 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
     /// Called after every applied render (the bench draws and times it); and when the selection changes.
     var onApplied: ((_ cached: Bool) -> Void)?
     var onSelect: (() -> Void)?
+    /// The user moved the selection (↑/↓, a click); and a click on a session row (it opens into its terminal).
+    var onUserSelect: (() -> Void)?
+    var onOpen: (() -> Void)?
 
     init(model: BoardModel) {
         self.model = model
@@ -137,8 +140,26 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         CATransaction.flush()
     }
 
+    /// Selects `key`'s row (if it shows) without telling `onUserSelect`: the caller is already showing it.
+    func select(_ key: SessionKey) {
+        guard let at = rows.firstIndex(where: { $0.session?.key == key }) else {
+            if table.selectedRow >= 0 { applying = true; table.deselectAll(nil); applying = false }
+            return
+        }
+        if table.selectedRow != at {
+            applying = true
+            table.selectRowIndexes([at], byExtendingSelection: false)
+            applying = false
+        }
+        table.scrollRowToVisible(at)
+    }
+
     @objc private func clicked() {
         let r = table.clickedRow
+        if r >= 0, r < rows.count, rows[r].session != nil {
+            onOpen?()
+            return
+        }
         guard r >= 0, r < rows.count, case let .older(g, _, open) = rows[r] else { return }
         if open { openOlder.remove(g) } else { openOlder.insert(g) }
         UserDefaults.standard.set(openOlder.sorted(), forKey: Self.openKey)
@@ -151,7 +172,7 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         switch rows[row] {
-        case .session: 30
+        case .session: RowLayout.height
         case .header: 34
         case .older: 26
         case .note: 20
@@ -194,5 +215,19 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         let r = table.selectedRow
         model.selection = r >= 0 && r < rows.count ? rows[r].session?.key : nil
         onSelect?()
+        onUserSelect?()
+    }
+}
+
+/// The rail's table: Return opens the selected session (also the Go menu's, while the rail has the keyboard).
+final class RailTable: NSTableView {
+    var onReturn: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76, let onReturn {
+            onReturn()
+            return
+        }
+        super.keyDown(with: event)
     }
 }

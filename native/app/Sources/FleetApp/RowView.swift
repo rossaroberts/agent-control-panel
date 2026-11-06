@@ -1,7 +1,7 @@
-// The board's cells, in AppKit (Ruling P3-R6), reused by the table: one session as one quiet monospace line, the
-// columns of `public/fleet.html` `row()` (lines 1944-1975): the state as a dot and a word, the title, the machine, the
-// account, its age, its effort and its context; the reason on hover. Then the group header with its tally, the
-// "N older" line, and a note line. The colours are fleet.html's (lines 35-43), light and dark.
+// The rail's cells, in AppKit (Ruling P3-R6), reused by the table: one session as a compact two-line row (Ruling
+// P3-R8, like fleet.html's rail): the state dot and the title; then the state word, its age and its account; the
+// reason on hover. Then the group header with its tally, the "N older" line, and a note line. The colours are
+// fleet.html's (lines 35-43), light and dark.
 
 import AppKit
 import FleetKit
@@ -152,8 +152,9 @@ final class RunsView: NSView {
         }
     }
 
+    /// Never zero wide: a toolbar item whose view measures zero is logged on every layout.
     override var intrinsicContentSize: NSSize {
-        NSSize(width: runs.reduce(0) { $0 + width($1) }, height: 18)
+        NSSize(width: max(1, runs.reduce(0) { $0 + width($1) }), height: 18)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -183,42 +184,20 @@ final class RunsView: NSView {
     override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
 }
 
-/// fleet.html `.dot`: filled in the state's colour; waiting is a ring; done and ended are quiet and faded.
-final class DotView: NSView {
-    var state: SessionState = .waiting { didSet { if state != oldValue { needsDisplay = true } } }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let r = bounds.insetBy(dx: 0.75, dy: 0.75)
-        let p = NSBezierPath(ovalIn: r)
-        if state == .waiting {
-            Palette.quiet.setStroke()
-            p.lineWidth = 1.5
-            p.stroke()
-        } else {
-            Palette.of(state).withAlphaComponent(state.order >= 4 ? 0.7 : 1).setFill()
-            p.fill()
-        }
-    }
-
-    override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
-}
-
-/// One session row, drawn rather than built from text fields: the table makes and lays out about thirty of these for a
-/// window, and one view that draws eight strings is far cheaper than eight NSTextFields (Ruling P3-R6's launch budget).
+/// One rail row (Ruling P3-R8), drawn rather than built from text fields: line 1 the state dot and the title, line 2
+/// the state word, age and account. Each line is clipped to its rect and cut with "…" (RowLayout): nothing overlaps.
+/// The table makes and lays out about thirty of these for a window, and one view that draws two strings is far cheaper
+/// than a stack of NSTextFields (Ruling P3-R6's launch budget).
 final class RowCell: NSTableCellView {
     static let id = NSUserInterfaceItemIdentifier("row")
     private var session: Session?
     private var ageText = ""
 
-    private static func style(_ align: NSTextAlignment) -> NSParagraphStyle {
+    private static let leftStyle: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()
         p.lineBreakMode = .byTruncatingTail
-        p.alignment = align
         return p
-    }
-
-    private static let leftStyle = style(.left)
-    private static let rightStyle = style(.right)
+    }()
 
     init() {
         super.init(frame: .zero)
@@ -249,22 +228,17 @@ final class RowCell: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         guard let s = session else { return }
         let on = backgroundStyle == .emphasized ? NSColor.alternateSelectedControlTextColor : nil
-        let h = bounds.height, lh: CGFloat = 16, y = (h - lh) / 2
-        let cols = RowLayout.frames(width: bounds.width, height: h)
-        // Each string is clipped to its own column and cut with "…": nothing draws outside its column.
-        func text(_ c: RowColumn, _ t: String, _ f: NSFont, _ colour: NSColor, _ p: NSParagraphStyle = RowCell.leftStyle) {
-            guard !t.isEmpty, let r = cols[c] else { return }
+        let parts = RowLayout.frames(width: bounds.width, height: bounds.height)
+        func line(_ c: RowColumn, _ text: NSAttributedString) {
+            guard let r = parts[c] else { return }
             NSGraphicsContext.saveGraphicsState()
             r.clip()
-            (t as NSString).draw(
-                with: NSRect(x: r.minX, y: y, width: r.width, height: lh),
-                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                attributes: [.font: f, .foregroundColor: on ?? colour, .paragraphStyle: p])
+            text.draw(with: r, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
             NSGraphicsContext.restoreGraphicsState()
         }
         // fleet.html `.dot`: filled in the state's colour; waiting is a ring; done and ended are quiet and faded.
-        if let d = cols[.dot] {
-            let dot = NSBezierPath(ovalIn: NSRect(x: d.minX, y: (h - 7) / 2, width: 7, height: 7).insetBy(dx: 0.75, dy: 0.75))
+        if let d = parts[.dot] {
+            let dot = NSBezierPath(ovalIn: d.insetBy(dx: 0.75, dy: 0.75))
             if s.state == .waiting {
                 (on ?? Palette.quiet).setStroke()
                 dot.lineWidth = 1.5
@@ -274,14 +248,22 @@ final class RowCell: NSTableCellView {
                 dot.fill()
             }
         }
-        let grey = NSColor.secondaryLabelColor
-        text(.state, s.state.word, s.state.order <= 2 ? Fonts.word : Fonts.small, Palette.of(s.state))
-        text(.title, Words.title(s), Fonts.row, s.live ? .labelColor : grey)
-        text(.machine, s.key.machine, Fonts.small, grey)
-        text(.account, s.account ?? "", Fonts.small, grey)
-        text(.age, ageText, Fonts.small, grey, Self.rightStyle)
-        text(.effort, s.effort ?? "", Fonts.small, grey)
-        text(.context, Words.tokens(s.contextTokens), Fonts.small, grey, Self.rightStyle)
+        let grey = on ?? NSColor.secondaryLabelColor
+        line(.title, NSAttributedString(string: Words.title(s), attributes: [
+            .font: Fonts.row, .foregroundColor: on ?? (s.live ? NSColor.labelColor : grey),
+            .paragraphStyle: Self.leftStyle,
+        ]))
+        let info = NSMutableAttributedString(string: s.state.word, attributes: [
+            .font: s.state.order <= 2 ? Fonts.word : Fonts.small, .foregroundColor: on ?? Palette.of(s.state),
+            .paragraphStyle: Self.leftStyle,
+        ])
+        let rest = [ageText, s.account ?? ""].filter { !$0.isEmpty }
+        if !rest.isEmpty {
+            info.append(NSAttributedString(string: " · " + rest.joined(separator: " · "), attributes: [
+                .font: Fonts.small, .foregroundColor: grey, .paragraphStyle: Self.leftStyle,
+            ]))
+        }
+        line(.info, info)
     }
 
     /// On the selection's accent fill every mark is drawn in the selected-text colour, so it stays legible.
