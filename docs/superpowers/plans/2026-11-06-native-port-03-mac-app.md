@@ -189,7 +189,11 @@ Wire contract: `native/PROTOCOL.md`.
 
 **Interfaces:**
 - Produces:
-  - The detail pane: a header (title, state word, reason, machine, account, branch if known) above a SwiftTerm `TerminalView` fed by `TermClient`.
+  - **Layout (Ruling P3-R8; Ross: "the terminal pane is the key"):**
+    - The window becomes a narrow left rail, about 320–420 pt, that the user can resize and that remembers its width.
+    - The rail replaces the wide table rows with compact two-line rows. Line 1 is the state dot and the title. Line 2 is the state word, age and account, truncated, never overlapping.
+    - The terminal is the main area and fills the rest of the window.
+  - The main area: a slim header strip (title, state word, reason) above a SwiftTerm `TerminalView` fed by `TermClient`.
   - Keys go to the pty. The pty is resized on view resize, debounced to one per frame.
   - The pane can take the whole window (⌘⇧F), as "Expand" does today.
   - App-side warm views: the last 6 opened Claude terminals keep their `TerminalView` alive, so a switch is a view swap and the daemon's warm pool is the second layer. Codex terminals close when left, per plan 2.
