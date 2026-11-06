@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_model::types::{Delta, Engine, Session, SessionKey, State};
-use fleet_model::wire::{read_frame, write_frame, Frame, MAX_FRAME, PROTO};
+use fleet_model::wire::{read_frame, write_frame, Frame, Role, MAX_FRAME, PROTO};
 use fleetd::client::Client;
 use fleetd::serve::{bind, serve};
 use fleetd::store::Store;
@@ -37,6 +37,7 @@ fn sess(n: usize, doing: &str) -> Session {
         started_at: None,
         hook_at: None,
         written_at: None,
+        job_id: None,
     }
 }
 
@@ -171,6 +172,7 @@ async fn since_from_another_run_gets_a_snapshot() {
         proto: PROTO,
         since: Some(2),
         run: None,
+        role: Role::Board,
     };
     write_frame(&mut st, &hello).await.unwrap();
     assert!(matches!(
@@ -181,7 +183,7 @@ async fn since_from_another_run_gets_a_snapshot() {
 
 /// A client of proto 1 (whose Hello has no `run`, so does not decode as proto 2's) is told the version, by name.
 #[tokio::test]
-async fn a_proto_1_hello_gets_an_error_naming_proto_2() {
+async fn a_proto_1_hello_gets_an_error_naming_proto_3() {
     use tokio::io::AsyncWriteExt;
     let s = Server::start(1);
     let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
@@ -191,7 +193,7 @@ async fn a_proto_1_hello_gets_an_error_naming_proto_2() {
         .unwrap();
     match read_frame(&mut st, MAX_FRAME).await.unwrap() {
         Frame::Error { message } => {
-            assert_eq!(message, "protocol 1 not supported; this is 2")
+            assert_eq!(message, "protocol 1 not supported; this is proto 3")
         }
         f => panic!("{f:?}"),
     }
@@ -382,4 +384,52 @@ async fn a_client_that_falls_behind_is_sent_a_fresh_snapshot() {
         saw_snapshot,
         "a client {writes} deltas behind gets a snapshot"
     );
+}
+
+/// A proto-2 Hello (no `role`) is told, by name, which protocol this daemon speaks.
+#[tokio::test]
+async fn a_proto_2_hello_gets_an_error_naming_proto_3() {
+    use tokio::io::AsyncWriteExt;
+    let s = Server::start(1);
+    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
+    // Proto 2's Hello { proto: 2, since: Some(5), run: None }, length-prefixed.
+    st.write_all(&[5, 0, 0, 0, 0x00, 0x02, 0x01, 0x05, 0x00])
+        .await
+        .unwrap();
+    match read_frame(&mut st, MAX_FRAME).await.unwrap() {
+        Frame::Error { message } => assert!(message.contains("proto 3"), "{message}"),
+        f => panic!("{f:?}"),
+    }
+}
+
+/// A Hello of this version whose bytes are wrong is a malformed Hello, not an unsupported version.
+#[tokio::test]
+async fn a_malformed_current_proto_hello_says_so() {
+    use tokio::io::AsyncWriteExt;
+    let s = Server::start(1);
+    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
+    // variant 0, proto 3, then nothing
+    st.write_all(&[2, 0, 0, 0, 0x00, 0x03]).await.unwrap();
+    match read_frame(&mut st, MAX_FRAME).await.unwrap() {
+        Frame::Error { message } => assert_eq!(message, "malformed Hello"),
+        f => panic!("{f:?}"),
+    }
+}
+
+/// A Terminals connection is understood but not served yet; a board connection is unaffected.
+#[tokio::test]
+async fn a_terminals_hello_is_answered_with_an_error_for_now() {
+    let s = Server::start(2);
+    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
+    let hello = Frame::Hello {
+        proto: PROTO,
+        since: None,
+        run: None,
+        role: Role::Terminals,
+    };
+    write_frame(&mut st, &hello).await.unwrap();
+    match read_frame(&mut st, MAX_FRAME).await.unwrap() {
+        Frame::Error { message } => assert_eq!(message, "terminals not available yet"),
+        f => panic!("{f:?}"),
+    }
 }

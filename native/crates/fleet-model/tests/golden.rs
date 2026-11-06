@@ -6,8 +6,8 @@
 
 use std::path::PathBuf;
 
-use fleet_model::types::{Delta, Engine, Session, SessionKey, State};
-use fleet_model::wire::{decode, encode, hello_proto, Frame, PROTO};
+use fleet_model::types::{AttachTarget, Delta, Engine, Session, SessionKey, State};
+use fleet_model::wire::{decode, encode, hello_proto, Frame, Role, PROTO};
 
 fn key(sid: &str) -> SessionKey {
     SessionKey {
@@ -40,6 +40,7 @@ fn full() -> Session {
         started_at: Some(1_793_900_000_000),
         hook_at: Some(1_793_966_400_500),
         written_at: Some(1_793_966_401_250),
+        job_id: Some("a1b2c3d4".into()),
     }
 }
 
@@ -66,6 +67,7 @@ fn bare() -> Session {
         started_at: None,
         hook_at: None,
         written_at: None,
+        job_id: None,
     }
 }
 
@@ -91,7 +93,7 @@ fn frames() -> Vec<(&'static str, Frame)> {
         (
             "error",
             Frame::Error {
-                message: "protocol 1 not supported; this is 2".into(),
+                message: "protocol 2 not supported; this is proto 3".into(),
             },
         ),
         (
@@ -100,6 +102,90 @@ fn frames() -> Vec<(&'static str, Frame)> {
                 proto: PROTO,
                 since: Some(300),
                 run: Some(0x0123_4567_89ab_cdef),
+                role: Role::Board,
+            },
+        ),
+        (
+            "hello-terminals",
+            Frame::Hello {
+                proto: PROTO,
+                since: None,
+                run: None,
+                role: Role::Terminals,
+            },
+        ),
+        (
+            "term-open-claude",
+            Frame::TermOpen {
+                r#ref: 7,
+                target: AttachTarget::Claude {
+                    profile: "default".into(),
+                    job: "a1b2c3d4".into(),
+                },
+                cols: 100,
+                rows: 30,
+            },
+        ),
+        (
+            "term-open-codex",
+            Frame::TermOpen {
+                r#ref: 8,
+                target: AttachTarget::Codex {
+                    profile: "codex".into(),
+                    session_id: "0192f3a4-5b6c-7d8e-9f01-23456789abcd".into(),
+                    cwd: "/tmp/fleetd-fixture".into(),
+                },
+                cols: 120,
+                rows: 40,
+            },
+        ),
+        (
+            "term-open-trust",
+            Frame::TermOpen {
+                r#ref: 9,
+                target: AttachTarget::Trust {
+                    profile: "default".into(),
+                    dir: "/tmp/fleetd-fixture".into(),
+                },
+                cols: 80,
+                rows: 24,
+            },
+        ),
+        (
+            "term-in",
+            Frame::TermIn {
+                r#ref: 7,
+                data: b"ls\r".to_vec(),
+            },
+        ),
+        (
+            "term-size",
+            Frame::TermSize {
+                r#ref: 7,
+                cols: 132,
+                rows: 43,
+            },
+        ),
+        ("term-close", Frame::TermClose { r#ref: 7 }),
+        (
+            "term-out",
+            Frame::TermOut {
+                r#ref: 7,
+                data: b"\x1b[32mok\x1b[0m\r\n".to_vec(),
+            },
+        ),
+        (
+            "term-end",
+            Frame::TermEnd {
+                r#ref: 7,
+                error: None,
+            },
+        ),
+        (
+            "term-end-error",
+            Frame::TermEnd {
+                r#ref: 8,
+                error: Some("It is open in another Fleet terminal already.".into()),
             },
         ),
     ]

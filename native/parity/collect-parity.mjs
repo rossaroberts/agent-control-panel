@@ -58,6 +58,7 @@ const markerLines = (fillers) => [ask(0, 'Mark the far line'), reply(1, { top: {
   ...Array.from({ length: fillers }, (_, k) => filler(2 + k))];
 const FAR = 420; // over 400 KiB of tool results
 
+// `job_id` (proto 3) is Node-less: it is deliberately not compared.
 const FIELDS = ['profile', 'sessionId', 'engine', 'state', 'live', 'stage', 'model', 'contextTokens', 'lastAt', 'said', 'doing'];
 const sid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const jobId = (n) => n.toString(16).padStart(8, '0');

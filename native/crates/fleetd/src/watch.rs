@@ -644,7 +644,12 @@ fn on_transcripts(sh: &Arc<Shared>, items: Vec<(usize, String, PathBuf)>) {
         let mut out = vec![];
         for (pi, sid) in &touched {
             if let Some(s) = f.claude_session(*pi, sid, now) {
-                if s.state == State::NeedsYou {
+                // A roster that already says busy has the permission given (Ruling R25): nothing to ask it.
+                let busy = f.profiles[*pi]
+                    .sessions
+                    .get(sid)
+                    .is_some_and(|c| c.row.status.as_deref() == Some("busy"));
+                if s.state == State::NeedsYou && !busy {
                     needs_you.insert(*pi);
                 }
                 out.push(s);

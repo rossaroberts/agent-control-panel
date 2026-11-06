@@ -76,6 +76,25 @@ pub struct Session {
     pub started_at: Option<i64>,
     pub hook_at: Option<i64>,
     pub written_at: Option<i64>,
+    /// The roster's 8-hex `id` of a background job: what `claude attach` takes, so a client can build an
+    /// `AttachTarget::Claude` from a board row. `None` for an interactive session.
+    pub job_id: Option<String>,
+}
+
+/// What a terminal attaches to (the wire form of `fleet/term.mjs`'s `command()` inputs). The strings are validated by
+/// the server before they reach a command line.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AttachTarget {
+    /// `claude attach <job>` under a Claude Code profile.
+    Claude { profile: String, job: String },
+    /// `codex resume <session_id>` in `cwd`, under a Codex profile.
+    Codex {
+        profile: String,
+        session_id: String,
+        cwd: String,
+    },
+    /// A shell-less `claude` in `dir`, to accept the folder-trust prompt.
+    Trust { profile: String, dir: String },
 }
 
 /// What changed in the board since the previous delta: the sessions whose serialized form changed, and the sessions that

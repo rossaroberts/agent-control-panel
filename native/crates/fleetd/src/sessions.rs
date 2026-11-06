@@ -254,6 +254,7 @@ impl Fleet {
             started_at: c.row.started_at,
             hook_at: c.hook.as_ref().map(|h| h.at),
             written_at: facts.written_at,
+            job_id: job_id(&c.row),
         })
     }
 
@@ -913,4 +914,11 @@ pub fn reconcile_read_with(
         dropped_rollouts,
         held,
     }
+}
+
+/// The roster `id` of a background job (8 lowercase hex digits), which `claude attach` takes.
+fn job_id(row: &RosterRow) -> Option<String> {
+    let id = row.id.as_deref()?;
+    let hex8 = id.len() == 8 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (hex8 && row.kind.as_deref() == Some("background")).then(|| id.to_string())
 }

@@ -133,7 +133,7 @@ fn run_watch() {
                 } => println!("{}", out::snapshot(run, seq, &machine, &sessions)),
                 Frame::Delta(d) => println!("{}", out::delta(&d)),
                 Frame::Error { message } => return Err(std::io::Error::other(message)),
-                Frame::Hello { .. } => {}
+                _ => {}
             }
         }
     });

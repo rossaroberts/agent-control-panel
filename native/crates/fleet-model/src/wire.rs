@@ -10,10 +10,26 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::types::{Delta, Session};
+use crate::types::{AttachTarget, Delta, Session};
 
-/// 2: `run` in `Hello` and `Snapshot` (Ruling R24).
-pub const PROTO: u16 = 2;
+/// 2: `run` in `Hello` and `Snapshot` (Ruling R24). 3: `role` in `Hello`, the terminal frames, `job_id` in `Session`.
+pub const PROTO: u16 = 3;
+
+/// What a connection is for, said in its `Hello`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// The board: a snapshot, then deltas.
+    Board,
+    /// Terminals: the client opens and drives ptys with the `Term*` frames.
+    Terminals,
+}
+
+/// The most a `TermIn` carries.
+pub const TERM_IN_MAX: usize = 64 * 1024;
+
+/// The most a frame of a Terminals connection's client can weigh: a full `TermIn` plus its framing, and a `TermOpen`
+/// with room to spare.
+pub const TERM_CLIENT_MAX: u32 = TERM_IN_MAX as u32 + 1024;
 
 /// The biggest frame a reader accepts, so a corrupt length cannot ask for gigabytes.
 pub const MAX_FRAME: u32 = 64 * 1024 * 1024;
@@ -27,6 +43,7 @@ pub enum Frame {
         proto: u16,
         since: Option<u64>,
         run: Option<u64>,
+        role: Role,
     },
     /// The whole board. `run` is the daemon run (random at each start): a `seq` means something only within one run.
     Snapshot {
@@ -38,6 +55,38 @@ pub enum Frame {
     Delta(Delta),
     Error {
         message: String,
+    },
+    /// Client to server on a Terminals connection: open a terminal on `target`, named `ref` by the client.
+    TermOpen {
+        r#ref: u32,
+        target: AttachTarget,
+        cols: u16,
+        rows: u16,
+    },
+    /// Client to server: keystrokes for terminal `ref` (at most `TERM_IN_MAX` bytes).
+    TermIn {
+        r#ref: u32,
+        data: Vec<u8>,
+    },
+    /// Client to server: the terminal's window changed size.
+    TermSize {
+        r#ref: u32,
+        cols: u16,
+        rows: u16,
+    },
+    /// Client to server: release terminal `ref` (ends the attach only).
+    TermClose {
+        r#ref: u32,
+    },
+    /// Server to client: output of terminal `ref`.
+    TermOut {
+        r#ref: u32,
+        data: Vec<u8>,
+    },
+    /// Server to client: terminal `ref` is over (`error` says why when it could not open or broke).
+    TermEnd {
+        r#ref: u32,
+        error: Option<String>,
     },
 }
 

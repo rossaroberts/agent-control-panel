@@ -439,6 +439,7 @@ fn since_reaches_back_4096_deltas() {
         started_at: None,
         hook_at: None,
         written_at: None,
+        job_id: None,
     };
     assert_eq!(store.since(0), Some(Delta::default()));
     for i in 0..5000 {
@@ -1297,4 +1298,54 @@ async fn a_granted_permission_reads_working_once_quiet_with_no_write() {
     eprintln!("granted, no write -> working: {late} ms after quiet passed 3 s");
     assert_eq!(s.reason, "working: roster busy");
     assert!((0..500).contains(&late), "{late} ms");
+}
+
+/// Ruling R25: a granted permission leaves the session NeedsYou by its hook while the roster says busy, and its
+/// transcript grows every 200 ms: those writes must not ask the roster again and again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_roster_row_is_not_nudged_by_transcript_writes() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    let f = home.transcript(0);
+    append(
+        &f,
+        &json!({"type":"user","timestamp":"2026-11-06T11:59:00.000Z",
+                "message":{"role":"user","content":"Run the long tool"}}),
+    );
+    home.roster(std::process::id(), "busy", true);
+    home.hook(0, "PermissionRequest", None);
+    let (_store, h, _rx) = home.start();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = h.roster_runs();
+    for i in 0..50 {
+        append(&f, &assistant(&format!("progress {i}")));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let runs = h.roster_runs() - before;
+    assert!(runs <= 2, "the roster ran {runs} times during the tool run");
+}
+
+/// A background job's Session carries its roster id (what `claude attach` takes); an interactive session's has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_job_carries_its_roster_id_as_job_id() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(2);
+    let s = home.stand_in();
+    let rows = json!([
+        {"id": "a1b2c3d4", "sessionId": sid(0), "pid": std::process::id(), "kind": "background", "status": "idle",
+         "name": "fixture 0", "cwd": CWD, "startedAt": STARTED},
+        {"id": "a1b2c3d5", "sessionId": sid(1), "pid": std::process::id(), "kind": "interactive", "status": "idle",
+         "name": "fixture 1", "cwd": CWD, "startedAt": STARTED},
+    ]);
+    fs::write(s.join("all.json"), rows.to_string()).unwrap();
+    let (store, _h, _rx) = home.start();
+    let (_, sessions) = store.snapshot();
+    let by = |n: usize| {
+        sessions
+            .iter()
+            .find(|x| x.key.session_id == sid(n))
+            .unwrap()
+    };
+    assert_eq!(by(0).job_id.as_deref(), Some("a1b2c3d4"));
+    assert_eq!(by(1).job_id, None);
 }

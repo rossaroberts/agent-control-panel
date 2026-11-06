@@ -807,6 +807,7 @@ impl RolloutView {
             started_at: m.started_at,
             hook_at: None,
             written_at: written,
+            job_id: None,
         }
     }
 }
@@ -868,6 +869,7 @@ fn unreadable(f: &Path) -> Session {
         started_at: None,
         hook_at: None,
         written_at: None,
+        job_id: None,
     }
 }
 
@@ -923,5 +925,6 @@ pub fn muse_session(pid: u32, cwd: Option<&str>, since: i64, args: &str) -> Sess
         started_at: Some(since),
         hook_at: None,
         written_at: None,
+        job_id: None,
     }
 }

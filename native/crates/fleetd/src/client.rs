@@ -3,7 +3,7 @@
 use std::io;
 use std::path::Path;
 
-use fleet_model::wire::{read_frame, write_frame, Frame, MAX_FRAME, PROTO};
+use fleet_model::wire::{read_frame, write_frame, Frame, Role, MAX_FRAME, PROTO};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
@@ -30,6 +30,7 @@ impl Client {
             proto,
             since: resume.map(|r| r.1),
             run: resume.map(|r| r.0),
+            role: Role::Board,
         };
         write_frame(&mut w, &hello).await?;
         Ok(Client { r, _w: w })

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_model::wire::{decode, hello_proto, read_body, write_frame, Frame, PROTO};
+use fleet_model::wire::{decode, hello_proto, read_body, write_frame, Frame, Role, PROTO};
 
 /// The most a Hello can weigh.
 const HELLO_MAX: u32 = 4096;
@@ -178,12 +178,27 @@ async fn handle(stream: UnixStream, store: Arc<Store>, machine: String) -> io::R
         _ => hello_proto(&body),
     };
     let since = match (hello, proto) {
+        (
+            Ok(Frame::Hello {
+                role: Role::Terminals,
+                ..
+            }),
+            Some(PROTO),
+        ) => {
+            let message = "terminals not available yet".to_string();
+            return send(&mut w, &Frame::Error { message }).await;
+        }
         // `since` counts within one run only (R24): from another run, or with no run, it gets a snapshot.
         (Ok(Frame::Hello { since, run, .. }), Some(PROTO)) => {
             since.filter(|_| run == Some(store.run()))
         }
+        // This version's Hello, but its bytes are not: not a version problem.
+        (Err(_), Some(PROTO)) => {
+            let message = "malformed Hello".to_string();
+            return send(&mut w, &Frame::Error { message }).await;
+        }
         (_, Some(proto)) => {
-            let message = format!("protocol {proto} not supported; this is {PROTO}");
+            let message = format!("protocol {proto} not supported; this is proto {PROTO}");
             return send(&mut w, &Frame::Error { message }).await;
         }
         _ => {
