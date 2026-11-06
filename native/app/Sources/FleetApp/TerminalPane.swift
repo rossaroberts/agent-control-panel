@@ -27,63 +27,93 @@ import SwiftTerm
     func input(_ ref: UInt32, _ data: Data)
     func size(_ ref: UInt32, cols: UInt16, rows: UInt16)
     func close(_ ref: UInt32)
-    /// Told whether the connection is up, now and at every change.
-    var onConnection: ((Bool) -> Void)? { get set }
+    /// Told whether a machine's Terminals connection is up, now and at every change: the machine (nil when the
+    /// backend has one connection for every terminal), and whether it is up.
+    var onConnection: ((_ machine: String?, _ up: Bool) -> Void)? { get set }
 }
 
-/// The app's backend: one TermClient. Every operation goes through one ordered queue, so keystrokes, sizes and closes
-/// reach the daemon in the order they were made.
+/// The app's backend: one TermClient per machine (Ruling A-R1: a remote session's terminal goes through its machine's
+/// endpoint, over TCP, with nothing added between the keystroke and the socket). Every operation goes through one
+/// ordered queue, so keystrokes, sizes and closes reach each daemon in the order they were made.
 @MainActor final class LiveBackend: TermBackend {
-    let client: TermClient
     private enum Op {
-        case open(UInt32, AttachTarget, UInt16, UInt16, PaneTerm)
-        case input(UInt32, Data)
-        case size(UInt32, UInt16, UInt16)
-        case close(UInt32)
+        case open(UInt32, AttachTarget, UInt16, UInt16, PaneTerm, TermClient)
+        case input(UInt32, Data, TermClient)
+        case size(UInt32, UInt16, UInt16, TermClient)
+        case close(UInt32, TermClient)
     }
 
     private let ops: AsyncStream<Op>.Continuation
+    /// The client of the machine whose session a terminal is: refs are the pane's, unique across every client.
+    private let route: (String) -> TermClient?
+    private var clientOf: [UInt32: TermClient] = [:]
+    private var watched: Set<ObjectIdentifier> = []
     /// Bytes sent to programs: keystrokes and the terminal's replies to live queries (the live check counts them).
     private(set) var bytesTyped = 0
-    var onConnection: ((Bool) -> Void)?
+    var onConnection: ((_ machine: String?, _ up: Bool) -> Void)?
 
-    init(client: TermClient) {
-        self.client = client
+    /// One client for every terminal.
+    convenience init(client: TermClient) {
+        self.init { _ in client }
+        watch(client) { nil }
+    }
+
+    /// `route` gives the client of a machine; `watch` each client to hear of its connection.
+    init(route: @escaping (String) -> TermClient?) {
+        self.route = route
         let (stream, ops) = AsyncStream<Op>.makeStream()
         self.ops = ops
-        Task { @MainActor [weak self] in
-            for await up in await client.connections() { self?.onConnection?(up) }
-        }
         Task { @MainActor in
             for await op in stream {
                 switch op {
-                case let .open(ref, target, cols, rows, term):
+                case let .open(ref, target, cols, rows, term, client):
                     let t = await client.open(ref, target: target, cols: cols, rows: rows)
                     term.drain(t)
-                case let .input(ref, data):
+                case let .input(ref, data, client):
                     // Refused while the connection is down and 64 KiB is held already (A-R2): said, not dropped
                     // silently.
                     if await client.input(ref, data) == .inputFull { NSSound.beep() }
-                case let .size(ref, cols, rows):
+                case let .size(ref, cols, rows, client):
                     await client.size(ref, cols: cols, rows: rows)
-                case let .close(ref):
+                case let .close(ref, client):
                     await client.close(ref)
                 }
             }
         }
     }
 
+    /// Follows `client`'s connection, told as `machine()`'s (its name once its board has one).
+    func watch(_ client: TermClient, machine: @escaping @MainActor () -> String?) {
+        guard watched.insert(ObjectIdentifier(client)).inserted else { return }
+        Task { @MainActor [weak self] in
+            for await up in await client.connections() { self?.onConnection?(machine(), up) }
+        }
+    }
+
     func open(_ term: PaneTerm, target: AttachTarget, cols: UInt16, rows: UInt16) {
-        ops.yield(.open(term.ref, target, cols, rows, term))
+        guard let client = route(term.key.machine) else {
+            term.ended("\(term.key.machine) is not one of this Mac's machines")
+            return
+        }
+        clientOf[term.ref] = client
+        ops.yield(.open(term.ref, target, cols, rows, term, client))
     }
 
     func input(_ ref: UInt32, _ data: Data) {
+        guard let client = clientOf[ref] else { return }
         bytesTyped += data.count
-        ops.yield(.input(ref, data))
+        ops.yield(.input(ref, data, client))
     }
 
-    func size(_ ref: UInt32, cols: UInt16, rows: UInt16) { ops.yield(.size(ref, cols, rows)) }
-    func close(_ ref: UInt32) { ops.yield(.close(ref)) }
+    func size(_ ref: UInt32, cols: UInt16, rows: UInt16) {
+        guard let client = clientOf[ref] else { return }
+        ops.yield(.size(ref, cols, rows, client))
+    }
+
+    func close(_ ref: UInt32) {
+        guard let client = clientOf.removeValue(forKey: ref) else { return }
+        ops.yield(.close(ref, client))
+    }
 }
 
 @MainActor enum TermTheme {
@@ -416,26 +446,31 @@ final class TerminalPaneController: NSViewController {
     private var catchUp: DispatchWorkItem?
     /// Called when a terminal's phase moves or output is fed (the bench).
     var onFed: (() -> Void)?
-    /// Whether the Terminals connection is up (M2: "reconnecting…" follows it, not only the board's).
-    private(set) var termConnected = true
+    /// Per machine (nil: the one connection of a single-connection backend), whether its Terminals connection is up
+    /// (M2: "reconnecting…" follows it, not only the board's), whether it has been up, and whether it went down since.
+    private var termUp: [String?: Bool] = [:]
+    private var termEverUp: Set<String?> = []
+    private var wasDown: Set<String?> = []
 
     init(model: BoardModel, backend: TermBackend) {
         self.model = model
         self.backend = backend
         super.init(nibName: nil, bundle: nil)
-        backend.onConnection = { [weak self] up in self?.connection(up) }
+        backend.onConnection = { [weak self] machine, up in self?.connection(machine, up) }
     }
 
-    private var wasDown = false
-    private var termEverUp = false
+    /// Whether the shown terminal's connection is up (the checks).
+    var termConnected: Bool { shownKey.map { termIsUp($0.machine) } ?? true }
 
-    private func connection(_ up: Bool) {
-        termConnected = up
-        if up { termEverUp = true }
-        if !up, termEverUp { wasDown = true }
-        if up, wasDown {
-            wasDown = false
-            for t in terms.values { t.reopened() }
+    private func termIsUp(_ machine: String) -> Bool { termUp[machine] ?? termUp[nil] ?? true }
+    private func termWasUp(_ machine: String) -> Bool { termEverUp.contains(machine) || termEverUp.contains(nil) }
+
+    private func connection(_ machine: String?, _ up: Bool) {
+        termUp[machine] = up
+        if up { termEverUp.insert(machine) }
+        if !up, termEverUp.contains(machine) { wasDown.insert(machine) }
+        if up, wasDown.remove(machine) != nil {
+            for t in terms.values where machine == nil || t.key.machine == machine { t.reopened() }
         }
         refreshStatus()
     }
@@ -500,7 +535,10 @@ final class TerminalPaneController: NSViewController {
     }
 
     /// What `s` offers in the pane.
-    func attach(_ s: Session) -> Attach { Attach.of(s, local: model.machine) }
+    /// A session of any machine on the board opens through that machine's own fleetd (Ruling A-R1).
+    func attach(_ s: Session) -> Attach {
+        Attach.of(s, local: model.merged?.line(of: s.key.machine) != nil ? s.key.machine : model.machine)
+    }
 
     /// Shows `s` (nil: none). A terminal already open for it is swapped in now. Otherwise, a Claude job opens now when
     /// `open` (an explicit open: Return, a click, ⌘K, ⌘1–9, history), or after the selection settles for 300 ms (↑/↓
@@ -700,11 +738,18 @@ final class TerminalPaneController: NSViewController {
 
     private func refreshStatus() {
         let next: (String, NSColor)?
-        switch model.status {
-        case _ where shownTerm != nil && !termConnected && termEverUp: next = ("reconnecting…", Palette.orange)
+        // The connection of the shown session's machine: this Mac's fleetd, or another machine's over the tailnet.
+        let machine = shownKey?.machine
+        let remote = machine != nil && model.merged != nil && machine != model.machine
+        let status = machine.map { model.status(of: $0) } ?? model.status
+        switch status {
+        case _ where shownTerm != nil && machine.map({ !termIsUp($0) && termWasUp($0) }) == true:
+            next = ("reconnecting…", Palette.orange)
         // The board's status starts as reconnecting: before its first Snapshot it is "connecting…" (below).
-        case .reconnecting where shownTerm != nil && model.board.run != nil: next = ("reconnecting…", Palette.orange)
-        case .absent where shownTerm != nil: next = ("fleetd not running", Palette.red)
+        case .reconnecting where shownTerm != nil && model.cachedAt == nil && model.board.run != nil:
+            next = ("reconnecting…", Palette.orange)
+        case .absent where shownTerm != nil:
+            next = (remote ? "\(machine ?? "") unreachable" : "fleetd not running", Palette.red)
         case let .refused(why) where shownTerm != nil: next = ("fleetd refused: \(why)", Palette.red)
         default:
             switch shownTerm?.phase {

@@ -1,7 +1,8 @@
 // Which sessions a terminal opens on, as `public/fleet.html` decides it (`attachable`, `codexTerm`, lines 1050-1055):
 // a live Claude Code background job (an 8-hex job id) attaches with `claude attach`; a Codex thread that is closed
 // resumes with `codex resume`, but only when asked (it takes the thread up and carries its work on); nothing else has a
-// terminal, and the pane says why. fleetd attaches only on its own machine.
+// terminal, and the pane says why. fleetd attaches only on its own machine: a session of another machine opens through
+// that machine's fleetd (the caller passes its machine as `local`), and not while it cannot be reached.
 
 public enum Attach: Equatable, Sendable {
     /// Opens when shown.
@@ -13,6 +14,9 @@ public enum Attach: Equatable, Sendable {
 
     public static func of(_ s: Session, local: String?) -> Attach {
         if let local, s.key.machine != local { return .none("It runs on \(s.key.machine): open it there.") }
+        if s.state == .unreachable {
+            return .none("\(s.key.machine) cannot be reached now: its terminal opens here when it is back.")
+        }
         switch s.engine {
         case .claude:
             guard let job = s.jobId, isJob(job) else {

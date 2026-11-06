@@ -23,7 +23,7 @@ import FleetKit
 @MainActor final class EchoBackend: TermBackend {
     private var terms: [UInt32: PaneTerm] = [:]
     private(set) var typed: [UInt32: [UInt8]] = [:]
-    var onConnection: ((Bool) -> Void)?
+    var onConnection: ((_ machine: String?, _ up: Bool) -> Void)?
 
     func open(_ term: PaneTerm, target: AttachTarget, cols: UInt16, rows: UInt16) {
         terms[term.ref] = term
@@ -296,7 +296,9 @@ import FleetKit
             NSApp.terminate(nil)
         }
         let deadline = ContinuousClock.now + .seconds(10)
-        while model.board.run == nil, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+        while model.board.run == nil || model.cachedAt != nil, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
         guard let a = find(ids.0, in: model), let b = find(ids.1, in: model) else {
             json["error"] = "session not on the board"
             return

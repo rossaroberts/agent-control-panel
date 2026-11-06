@@ -14,9 +14,25 @@ import Synchronization
 
 /// Where a daemon listens: its Unix socket on this machine, or a TCP address (another machine's fleetd, reached over
 /// the network). Both carry the same framed conversation.
-public enum Endpoint: Sendable, Equatable {
+public enum Endpoint: Sendable, Equatable, Hashable {
     case unix(URL)
+    /// Another machine's fleetd over the tailnet: a Tailscale peer of the same user sends no key (PROTOCOL.md "Who is
+    /// allowed").
     case tcp(host: String, port: UInt16)
+    /// A fleetd's TCP listener reached with its key (`fleetd.key`, 32 bytes): the preamble `FKEY` and the key go out
+    /// before the first frame. What a local tool on loopback needs (a test's fixture daemon); never a Tailscale peer.
+    case keyedTCP(host: String, port: UInt16, key: Data)
+}
+
+extension Endpoint: CustomStringConvertible {
+    /// For logs and labels: the address, never the key.
+    public var description: String {
+        switch self {
+        case let .unix(url): url.path
+        case let .tcp(host, port), let .keyedTCP(host, port, _):
+            host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+        }
+    }
 }
 
 public enum SocketError: Error, Equatable, Sendable {
@@ -118,14 +134,16 @@ public final class FrameSocket: Sendable {
     public static func connect(_ endpoint: Endpoint) throws -> FrameSocket {
         switch endpoint {
         case let .unix(url): return try connect(url)
-        case let .tcp(host, port): return try connectTCP(host: host, port: port)
+        case let .tcp(host, port): return try connectTCP(host: host, port: port, key: nil)
+        case let .keyedTCP(host, port, key): return try connectTCP(host: host, port: port, key: key)
         }
     }
 
     /// Every address `host` resolves to, in the resolver's order, until one takes the connection. A name that does not
     /// resolve, and a host that refuses or cannot be reached, are `.absent`: to a client that is a daemon not there
     /// now, and it keeps retrying on its backoff (a Mac waking, a tailnet coming back), where `.failed` would be a fault.
-    private static func connectTCP(host: String, port: UInt16) throws -> FrameSocket {
+    private static func connectTCP(host: String, port: UInt16, key: Data?) throws -> FrameSocket {
+        if let key, key.count != 32 { throw SocketError.failed(errno: EINVAL) }
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
@@ -159,9 +177,16 @@ public final class FrameSocket: Sendable {
                 // Over a Unix socket there is no such delay; over a tailnet it would be a round trip per keystroke. A
                 // connection that cannot have it is not used: typing over it would lag, which is the fault to avoid.
                 if setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size)) == 0 {
-                    return FrameSocket(fd: fd)
+                    // The key preamble (transport, not a frame), before the reader starts and before any frame.
+                    if let key {
+                        e = writePreamble(fd, Data("FKEY".utf8) + key)
+                        if e == 0 { return FrameSocket(fd: fd) }
+                    } else {
+                        return FrameSocket(fd: fd)
+                    }
+                } else {
+                    e = errno
                 }
-                e = errno
             }
             last = e
             Darwin.close(fd)
@@ -169,6 +194,22 @@ public final class FrameSocket: Sendable {
         switch last {
         case ECONNREFUSED, EHOSTUNREACH, ENETUNREACH, ETIMEDOUT, EADDRNOTAVAIL: throw SocketError.absent
         default: throw SocketError.failed(errno: last)
+        }
+    }
+
+    /// Writes all of `bytes` to a freshly connected (blocking) fd; the errno of a failure, or 0.
+    private static func writePreamble(_ fd: Int32, _ bytes: Data) -> Int32 {
+        bytes.withUnsafeBytes { (buf: UnsafeRawBufferPointer) -> Int32 in
+            var at = 0
+            while at < buf.count {
+                let n = Darwin.write(fd, buf.baseAddress! + at, buf.count - at)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return errno
+                }
+                at += n
+            }
+            return 0
         }
     }
 

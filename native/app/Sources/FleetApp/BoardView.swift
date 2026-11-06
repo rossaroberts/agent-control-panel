@@ -80,11 +80,16 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         return out
     }
 
+    /// Whether rows named their machine when last drawn: when that changes (a machine added or removed), every row is.
+    private var drewMachines = false
+
     func apply(cached: Bool?) {
         let next = notes() + BoardRows.flatten(model.groups, openOlder: openOlder, cached: model.cachedAt != nil)
         applying = true
         defer { applying = false }
-        if rows.isEmpty || next.isEmpty {
+        let machines = model.machineCount > 1
+        if rows.isEmpty || next.isEmpty || machines != drewMachines {
+            drewMachines = machines
             rows = next
             table.reloadData()
         } else {
@@ -197,7 +202,7 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         switch rows[row] {
         case let .session(s, cached):
             let c = reuse(RowCell.id, RowCell.init)
-            c.show(s, cached: cached)
+            c.show(s, cached: cached, machine: model.machineCount > 1)
             return c
         case let .header(_, name, tally):
             let c = reuse(HeaderCell.id, HeaderCell.init)

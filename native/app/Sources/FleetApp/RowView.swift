@@ -1,6 +1,6 @@
 // The rail's cells, in AppKit (Ruling P3-R6), reused by the table: one session as a compact two-line row (Ruling
-// P3-R8, like fleet.html's rail): the state dot and the title; then the state word, its age and its account; the
-// reason on hover. Then the group header with its tally, the "N older" line, and a note line. The colours are
+// P3-R8, like fleet.html's rail): the state dot and the title; then the state word, its age, its account and, on a
+// board of more than one machine, its machine; the reason on hover. Then the group header with its tally, the "N older" line, and a note line. The colours are
 // fleet.html's (lines 35-43), light and dark.
 
 import AppKit
@@ -137,6 +137,9 @@ final class RunsView: NSView {
         runs = full.isEmpty ? take(pieces.compactMap { $0.first.map { [$0] } }) : full
     }
 
+    /// How wide `runs` draw.
+    func measure(_ runs: [Run]) -> CGFloat { runs.reduce(0) { $0 + width($1) } }
+
     override var isFlipped: Bool { true }
 
     private static func size(_ s: String, _ f: NSFont) -> NSSize {
@@ -206,10 +209,15 @@ final class RowCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ s: Session, cached: Bool) {
+    /// Whether line 2 names the row's machine (the board is of more than one).
+    private var showMachine = false
+
+    func show(_ s: Session, cached: Bool, machine: Bool = false) {
         session = s
+        showMachine = machine
         ageText = Words.ago(s.lastAt ?? s.startedAt)
-        alphaValue = cached ? 0.6 : 1
+        // A cached row, and a row of a machine out of reach (spec §7), are greyed.
+        alphaValue = cached || s.state == .unreachable ? 0.6 : 1
         toolTip = s.reason
         setAccessibilityLabel("\(Words.title(s)), \(s.state.word), \(s.reason)")
         needsDisplay = true
@@ -257,7 +265,7 @@ final class RowCell: NSTableCellView {
             .font: s.state.order <= 2 ? Fonts.word : Fonts.small, .foregroundColor: on ?? Palette.of(s.state),
             .paragraphStyle: Self.leftStyle,
         ])
-        let rest = [ageText, s.account ?? ""].filter { !$0.isEmpty }
+        let rest = [ageText, s.account ?? "", showMachine ? s.key.machine : ""].filter { !$0.isEmpty }
         if !rest.isEmpty {
             info.append(NSAttributedString(string: " · " + rest.joined(separator: " · "), attributes: [
                 .font: Fonts.small, .foregroundColor: grey, .paragraphStyle: Self.leftStyle,

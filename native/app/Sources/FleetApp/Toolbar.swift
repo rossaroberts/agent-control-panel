@@ -1,6 +1,7 @@
 // The toolbar, in AppKit (Ruling P3-R6): over the sidebar, the accounts' limit meters (fleet.html `renderAccounts`,
 // lines 719-735: the window, a thin line, the percent); over the detail, the machine's health (fleet.html `vitals`,
-// lines 1028-1037: dev, db, cpu, mem, disk) and the connection ("live", "reconnecting…", "fleetd not running", or the
+// lines 1028-1037: dev, db, cpu, mem, disk), per machine when the board is of more than one ("Mac cpu 12% … · redbat
+// unreachable", Ruling A-R1), and this Mac's connection ("live", "reconnecting…", "fleetd not running", or the
 // daemon's refusal).
 
 import AppKit
@@ -16,7 +17,14 @@ final class BoardToolbar: NSObject, NSToolbarDelegate {
     private let accounts = RunsView()
     private let vitals = RunsView()
     private let connection = RunsView()
-    private var shown: (Meta, String?, BoardClient.Status)?
+    private var shown: Shown?
+
+    private struct Shown: Equatable {
+        var meta: Meta
+        var machine: String?
+        var status: BoardClient.Status
+        var lines: [MachineLine]
+    }
 
     override init() {
         super.init()
@@ -35,24 +43,74 @@ final class BoardToolbar: NSObject, NSToolbarDelegate {
         let r = (max(0, sidebar - 150), max(0, detail - 150 - connection.intrinsicContentSize.width - 70))
         guard r != room else { return }
         room = r
-        if let s = shown { draw(s.0, s.1, s.2) }
+        if let s = shown { draw(s) }
     }
 
-    func show(meta: Meta, machine: String?, status: BoardClient.Status) {
-        if let s = shown, s.0 == meta, s.1 == machine, s.2 == status { return }
-        shown = (meta, machine, status)
-        draw(meta, machine, status)
+    /// `lines`: every machine of the board, this Mac's first (empty for a board of one machine).
+    func show(meta: Meta, machine: String?, status: BoardClient.Status, lines: [MachineLine] = []) {
+        let next = Shown(meta: meta, machine: machine, status: status, lines: lines)
+        if next == shown { return }
+        shown = next
+        draw(next)
     }
 
-    private func draw(_ meta: Meta, _ machine: String?, _ status: BoardClient.Status) {
+    private func draw(_ s: Shown) {
+        let meta = s.meta
         accounts.fit(Self.accounts(meta.accounts), maxWidth: room.accounts, gap: 14)
         accounts.toolTip = meta.accounts.map { "\($0.name) · \($0.engine) · \($0.profile)" }.joined(separator: "\n")
-        vitals.fit(Self.vitals(machine, meta.health), maxWidth: room.vitals, gap: 12)
-        vitals.toolTip = meta.health.map { "\($0.dev) dev servers, \($0.db) database stacks" }
+        if s.lines.count > 1 {
+            drawMachines(s.lines)
+        } else {
+            vitals.fit(Self.vitals(s.machine, meta.health), maxWidth: room.vitals, gap: 12)
+            vitals.toolTip = meta.health.map { "\($0.dev) dev servers, \($0.db) database stacks" }
+        }
         // The connection always shows, whole.
-        let (word, colour, help) = Self.connection(status)
+        let (word, colour, help) = Self.connection(s.status)
         connection.runs = [.gap(10), .dot(colour, ring: false), .gap(5), .text(word, .labelColor, Fonts.small)]
         connection.toolTip = help
+    }
+
+    /// Every machine, each as one piece: its name, then its vitals while it is live, or the word for its connection.
+    /// Every machine's name and state show before any machine's vitals: the vitals are cut (to cpu and mem, then to
+    /// none) for all of them until the line fits.
+    private func drawMachines(_ lines: [MachineLine]) {
+        func piece(_ l: MachineLine, _ level: Int) -> [RunsView.Run] {
+            let name = l.machine.isEmpty ? "…" : l.machine
+            var out: [RunsView.Run] = [.text(name, .secondaryLabelColor, Fonts.small)]
+            switch l.status {
+            case .live:
+                guard let h = l.health, level < 2 else { break }
+                let all = Self.vitals(nil, h)
+                for v in level == 0 ? all : Array(all.suffix(3).prefix(2)) { out += [.gap(8)] + v }
+            case .reconnecting where !l.unreachable:
+                out += [.gap(6), .text("reconnecting…", Palette.orange, Fonts.small)]
+            default:
+                out += [.gap(6), .text("unreachable", Palette.red, Fonts.small)]
+            }
+            return out
+        }
+        let gap: CGFloat = 16
+        var chosen = lines.map { piece($0, 2) }
+        for level in 0...1 {
+            let pieces = lines.map { piece($0, level) }
+            let w = pieces.reduce(0) { $0 + vitals.measure($1) } + gap * CGFloat(max(0, pieces.count - 1))
+            if w <= room.vitals {
+                chosen = pieces
+                break
+            }
+        }
+        vitals.fit(chosen, maxWidth: room.vitals, gap: gap)
+        vitals.toolTip = lines.map { l -> String in
+            let name = l.machine.isEmpty ? "a machine" : l.machine
+            switch l.status {
+            case .live:
+                return l.health.map { "\(name): live, \($0.dev) dev servers, \($0.db) database stacks" } ?? "\(name): live"
+            case .reconnecting where !l.unreachable: return "\(name): reconnecting"
+            case let .refused(why): return "\(name): refused (\(why))"
+            default:
+                return "\(name): unreachable" + (l.downSince.map { " since \(MergedBoard.hhmmUTC($0)) UTC" } ?? "")
+            }
+        }.joined(separator: "\n")
     }
 
     /// One piece per account: its name and its meters.

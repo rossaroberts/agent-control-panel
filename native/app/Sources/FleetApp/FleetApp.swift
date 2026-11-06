@@ -17,7 +17,9 @@
 //   FleetApp --ui-bench out.json, --live-switch A B out.json   the interaction budgets (UIBench.swift)
 //
 // The socket is fleetd's default (`~/Library/Application Support/Fleet/fleetd.sock`) or FLEETD_SOCK. The app never
-// starts fleetd: with no socket the toolbar says "fleetd not running" and how to install it.
+// starts fleetd: with no socket the toolbar says "fleetd not running" and how to install it. Other machines (Ruling
+// A-R1) are on the same board over their fleetd's TCP listener (MachineList: the Tailscale peers by default, or the
+// Machines menu's list).
 
 import AppKit
 import Combine
@@ -56,8 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let bench: Bench?
     private let uiBench = UIBench.fromArguments()
     private var model: BoardModel!
-    private var client: BoardClient?
-    private var terms: TermClient?
+    /// This Mac's fleetd and every other machine's (Ruling A-R1); nil in the synthetic bench.
+    private var machines: Machines?
+    private var machineList: MachineList?
+    private var localEndpoint: Endpoint?
     private var backend: TermBackend!
     private var window: NSWindow!
     private var split: NSSplitViewController!
@@ -101,11 +105,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.status = .live
             backend = EchoBackend()
         } else {
-            let cache = BoardCache()
-            model = BoardModel(board: board, cache: cache, cached: cache.load())  // the last board, before connecting
-            let terms = TermClient()
-            self.terms = terms
-            backend = LiveBackend(client: terms)
+            // Every machine's last board, before connecting: this Mac's from its cache file as before, each other
+            // machine's from its own (MergedBoard.cacheURL), all merged into one board.
+            let local = Endpoint.unix(socketURL())
+            let list = MachineList()
+            let machines = Machines(
+                endpoints: [local] + list.endpoints,
+                cacheURL: { $0 == local ? BoardCache.defaultURL : MergedBoard.cacheURL(for: $0) })
+            self.machines = machines
+            machineList = list
+            localEndpoint = local
+            model = BoardModel(merged: machines.merged, cachedAt: machines.cachedAt)
+            let live = LiveBackend { [weak machines] machine in machines?.node(for: machine)?.terms }
+            backend = live
+            watchTerminals()
         }
         bench?.mark("cache read")
 
@@ -195,13 +208,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let client = BoardClient(board: board)
-        self.client = client
-        Task { @MainActor [weak model] in
-            for await s in await client.statuses() { model?.status = s }
+        if let machines {
+            machines.onStatus = { [weak self] node, _ in
+                guard let self, let machines = self.machines else { return }
+                // The board's own words ("fleetd not running") are this Mac's; every machine is in the toolbar.
+                if node === machines.nodes.first { self.model.status = node.status }
+                self.showChrome()
+            }
+            watches.append(machines.merged.$machines.receive(on: RunLoop.main).sink { [weak self] _ in self?.showChrome() })
+            machineList?.nameOf = { [weak machines] e in machines?.node(for: e)?.source.machine }
+            machineList?.onChange = { [weak self] in self?.machinesChanged() }
+            machines.start()
         }
-        Task { await client.start(socket: socketURL()) }
-        if let terms { Task { await terms.start(socket: socketURL()) } }
 
         watches.append(model.$needsYou.sink { n in NSApp.dockTile.badgeLabel = n > 0 ? String(n) : nil })
         watches.append(model.$status.receive(on: RunLoop.main).sink { [weak self] _ in self?.showChrome() })
@@ -240,6 +258,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !launched else { return }
         launched = true
         NSApp.mainMenu = nav.mainMenu()
+        if let machineList, let bar = NSApp.mainMenu {
+            bar.insertItem(machineList.menuItem(), at: max(0, bar.items.count - 1))  // before Window
+            machineList.discover()  // the tailnet's peers, off the main thread; the board follows if they changed
+        }
         nav.installKeys()
         pane.build()
         nav.prepare()
@@ -247,8 +269,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The toolbar, the title and the pane's header, from the model (each skips the work when nothing it shows
     /// changed).
+    /// The Machines list changed (Settings, or the tailnet's peers): the board's machines follow it, this Mac first.
+    private func machinesChanged() {
+        guard let machines, let machineList, let localEndpoint else { return }
+        machines.set(endpoints: [localEndpoint] + machineList.endpoints)
+        watchTerminals()
+        showChrome()
+    }
+
+    /// The pane hears of each machine's Terminals connection (by its machine's name once its board has one).
+    private func watchTerminals() {
+        guard let machines, let live = backend as? LiveBackend else { return }
+        for n in machines.nodes { live.watch(n.terms) { [weak n] in n?.source.machine } }
+    }
+
     private func showChrome() {
-        toolbar.show(meta: model.meta, machine: model.machine, status: model.status)
+        // A machine not yet reached has no name from its board: the Machines list's (its Tailscale host name) stands in.
+        var lines = machines?.merged.machines ?? []
+        if let machines, let machineList {
+            for (i, n) in machines.nodes.enumerated() where lines.indices.contains(i) && lines[i].machine.isEmpty {
+                lines[i].machine = machineList.entries.first { $0.endpoint == n.endpoint }?.name ?? n.endpoint.description
+            }
+        }
+        toolbar.show(meta: model.meta, machine: model.machine, status: model.status, lines: lines)
         let title = model.needsYou > 0 ? "Fleet (\(model.needsYou))" : "Fleet"
         if window.title != title { window.title = title }
         pane.update(model.selected)
@@ -258,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// terminal to draw, lets it settle, captures the window into a PNG.
     private func shoot(to url: URL, select: String?, tries: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
-            guard tries > 0, model.board.run == nil else {
+            guard tries > 0, model.board.run == nil || model.cachedAt != nil else {
                 var wait = 1.5
                 if let select, let k = LiveSwitch.find(select, in: model) {
                     nav.open(k, focus: false)
@@ -284,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         model.cache?.flush()
+        machines?.flush()
     }
 }
 
