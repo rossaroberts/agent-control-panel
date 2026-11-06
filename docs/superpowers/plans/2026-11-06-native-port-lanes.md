@@ -9,6 +9,7 @@ and branch, off `docs/native-port` @ da3d5fa. The controller (the main session) 
 | A · Mac app | `~/projects/acp-wt/native-port` · `docs/native-port` | `native/app/**`; the wire contract: `fleet-model/src/wire.rs`, `types.rs`, goldens, `native/PROTOCOL.md` | 03 (finish: terminal pane), 04 (actions) |
 | B · hub | `~/projects/acp-wt/native-hub` · `native/hub` | `fleetd` network listener + Tailscale auth, Linux build, redbat install, `--hub` merge, shared state store | 05 |
 | C · Context + Satellite | `~/projects/acp-wt/native-context-satellite` · `native/context-satellite` | `fleetd` Context (read + edit) and Satellite (GitHub reads), their own frames in their own file | 06, 07 |
+| E · actions + switch (daemon) | `~/projects/acp-wt/native-actions` · `native/actions` | `fleetd` actions on an `Actions` role (own frames in `wire_actions.rs`), permission decide via hook.sh, the session titler, fleetd as writer of the panel files, the switch procedure (written, not run) | 04 (daemon), 08 (daemon) |
 | D · phone | `~/projects/acp-wt/native-ios` · `native/ios` | `native/ios/**` (iOS app); may add `.iOS(...)` to `native/app/Package.swift` platforms and nothing else there | 09 (pulled forward) |
 
 ## Rules every lane follows
