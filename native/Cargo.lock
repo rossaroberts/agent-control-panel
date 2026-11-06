@@ -53,6 +53,7 @@ name = "fleet-read"
 version = "0.1.0"
 dependencies = [
  "fleet-model",
+ "libc",
  "memchr",
  "regex",
  "serde",
@@ -66,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "fleet-model",
  "fleet-read",
+ "serde_json",
 ]
 
 [[package]]

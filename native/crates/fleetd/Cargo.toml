@@ -7,3 +7,4 @@ publish.workspace = true
 [dependencies]
 fleet-model = { path = "../fleet-model" }
 fleet-read = { path = "../fleet-read" }
+serde_json = "1"
