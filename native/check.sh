@@ -9,4 +9,4 @@ cargo test
 cargo build --release -p fleetd
 node parity/collect-parity.mjs
 # Task 10 adds the bench; until it exists the gate has nothing to run there.
-if [ -f bench/run.mjs ]; then node bench/run.mjs; fi
+if [ -f bench/run.mjs ]; then node bench/run.mjs; else echo "bench skipped (bench/run.mjs not present)"; fi
