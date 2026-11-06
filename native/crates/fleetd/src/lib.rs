@@ -2,6 +2,7 @@
 //! truthful `Session` per session and the numbered deltas between; the socket serves both to clients.
 
 pub mod alarm;
+pub mod attach_cmd;
 pub mod bench;
 pub mod client;
 #[cfg(target_os = "macos")]
@@ -9,6 +10,7 @@ pub mod kq;
 pub mod machine;
 pub mod out;
 pub mod procscan;
+pub mod pty;
 pub mod reads;
 pub mod serve;
 pub mod service;
