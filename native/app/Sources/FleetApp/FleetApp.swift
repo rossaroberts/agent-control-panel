@@ -14,6 +14,7 @@
 //                               once the live board is drawn (and the selected session's terminal has drawn), capture
 //                               the window (toolbar included) to a PNG and quit: a screenshot that needs no Screen
 //                               Recording permission. Nothing is selected without --select
+//   FleetApp --shot-page <name> out.png   open that page's window (Pages menu), wait 8 s, capture it, quit
 //   FleetApp --ui-bench out.json, --live-switch A B out.json   the interaction budgets (UIBench.swift)
 //
 // The socket is fleetd's default (`~/Library/Application Support/Fleet/fleetd.sock`) or FLEETD_SOCK. The app never
@@ -61,6 +62,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// This Mac's fleetd and every other machine's (Ruling A-R1); nil in the synthetic bench.
     private var machines: Machines?
     private var machineList: MachineList?
+    /// The Pages menu; its windows and web views are made only when a page is opened.
+    private let pagesMenu = PagesController()
     private var localEndpoint: Endpoint?
     private var backend: TermBackend!
     private var window: NSWindow!
@@ -265,6 +268,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let machineList, let bar = NSApp.mainMenu {
             bar.insertItem(machineList.menuItem(), at: max(0, bar.items.count - 1))  // before Window
             machineList.discover()  // the tailnet's peers, off the main thread; the board follows if they changed
+        }
+        if let bar = NSApp.mainMenu { bar.insertItem(pagesMenu.menuItem(), at: max(0, bar.items.count - 1)) }
+        if let i = CommandLine.arguments.firstIndex(of: "--shot-page"), i + 2 < CommandLine.arguments.count {
+            pagesMenu.shoot(name: CommandLine.arguments[i + 1], to: URL(fileURLWithPath: CommandLine.arguments[i + 2]))
         }
         nav.installKeys()
         pane.build()
