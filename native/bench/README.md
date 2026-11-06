@@ -29,7 +29,7 @@ three p95s (Ruling R19). It prints a before/after table against `results/before.
 is never a gate and cannot ratchet.
 
 `--ratchet` sets each budget to max(median p95 x 1.25, floor), never above what it was, and leaves a budget that is
-currently over alone (`ratchet.mjs`). `budgets.json` holds each budget and its floor; the idle floor is 20 ms because
+currently over alone (`ratchet.mjs`). A budget may also carry `hold`, a minimum the ratchet never goes below (idle CPU holds at 50, Ruling P2-R6). `budgets.json` holds each budget and its floor; the idle floor is 20 ms because
 `ps` reports CPU time in 10 ms steps, and the latency floors are 2 ms (hook, transcript, snapshot) and RSS 20 MB so that
 a ratchet never lands inside the run-to-run spread (Ruling R23). A budget only moves down. Only `results/before.json` is committed.
 
@@ -40,8 +40,8 @@ a ratchet never lands inside the run-to-run spread (Ruling R23). A budget only m
 on the daemon, whose programs are the fixture home's stand-in `claude attach <job>` (`fixture.mjs`: a job id starting
 with `e` runs `stty raw -echo; exec cat`, any other prints a banner and then cats). `run.mjs` runs them after the idle window.
 
-- `termEchoAddedP95Ms`: one keystroke to its echo through fleetd, against the same `cat` on a pty of the bench's own,
-  sampled in turn (300 each); the budget is the ADDED p95 (through fleetd minus direct). Floor 0.5 ms (Ruling P2-R1).
+- `termEchoPairedAddedP95Ms`: one keystroke to its echo through fleetd, against the same `cat` on a pty of the bench's own,
+  sampled in turn (300 pairs); the budget is the p95 of the paired differences (through_i minus direct_i), not the difference of the two p95s. Floor 0.5 ms (Ruling P2-R1).
 - `termWarmReopenP95Ms`: a released `claude attach` terminal reopened, to the first replayed byte (50). Floor 8 ms.
 - `termColdOpenP95Ms`: a terminal that never ran, to its first byte (30, a new job each time). Floor 50 ms.
 

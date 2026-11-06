@@ -7,13 +7,14 @@
 
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fleet_model::types::{AttachTarget, Engine, Session};
 use fleet_model::wire::{Frame, TERM_IN_MAX};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::attach_cmd::{job_ok, profile_ok, uuid_ok};
 use crate::client::{term_connect, Client};
@@ -135,10 +136,41 @@ pub fn split_detach(data: &[u8]) -> (&[u8], bool) {
 static SAVED: Mutex<Option<libc::termios>> = Mutex::new(None);
 
 /// What a program may have switched on in the local terminal while attached: mouse reporting, bracketed paste,
-/// application cursor keys, a hidden cursor, colours, the alternate screen. Put back on the way out (a warm replay
-/// turns on again whatever the next attach needs).
+/// application cursor keys, a hidden cursor, colours. Put back on the way out (a warm replay turns on again whatever the
+/// next attach needs). The alternate screen is left only if the output entered it (`AltScreen`).
 const RESET: &[u8] =
-    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b[?25h\x1b[0m\x1b[?1049l";
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b[?25h\x1b[0m";
+const ALT_ON: &[u8] = b"\x1b[?1049h";
+const ALT_OFF: &[u8] = b"\x1b[?1049l";
+
+/// Whether the output stream has the alternate screen on (read by `restore_tty`, which may run from a panic hook).
+static ALT: AtomicBool = AtomicBool::new(false);
+
+/// Follows `ESC[?1049h` / `ESC[?1049l` in the output across chunk boundaries (a sequence may be split).
+#[derive(Default)]
+struct AltScreen {
+    tail: Vec<u8>,
+}
+
+impl AltScreen {
+    fn feed(&mut self, data: &[u8]) {
+        let mut all = std::mem::take(&mut self.tail);
+        all.extend_from_slice(data);
+        let mut state = None;
+        for (i, w) in all.windows(ALT_ON.len()).enumerate() {
+            if w == ALT_ON {
+                state = Some((i, true));
+            } else if w == ALT_OFF {
+                state = Some((i, false));
+            }
+        }
+        if let Some((_, on)) = state {
+            ALT.store(on, Ordering::SeqCst);
+        }
+        let keep = all.len().min(ALT_ON.len() - 1);
+        self.tail = all[all.len() - keep..].to_vec();
+    }
+}
 
 /// Puts the tty back as it was, once. Safe to call from a panic hook and from `Drop`.
 fn restore_tty() {
@@ -148,6 +180,9 @@ fn restore_tty() {
         unsafe {
             if libc::isatty(1) == 1 {
                 libc::write(1, RESET.as_ptr().cast(), RESET.len());
+                if ALT.load(Ordering::SeqCst) {
+                    libc::write(1, ALT_OFF.as_ptr().cast(), ALT_OFF.len());
+                }
             }
             libc::tcsetattr(0, libc::TCSAFLUSH, &t);
         }
@@ -198,9 +233,18 @@ fn winsize() -> Option<(u16, u16)> {
     None
 }
 
+/// What the stdin thread hands on.
+enum In {
+    Keys(Vec<u8>),
+    /// A Ctrl-] was typed; what followed it is dropped.
+    Detach,
+}
+
 /// Reads fd 0 on a thread of its own (a tty read cannot be cancelled; the process exits instead). Chunks are at most
-/// 64 KiB; the channel is bounded, so a stalled terminal stops the reading.
-fn read_stdin(tx: mpsc::Sender<Vec<u8>>) {
+/// 64 KiB. The Ctrl-] scan is done here, ahead of any send that can wait on the daemon: the channel is unbounded (it
+/// holds only what a person typed or pasted) so this thread never blocks behind a stalled terminal, and `detach` is
+/// notified at once so a send that is waiting can be given up.
+fn read_stdin(tx: mpsc::UnboundedSender<In>, detach: Arc<Notify>) {
     let _ = std::thread::Builder::new()
         .name("attach-stdin".into())
         .spawn(move || {
@@ -211,8 +255,18 @@ fn read_stdin(tx: mpsc::Sender<Vec<u8>>) {
                 if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                if n <= 0 || tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
-                    return; // end of input: the receiver sees the channel close
+                if n <= 0 {
+                    detach.notify_one(); // end of input detaches, as Ctrl-] does
+                    return;
+                }
+                let (keys, d) = split_detach(&buf[..n as usize]);
+                if !keys.is_empty() && tx.send(In::Keys(keys.to_vec())).is_err() {
+                    return;
+                }
+                if d {
+                    let _ = tx.send(In::Detach);
+                    detach.notify_one();
+                    return;
                 }
             }
         });
@@ -240,7 +294,9 @@ fn clean() -> Outcome {
 }
 
 /// How long the daemon gets to answer a `TermClose` before the client leaves anyway.
-const CLOSE_WAIT: Duration = Duration::from_millis(1000);
+const CLOSE_WAIT: Duration = Duration::from_millis(400);
+/// How long the writer gets to put a last `TermClose` on the socket when a signal ends the client.
+const FLUSH_WAIT: Duration = Duration::from_millis(100);
 
 async fn attach(path: &Path, target: AttachTarget) -> Outcome {
     let (mut tx, mut rx) = match term_connect(path).await {
@@ -261,7 +317,7 @@ async fn attach(path: &Path, target: AttachTarget) -> Outcome {
         return fail(1, "cannot install signal handlers");
     };
     let (ftx, mut frx) = mpsc::channel::<Frame>(16);
-    tokio::spawn(async move {
+    let writer = tokio::spawn(async move {
         while let Some(f) = frx.recv().await {
             if tx.send(&f).await.is_err() {
                 break;
@@ -284,52 +340,68 @@ async fn attach(path: &Path, target: AttachTarget) -> Outcome {
     }
 
     // The pump: keystrokes and window changes to the daemon, in order, awaiting the daemon (its backpressure). It is a
-    // task of its own so that output keeps being read while a send waits.
-    let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(8);
-    read_stdin(stdin_tx);
+    // task of its own so that output keeps being read while a send waits. Every send is raced against the detach
+    // notice: a stalled terminal (the daemon has stopped reading our input) must not trap Ctrl-] (raw mode has no
+    // Ctrl-C either).
+    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<In>();
+    let detach = Arc::new(Notify::new());
+    read_stdin(stdin_tx, detach.clone());
     let (detach_tx, mut detach_rx) = oneshot::channel::<()>();
     let pump_tx = ftx.clone();
-    tokio::spawn(async move {
-        loop {
+    let pump = tokio::spawn(async move {
+        // False when the send was given up (a detach) or the writer is gone.
+        let send = |f: Frame| {
+            let (tx, detach) = (&pump_tx, &detach);
+            async move {
+                tokio::select! {
+                    r = tx.send(f) => r.is_ok(),
+                    _ = detach.notified() => false,
+                }
+            }
+        };
+        'pump: loop {
             tokio::select! {
-                chunk = stdin_rx.recv() => {
-                    let Some(chunk) = chunk else { break }; // end of input detaches, as Ctrl-] does
-                    let (keys, detach) = split_detach(&chunk);
-                    for f in input_frames(keys) {
-                        if pump_tx.send(f).await.is_err() {
-                            return;
+                msg = stdin_rx.recv() => match msg {
+                    Some(In::Keys(keys)) => {
+                        for f in input_frames(&keys) {
+                            if !send(f).await {
+                                break 'pump;
+                            }
                         }
                     }
-                    if detach {
-                        break;
-                    }
-                }
+                    Some(In::Detach) | None => break,
+                },
+                _ = detach.notified() => break,
                 _ = winch.recv() => {
                     if let Some((cols, rows)) = winsize() {
-                        if pump_tx.send(Frame::TermSize { r#ref: REF, cols, rows }).await.is_err() {
-                            return;
+                        if !send(Frame::TermSize { r#ref: REF, cols, rows }).await {
+                            break;
                         }
                     }
                 }
             }
         }
-        let _ = pump_tx.send(Frame::TermClose { r#ref: REF }).await;
+        // Queued input is dropped. The close goes if the channel has room; if the daemon is not reading, the hang-up
+        // that follows the exit releases the terminal.
+        let _ = pump_tx.try_send(Frame::TermClose { r#ref: REF });
         let _ = detach_tx.send(());
     });
 
     let mut stdout = io::stdout().lock();
-    let mut detaching = false;
+    let mut alt = AltScreen::default();
+    // Set once, when the detach starts: the daemon gets until then to answer, however much output arrives meanwhile.
+    let mut deadline: Option<tokio::time::Instant> = None;
     let end = loop {
         let wait = async {
-            if detaching {
-                tokio::time::sleep(CLOSE_WAIT).await
-            } else {
-                std::future::pending().await
+            match deadline {
+                Some(d) => tokio::time::sleep_until(d).await,
+                None => std::future::pending().await,
             }
         };
         tokio::select! {
             f = rx.next() => match f {
                 Ok(Frame::TermOut { data, .. }) => {
+                    alt.feed(&data);
                     if stdout.write_all(&data).and_then(|_| stdout.flush()).is_err() {
                         break fail(1, "cannot write to the terminal");
                     }
@@ -338,10 +410,12 @@ async fn attach(path: &Path, target: AttachTarget) -> Outcome {
                 Ok(Frame::TermEnd { error: None, .. }) => break clean(),
                 Ok(Frame::Error { message }) => break fail(1, message),
                 Ok(_) => {}
-                Err(_) if detaching => break clean(),
+                Err(_) if deadline.is_some() => break clean(),
                 Err(_) => break fail(1, "connection to the daemon closed"),
             },
-            Ok(()) = &mut detach_rx, if !detaching => detaching = true,
+            Ok(()) = &mut detach_rx, if deadline.is_none() => {
+                deadline = Some(tokio::time::Instant::now() + CLOSE_WAIT);
+            }
             _ = wait => break clean(),
             _ = int.recv() => break fail(130, "interrupted"),
             _ = term.recv() => break fail(143, "terminated"),
@@ -351,6 +425,11 @@ async fn attach(path: &Path, target: AttachTarget) -> Outcome {
     if end.code >= 128 {
         let _ = ftx.try_send(Frame::TermClose { r#ref: REF });
     }
+    // Give the writer a moment to put what is queued on the socket (a signal's TermClose), then leave: the daemon
+    // treats a dropped socket as a close anyway.
+    pump.abort();
+    drop(ftx);
+    let _ = tokio::time::timeout(FLUSH_WAIT, writer).await;
     drop(stdout);
     drop(tty);
     end
@@ -522,5 +601,20 @@ mod tests {
         assert_eq!(split_detach(b"abc"), (&b"abc"[..], false));
         assert_eq!(split_detach(b"ab\x1dcd"), (&b"ab"[..], true));
         assert_eq!(split_detach(b"\x1d"), (&b""[..], true));
+    }
+
+    #[test]
+    fn the_alternate_screen_is_followed_across_chunks() {
+        let mut a = AltScreen::default();
+        ALT.store(false, Ordering::SeqCst);
+        a.feed(b"hello \x1b[?10");
+        assert!(!ALT.load(Ordering::SeqCst));
+        a.feed(b"49h screen");
+        assert!(ALT.load(Ordering::SeqCst), "entered, the sequence split");
+        a.feed(b"\x1b[?1049l and \x1b[?1049h");
+        assert!(ALT.load(Ordering::SeqCst), "the last one wins");
+        a.feed(b"x\x1b[?1049");
+        a.feed(b"l");
+        assert!(!ALT.load(Ordering::SeqCst), "left");
     }
 }

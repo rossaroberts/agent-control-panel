@@ -5,7 +5,7 @@
 //! measurement; this keeps the clock on one side of the socket.
 //!
 //! `term-echo`, `term-warm` and `term-cold` time terminals (plan 2): a keystroke's echo through fleetd against the same
-//! program on a pty of the bench's own (`{"ms":[...],"direct":[...]}`, sampled in turn), a warm terminal's reopen to its
+//! program on a pty of the bench's own (`{"ms":[...],"direct":[...],"added":[...]}`, sampled in turn, `added` being each pair's difference), a warm terminal's reopen to its
 //! first repaint byte, and a cold open to its first byte. The programs are the fixture home's stand-in `claude attach`.
 
 use std::fs;
@@ -191,14 +191,17 @@ async fn open(tx: &mut TermTx, job: &str) -> io::Result<()> {
     .await
 }
 
-/// Reads until a `TermOut` arrives (its bytes), or fails on a `TermEnd` or after `WAIT`.
-async fn next_out(rx: &mut TermRx) -> io::Result<Vec<u8>> {
+/// Reads until a `TermOut` arrives (its bytes), or fails on a `TermEnd` or after `WAIT`. With `want`, only output that
+/// holds that byte counts (as the direct path does), so a stray frame cannot put the samples out of step.
+async fn next_out(rx: &mut TermRx, want: Option<u8>) -> io::Result<Vec<u8>> {
     loop {
         match timeout(WAIT, rx.next())
             .await
             .map_err(|_| io::Error::other("bench: no terminal output in 3 s"))??
         {
-            Frame::TermOut { data, .. } => return Ok(data),
+            Frame::TermOut { data, .. } if want.is_none_or(|b| data.contains(&b)) => {
+                return Ok(data)
+            }
             Frame::TermEnd { error, .. } => {
                 return Err(io::Error::other(format!(
                     "bench: terminal ended: {}",
@@ -327,7 +330,7 @@ async fn term_echo(o: &Opts) -> io::Result<serde_json::Value> {
             data: vec![key(i)],
         })
         .await?;
-        next_out(&mut rx).await?;
+        next_out(&mut rx, Some(key(i))).await?;
     }
     let (mut through, mut base) = (Vec::with_capacity(o.n), Vec::with_capacity(o.n));
     for i in 0..o.n {
@@ -338,18 +341,20 @@ async fn term_echo(o: &Opts) -> io::Result<serde_json::Value> {
             data: vec![key(i)],
         })
         .await?;
-        next_out(&mut rx).await?;
+        next_out(&mut rx, Some(key(i))).await?;
         through.push(t0.elapsed().as_secs_f64() * 1000.0);
         tokio::time::sleep(o.gap).await;
     }
-    Ok(json!({ "ms": through, "direct": base }))
+    // The gate is on the p95 of the paired differences (through_i - direct_i), samples taken back to back.
+    let added: Vec<f64> = through.iter().zip(&base).map(|(t, d)| t - d).collect();
+    Ok(json!({ "ms": through, "direct": base, "added": added }))
 }
 
 /// Reopen of a warm terminal to its first byte (the replayed ring); the very first open is cold and not a sample.
 async fn term_warm(o: &Opts) -> io::Result<Vec<f64>> {
     let (mut tx, mut rx) = term_connect(&socket_path()).await?;
     open(&mut tx, "a0000001").await?;
-    next_out(&mut rx).await?;
+    next_out(&mut rx, None).await?;
     let mut ms = Vec::with_capacity(o.n);
     for _ in 0..o.n {
         tx.send(&Frame::TermClose { r#ref: 1 }).await?;
@@ -357,7 +362,7 @@ async fn term_warm(o: &Opts) -> io::Result<Vec<f64>> {
         tokio::time::sleep(o.gap).await;
         let t0 = Instant::now();
         open(&mut tx, "a0000001").await?;
-        next_out(&mut rx).await?;
+        next_out(&mut rx, None).await?;
         ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         settle(&mut rx, 20).await;
     }
@@ -374,7 +379,7 @@ async fn term_cold(o: &Opts) -> io::Result<Vec<f64>> {
         let job = format!("c{:07x}", i + 1);
         let t0 = Instant::now();
         open(&mut tx, &job).await?;
-        next_out(&mut rx).await?;
+        next_out(&mut rx, None).await?;
         ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         tx.send(&Frame::TermClose { r#ref: 1 }).await?;
         until_end(&mut rx).await?;

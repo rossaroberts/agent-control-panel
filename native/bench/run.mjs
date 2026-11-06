@@ -82,12 +82,12 @@ async function measure() {
   const idleCpuMsPer60s = Math.round((cpuMs() - c0) * 60 / IDLE_SECS);
 
   // Terminals (plan 2), after the idle window so the plan-1 numbers are as they were. Echo: the same keystroke through
-  // fleetd and on a direct pty, in turn; the budget is the added p95. Warm: reopen to the first repaint byte. Cold: open
+  // fleetd and on a direct pty, in turn; the budget is the p95 of the paired differences (through_i - direct_i). Warm: reopen to the first repaint byte. Cold: open
   // a terminal that never ran to its first byte.
   const echo = benchJson('term-echo', ['--n', '300', '--gap-ms', '5']);
   const termWarm = bench('term-warm', ['--n', '50', '--gap-ms', '20']);
   const termCold = bench('term-cold', ['--n', '30', '--gap-ms', '50']);
-  const termEcho = { p50: round(pct(echo.ms, 50) - pct(echo.direct, 50)), p95: round(pct(echo.ms, 95) - pct(echo.direct, 95)), throughP95: round(pct(echo.ms, 95)), directP95: round(pct(echo.direct, 95)) };
+  const termEcho = { p50: round(pct(echo.added, 50)), p95: round(pct(echo.added, 95)), throughP95: round(pct(echo.ms, 95)), directP95: round(pct(echo.direct, 95)) };
   killKids();
   await sleep(300);
   return { startupMs, hook: stats(hook), trans: stats(trans), snap: stats(snap), idleCpuMsPer60s, rssMb: round(pct(rss, 50)), rssAfterLoadMb, termEcho, termWarm: stats(termWarm), termCold: stats(termCold) };
@@ -123,7 +123,7 @@ const rows = [
   ['hook -> delta', 'hookToDeltaP95Ms', fleetd.hookToDeltaMs, before.hookToSnapshotMs, 'ms'],
   ['transcript -> delta', 'transcriptToDeltaP95Ms', fleetd.transcriptToDeltaMs, null, 'ms'],
   ['snapshot on connect', 'snapshotOnConnectMs', fleetd.snapshotMs, before.snapshotMs, 'ms'],
-  ['terminal echo, added over a direct pty', 'termEchoAddedP95Ms', fleetd.termEchoAddedMs, null, 'ms'],
+  ['terminal echo, paired added over a direct pty', 'termEchoPairedAddedP95Ms', fleetd.termEchoAddedMs, null, 'ms'],
   ['terminal warm reopen to first byte', 'termWarmReopenP95Ms', fleetd.termWarmReopenMs, null, 'ms'],
   ['terminal cold open to first byte', 'termColdOpenP95Ms', fleetd.termColdOpenMs, null, 'ms'],
   ['idle CPU per 60 s', 'idleCpuMsPer60s', one(fleetd.idleCpuMsPer60s), one(before.idleCpuMsPer60s), 'ms'],

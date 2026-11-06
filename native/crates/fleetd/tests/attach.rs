@@ -64,6 +64,7 @@ struct Daemon {
     _sock: tempfile::TempDir,
     path: std::path::PathBuf,
     task: tokio::task::JoinHandle<()>,
+    terms: Arc<fleetd::terms::Terms>,
     _guard: SocketGuard,
 }
 
@@ -109,12 +110,13 @@ impl Daemon {
         ]);
         let terms = Arc::new(home.terms());
         let (listener, guard) = bind(&path).unwrap();
-        let task = tokio::spawn(serve(listener, store, "fixture-mac".into(), terms));
+        let task = tokio::spawn(serve(listener, store, "fixture-mac".into(), terms.clone()));
         Daemon {
             home,
             _sock: sock,
             path,
             task,
+            terms,
             _guard: guard,
         }
     }
@@ -275,7 +277,11 @@ impl Tty {
 impl Drop for Tty {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        // A process cannot finish exiting while its pty output sits unread: keep reading until it is gone.
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end && !matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.pump(10);
+        }
     }
 }
 
@@ -434,4 +440,102 @@ async fn a_signal_restores_the_tty_too() {
             String::from_utf8_lossy(&t.seen)
         );
     }
+}
+
+/// Types `byte` until `max` bytes are in or the pty stops taking them for half a second; the count typed.
+fn type_until_stalled(t: &Tty, byte: u8, max: usize) -> usize {
+    // Whole lines: a pty queues only complete lines for a program that is not reading, and then stops taking more.
+    let line: Vec<u8> = std::iter::repeat_n(byte, 79).chain(*b"\n").collect();
+    let chunk = line.repeat(200);
+    let mut at = 0;
+    while at < max {
+        let mut p = libc::pollfd {
+            fd: t.master.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: poll, then write from our slice to the master.
+        let n = unsafe {
+            if libc::poll(&mut p, 1, 500) <= 0 {
+                break;
+            }
+            libc::write(t.master.as_raw_fd(), chunk.as_ptr().cast(), chunk.len())
+        };
+        if n <= 0 {
+            break;
+        }
+        at += n as usize;
+    }
+    at
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_bracket_detaches_even_when_the_daemon_has_stopped_reading_input() {
+    let d = Daemon::start();
+    let mut t = Tty::spawn(&d, &["default/0000000d"]);
+    assert!(t.expect("BANNER", terms_home::BOOT));
+    let pid = d.home.starts_of("0000000d")[0];
+    // The program stops reading: the pty fills, then the daemon's 1 MiB per terminal, then it stops reading the socket,
+    // then the socket's buffer fills and the client's send waits.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    tokio::task::block_in_place(|| type_until_stalled(&t, b'x', 32 << 20));
+    std::thread::sleep(Duration::from_millis(800));
+    let t0 = Instant::now();
+    t.type_bytes(&[0x1d]);
+    let code = t.exit_code(3.0);
+    let took = t0.elapsed();
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert_eq!(code, Some(0), "{:?}", String::from_utf8_lossy(&t.seen));
+    assert!(took < Duration::from_secs(1), "detached in {took:?}");
+    assert!(t.expect("TTY=same", 1.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_drop_is_a_close_pooled_for_claude_stopped_for_the_rest() {
+    let d = Daemon::start();
+    // A signal: the client sends TermClose if it can, and the socket drops either way. A claude attach goes to the pool.
+    let mut t = Tty::spawn(&d, &["default/0000000e"]);
+    assert!(t.expect("BANNER", terms_home::BOOT));
+    assert_eq!(d.terms.live_count(), 1);
+    let k = Command::new("kill")
+        .args(["-TERM"])
+        .arg(client_pid(&t).to_string())
+        .status()
+        .unwrap();
+    assert!(k.success());
+    assert_eq!(t.exit_code(5.0), Some(143));
+    assert!(
+        terms_home::wait_for(Duration::from_secs(3), || d.terms.warm_count() == 1),
+        "pooled"
+    );
+    // A kill that gives the client no chance to say anything: a trust-folder terminal is stopped, nothing leaks.
+    let mut u = Tty::spawn(&d, &["--trust", "default", "~/work"]);
+    assert!(u.expect("BANNER", terms_home::BOOT));
+    assert_eq!(d.terms.live_count(), 2);
+    let k = Command::new("kill")
+        .args(["-KILL"])
+        .arg(client_pid(&u).to_string())
+        .status()
+        .unwrap();
+    assert!(k.success());
+    assert!(
+        terms_home::wait_for(Duration::from_secs(3), || d.terms.live_count() == 1),
+        "stopped"
+    );
+    assert_eq!(d.terms.warm_count(), 1);
+}
+
+/// The pid of the `fleetd attach` under the test's wrapper shell (the shell's only child), found with `pgrep -P`.
+fn client_pid(t: &Tty) -> u32 {
+    let o = Command::new("pgrep")
+        .args(["-P", &t.child.id().to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8(o.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .expect("a client under the shell")
+        .parse()
+        .unwrap()
 }

@@ -4,7 +4,7 @@
     "floor": 2
   },
   "snapshotOnConnectMs": {
-    "budget": 4.1,
+    "budget": 3.8,
     "floor": 2
   },
   "transcriptToDeltaP95Ms": {
@@ -12,16 +12,13 @@
     "floor": 2
   },
   "idleCpuMsPer60s": {
-    "budget": 37.5,
-    "floor": 20
+    "budget": 50,
+    "floor": 20,
+    "hold": 50
   },
   "rssMb": {
     "budget": 20,
     "floor": 20
-  },
-  "termEchoAddedP95Ms": {
-    "budget": 0.5,
-    "floor": 0.5
   },
   "termWarmReopenP95Ms": {
     "budget": 8,
@@ -30,5 +27,9 @@
   "termColdOpenP95Ms": {
     "budget": 50,
     "floor": 50
+  },
+  "termEchoPairedAddedP95Ms": {
+    "budget": 0.5,
+    "floor": 0.5
   }
 }

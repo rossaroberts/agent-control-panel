@@ -37,3 +37,11 @@ test('the argument is not mutated and floors survive', () => {
   assert.equal(b.hook.budget, 5);
   assert.equal(budgets.idle.floor, 20);
 });
+
+test('a hold keeps a budget from ratcheting below it (P2-R6)', () => {
+  const b = { idle: { budget: 50, floor: 20, hold: 50 }, hook: { budget: 5, floor: 1 } };
+  const { budgets } = ratchet(b, { idle: 30, hook: 2 });
+  assert.equal(budgets.idle.budget, 50);
+  assert.equal(budgets.idle.hold, 50);
+  assert.equal(budgets.hook.budget, 2.5);
+});
