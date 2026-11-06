@@ -83,7 +83,7 @@ private let meta = Meta(
         await settle { model.renders > 0 }
         try? await Task.sleep(for: .milliseconds(50))
         var drawn: ContinuousClock.Instant?
-        model.onRender = { _ in drawn = drawn ?? .now }
+        model.onRender { _ in drawn = drawn ?? .now }
         let t = ContinuousClock.now
         _ = board.apply(.delta(Delta(seq: 1, upsert: [session("b")], remove: [])))
         await settle { drawn != nil }
@@ -130,10 +130,15 @@ private let meta = Meta(
     }
 }
 
-@MainActor @Suite(.serialized) struct BoardCacheTests {
+@MainActor @Suite(.serialized) final class BoardCacheTests {
+    private var dirs: [URL] = []
+
+    deinit { for d in dirs { try? FileManager.default.removeItem(at: d) } }
+
     private func temp() -> URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("fleetkit-cache-\(UUID().uuidString)")
-            .appendingPathComponent("board.cache")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fleetkit-cache-\(UUID().uuidString)")
+        dirs.append(dir)
+        return dir.appendingPathComponent("board.cache")
     }
 
     @Test func roundTrips() {
@@ -142,6 +147,59 @@ private let meta = Meta(
             sessions: [full, session("b", .done)], meta: meta)
         let back = BoardCache.decode(BoardCache.encode(c))
         #expect(back == c)
+    }
+
+    /// The cache inside a bigger buffer (a slice whose indexes do not start at 0) reads the same, in place.
+    @Test func decodesASliceInPlace() {
+        let c = BoardCache.Contents(
+            savedAt: Date(timeIntervalSince1970: 1_793_966_400), machine: "fixture-mac", sessions: [full], meta: meta)
+        let buffer = Data([1, 2, 3]) + BoardCache.encode(c) + Data([9, 9])
+        let slice = buffer[3..<(buffer.count - 2)]
+        #expect(slice.startIndex == 3)
+        #expect(BoardCache.decode(slice) == c)
+    }
+
+    /// The file and its folder are the user's alone: it holds session titles.
+    @Test func theFileIs0600InA0700Folder() async throws {
+        let url = temp()
+        let cache = BoardCache(url: url)
+        let board = Board()
+        _ = board.apply(.snapshot(run: 1, seq: 0, machine: "fixture-mac", sessions: [full]))
+        cache.note(board)
+        cache.flush()
+        let fm = FileManager.default
+        let file = try fm.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
+        let dir = try fm.attributesOfItem(atPath: url.deletingLastPathComponent().path)[.posixPermissions] as? Int
+        #expect(file == 0o600 && dir == 0o700)
+        let left = try fm.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
+        #expect(left == ["board.cache"])  // no temp file left behind
+    }
+
+    /// I2: a quiet board ticking (the 30 s refresh, a render that changes nothing) writes nothing.
+    @Test func aTickWithNoChangeWritesNothing() async {
+        let cache = BoardCache(url: temp())
+        let board = Board()
+        let model = BoardModel(board: board, cache: cache)
+        _ = board.apply(.snapshot(run: 1, seq: 0, machine: "fixture-mac", sessions: [session("a")]))
+        _ = board.apply(.meta(meta))
+        await settle { cache.writes == 1 }
+        try? await Task.sleep(for: .milliseconds(1100))  // past the throttle, so a write would show at once
+        let before = (cache.writes, model.renders)
+        for _ in 0..<5 {
+            model.refresh()
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        // A health reading alone is not a change to the board worth a write either.
+        var m = meta
+        m.health = Health(cpuPct: 99, memPct: 1, diskPct: 2, dev: 0, db: 0)
+        _ = board.apply(.meta(m))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(model.renders >= before.1 + 5)
+        #expect(cache.writes == before.0)
+        // A real change still writes.
+        _ = board.apply(.delta(Delta(seq: 1, upsert: [session("b")], remove: [])))
+        await settle { cache.writes == before.0 + 1 }
+        #expect(cache.writes == before.0 + 1)
     }
 
     /// A file cut short anywhere (a crash mid-write that bypassed the atomic rename, a full disk) reads as no cache.
@@ -208,5 +266,55 @@ private let meta = Meta(
         _ = board.apply(.snapshot(run: 1, seq: 0, machine: "fixture-mac", sessions: [session("new")]))
         await settle { model.cachedAt == nil }
         #expect(model.groups.flatMap(\.rows).map(\.key.sessionId) == ["new"])
+    }
+}
+
+@Suite struct BoardRowsTests {
+    private func groups(_ spec: [(String, [Session], [Session])]) -> [BoardGroup] {
+        spec.map { BoardGroup(name: $0.0, kind: .epic, rows: $0.1, older: $0.2) }
+    }
+
+    @Test func flattensHeadersRowsAndTheOlderLine() {
+        let g = groups([("A", [session("a"), session("b", .waiting)], [session("c", .done)])])
+        let shut = BoardRows.flatten(g, openOlder: [], cached: false).map(\.id)
+        #expect(shut.count == 4 && shut.first == "h:epic:A" && shut.last == "o:epic:A")
+        let open = BoardRows.flatten(g, openOlder: ["epic:A"], cached: false)
+        #expect(open.count == 5 && open.last?.session?.key.sessionId == "c")
+        guard case let .header(_, _, tally) = open[0] else { Issue.record("no header"); return }
+        #expect(tally == [.init(state: .working, count: 1), .init(state: .waiting, count: 1)])
+    }
+
+    /// One row's content changes: one reload, nothing removed or inserted.
+    @Test func aChangedRowIsReloadedInPlace() {
+        var b = session("b")
+        let old = BoardRows.flatten(groups([("A", [session("a"), b], [])]), openOlder: [], cached: false)
+        b.reason = "changed"
+        let new = BoardRows.flatten(groups([("A", [session("a"), b], [])]), openOlder: [], cached: false)
+        let e = BoardRows.edit(from: old, to: new)
+        #expect(e.removed.isEmpty && e.inserted.isEmpty && e.reloaded == [2])
+        #expect(BoardRows.edit(from: new, to: new).isEmpty)
+    }
+
+    /// Rows moving between groups, coming and going, folding: the edit applied as the table applies it gives the new
+    /// list exactly.
+    @Test func editsReproduceTheNewListAcrossMovesInsertsAndRemovals() {
+        let a = session("a"), b = session("b"), c = session("c"), d = session("d"), e = session("e", .done)
+        var b2 = b
+        b2.title = "renamed"
+        let cases: [([BoardGroup], [BoardGroup])] = [
+            (groups([("A", [a, b], []), ("B", [c], [])]), groups([("A", [a], []), ("B", [b2, c], [])])),
+            (groups([("A", [a, b, c], [e])]), groups([("A", [d, c, a], [e])])),
+            (groups([("A", [a], [])]), groups([("B", [b, c], []), ("A", [a], [])])),
+            (groups([("A", [a, b], [e]), ("B", [c, d], [])]), []),
+            ([], groups([("A", [a, b], [e])])),
+        ]
+        for (x, y) in cases {
+            for open in [Set<String>(), ["epic:A"]] {
+                let old = BoardRows.flatten(x, openOlder: open, cached: true)
+                let new = BoardRows.flatten(y, openOlder: open, cached: false)
+                let edit = BoardRows.edit(from: old, to: new)
+                #expect(BoardRows.apply(edit, to: old, from: new) == new)
+            }
+        }
     }
 }

@@ -23,12 +23,22 @@ public final class BoardModel: ObservableObject {
 
     /// How many renders ran (the coalescing test, and the bench).
     public private(set) var renders = 0
-    /// Called after each render, with whether it showed the cached board (the bench marks "on screen" from it).
-    public var onRender: (@MainActor (_ cached: Bool) -> Void)?
 
     private var cached: Board?
     private var coalescer: Coalescer!
     private var watch: AnyCancellable?
+    private var observers: [@MainActor (_ cached: Bool) -> Void] = []
+    /// What the cache last saw: a render that changes none of it (a clock tick, a health reading) writes nothing.
+    private var noted: Noted?
+
+    private struct Noted: Equatable {
+        var run: UInt64?
+        var seq: UInt64?
+        var machine: String?
+        var epics: [String]
+        var groups: [String]
+        var accounts: [Account]
+    }
 
     public init(board: Board, cache: BoardCache? = nil, cached contents: BoardCache.Contents? = nil) {
         self.board = board
@@ -43,8 +53,11 @@ public final class BoardModel: ObservableObject {
         coalescer = Coalescer { [weak self] in self?.render() }
         // objectWillChange fires before the change lands; the coalesced render runs on a later turn, after it.
         watch = board.objectWillChange.sink { [weak self] _ in self?.coalescer.mark() }
-        if cached != nil { render() }  // the cached board is drawn at once, with the window's first frame
+        if cached != nil { render() }  // the cached board is there before the window is
     }
+
+    /// Called after each render (coalesced: at most once per display frame), with whether it showed the cached board.
+    public func onRender(_ f: @escaping @MainActor (_ cached: Bool) -> Void) { observers.append(f) }
 
     /// The board the window shows: the live one once it has a Snapshot, the cached one until then.
     private var shown: Board? { board.run != nil ? board : cached }
@@ -55,7 +68,7 @@ public final class BoardModel: ObservableObject {
         return shown?.sessions[k]
     }
 
-    /// Re-reads the board (the ages and the 48 h fold move with the clock).
+    /// Re-reads the board (the 48 h fold moves with the clock).
     public func refresh() { coalescer.mark() }
 
     private func render() {
@@ -71,7 +84,15 @@ public final class BoardModel: ObservableObject {
         if m != meta { meta = m }
         if source?.machine != machine { machine = source?.machine }
         if live && cachedAt != nil { cachedAt = nil }
-        if live { cache?.note(board) }
-        onRender?(!live)
+        if live, let cache {
+            let now = Noted(
+                run: board.run, seq: board.seq, machine: board.machine, epics: m.epics, groups: m.groups,
+                accounts: m.accounts)
+            if now != noted {
+                noted = now
+                cache.note(board)
+            }
+        }
+        for f in observers { f(!live) }
     }
 }

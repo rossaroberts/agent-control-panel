@@ -26,16 +26,23 @@ public enum PostcardError: Error, Equatable, Sendable {
 
 /// Reads postcard values off the front of a byte buffer.
 public struct PostcardReader {
-    private let bytes: [UInt8]
-    private var at = 0
+    /// Read in place: a slice of a bigger Data (a mapped cache file, a socket buffer) is not copied. `at` and `end`
+    /// are indexes of `bytes`, which need not start at 0.
+    private let bytes: Data
+    private var at: Int
+    private let end: Int
 
-    public init(_ bytes: [UInt8]) { self.bytes = bytes }
-    public init(_ data: Data) { self.bytes = [UInt8](data) }
+    public init(_ bytes: [UInt8]) { self.init(Data(bytes)) }
+    public init(_ data: Data) {
+        bytes = data
+        at = data.startIndex
+        end = data.endIndex
+    }
 
-    public var remaining: Int { bytes.count - at }
+    public var remaining: Int { end - at }
 
     public mutating func u8() throws -> UInt8 {
-        guard at < bytes.count else { throw PostcardError.unexpectedEnd }
+        guard at < end else { throw PostcardError.unexpectedEnd }
         defer { at += 1 }
         return bytes[at]
     }

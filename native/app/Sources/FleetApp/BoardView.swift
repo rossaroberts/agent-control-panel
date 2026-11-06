@@ -1,162 +1,199 @@
-// The board window: a standard NavigationSplitView. The sidebar is the board as `public/fleet.html` groups it (Needs
-// you, the epics in fleet.json order, your groups, Other; BoardModel), each group a section with its tally, and the
-// done or ended rows older than 48 h behind an always-visible "N older" line. The detail is the selected session's
-// header (Task 6 puts its terminal under it). The selection is a SessionKey, so a row keeps it wherever it moves.
+// The board's sidebar: a view-based NSTableView with reused cells (Ruling P3-R6), grouped as `public/fleet.html` groups
+// it (BoardModel). Each coalesced render (at most one per display frame) is turned into a row edit (BoardRows) and
+// applied as removals, insertions and in-place reloads, never a reloadData per frame. The selection is a SessionKey:
+// a row keeps it wherever it moves. Done or ended rows older than 48 h sit behind an "N older" line whose open state
+// is kept per group, as fleet.html keeps it.
 
+import AppKit
+import Combine
 import FleetKit
-import SwiftUI
 
-struct BoardView: View {
-    @ObservedObject var model: BoardModel
-    /// The groups whose older rows are open.
-    @State private var openOlder: Set<String> = []
+@MainActor
+final class BoardController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    let model: BoardModel
+    let table = NSTableView()
+    private let scroll = NSScrollView()
+    private let empty = label(Fonts.small, align: .center)
+    private(set) var rows: [BoardRow] = []
+    private var applying = false
+    private var watches: [AnyCancellable] = []
+    private static let openKey = "openOlder"
+    private var openOlder: Set<String>
+    /// Called after every applied render (the bench draws and times it); and when the selection changes.
+    var onApplied: ((_ cached: Bool) -> Void)?
+    var onSelect: (() -> Void)?
 
-    var body: some View {
-        NavigationSplitView {
-            List(selection: $model.selection) {
-                if let at = model.cachedAt {
-                    Text("from \(Words.time(at))")
-                        .font(.rowSmall)
-                        .foregroundStyle(.secondary)
-                        .help("The board as it was at \(Words.time(at)), until fleetd answers")
-                        .selectionDisabled()
-                }
-                ForEach(model.groups) { g in
-                    Section {
-                        ForEach(g.rows, id: \.key) { s in
-                            RowView(session: s, cached: model.cachedAt != nil).tag(s.key)
-                        }
-                        if !g.older.isEmpty { older(g) }
-                    } header: {
-                        GroupHeader(group: g)
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-            .overlay { if model.groups.isEmpty { EmptyBoard(status: model.status) } }
-            .navigationSplitViewColumnWidth(min: 540, ideal: 680, max: 980)
-            .toolbar { AccountsToolbar(model: model) }
-        } detail: {
-            SessionHeader(session: model.selected, cachedAt: model.cachedAt)
-        }
-        .toolbar { BoardToolbar(model: model) }
-        .navigationTitle(model.needsYou > 0 ? "Fleet (\(model.needsYou))" : "Fleet")
-        .frame(minWidth: 820, minHeight: 420)
+    init(model: BoardModel) {
+        self.model = model
+        openOlder = Set(UserDefaults.standard.stringArray(forKey: Self.openKey) ?? [])
+        super.init(nibName: nil, bundle: nil)
     }
 
-    @ViewBuilder private func older(_ g: BoardGroup) -> some View {
-        let open = openOlder.contains(g.id)
-        Button {
-            if open { openOlder.remove(g.id) } else { openOlder.insert(g.id) }
-        } label: {
-            Text("\(open ? "▾" : "▸") \(g.older.count) older")
-                .font(.rowSmall)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Done or ended more than 48 hours ago")
-        .selectionDisabled()
-        if open {
-            ForEach(g.older, id: \.key) { s in
-                RowView(session: s, cached: model.cachedAt != nil).tag(s.key)
-            }
-        }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        let col = NSTableColumn(identifier: .init("board"))
+        col.resizingMask = .autoresizingMask
+        table.addTableColumn(col)
+        table.headerView = nil
+        table.style = .sourceList
+        table.rowSizeStyle = .custom
+        table.intercellSpacing = NSSize(width: 0, height: 0)
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        table.allowsEmptySelection = true
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.action = #selector(clicked)
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        empty.maximumNumberOfLines = 3
+        empty.usesSingleLineMode = false
+        empty.lineBreakMode = .byWordWrapping
+        // Frames, not constraints: no Auto Layout engine starts for the board at launch.
+        empty.frame = NSRect(x: 20, y: 0, width: 500, height: 60)
+        empty.autoresizingMask = [.width, .minYMargin, .maxYMargin]
+        scroll.frame = NSRect(x: 0, y: 0, width: 540, height: 400)
+        empty.frame.origin.y = (scroll.bounds.height - 60) / 2
+        empty.frame.size.width = scroll.bounds.width - 40
+        scroll.addSubview(empty)
+        view = scroll
+        model.onRender { [weak self] cached in self?.apply(cached: cached) }
+        // A status change is a render of its own (the note under "from <time>", the empty board's words).
+        watches.append(model.$status.receive(on: RunLoop.main).sink { [weak self] _ in self?.apply(cached: nil) })
+        apply(cached: nil)
     }
-}
 
-/// A group's name and its tally of live rows (fleet.html `tally`: "2 working  1 waiting").
-struct GroupHeader: View {
-    let group: BoardGroup
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(group.name)
-            Spacer(minLength: 8)
-            ForEach([SessionState.needsYou, .working, .capped, .waiting], id: \.self) { st in
-                let n = group.rows.filter { $0.live && $0.state == st }.count
-                if n > 0 {
-                    Text("\(n) \(st.word)").foregroundStyle(Palette.of(st))
-                }
-            }
+    /// The notes above the groups: the cached board's time, and why fleetd is not answering while it shows.
+    private func notes() -> [BoardRow] {
+        guard let at = model.cachedAt else { return [] }
+        var out: [BoardRow] = [.note(id: "from", text: "from \(Words.time(at))")]
+        switch model.status {
+        case .absent: out.append(.note(id: "why", text: "fleetd not running. Install it with: fleetd install-service"))
+        case let .refused(why): out.append(.note(id: "why", text: "fleetd refused: \(why)"))
+        case .live, .reconnecting: break
         }
-        .font(.rowSmall)
+        return out
     }
-}
 
-/// What the detail side shows for now: the selected session's header.
-struct SessionHeader: View {
-    let session: Session?
-    let cachedAt: Date?
-
-    var body: some View {
-        if let s = session {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(Words.title(s))
-                    .font(.title2)
-                    .textSelection(.enabled)
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    StateDot(state: s.state)
-                    StateWord(state: s.state)
-                    Text(s.reason)
-                        .font(.rowSmall)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
-                    fact("machine", s.key.machine)
-                    fact("account", s.account)
-                    fact("profile", s.key.profile)
-                    fact("folder", s.cwd)
-                    fact("model", s.model.map { [$0, s.effort].compactMap { $0 }.joined(separator: " · ") })
-                    fact("context", s.contextTokens.map { _ in Words.tokens(s.contextTokens) })
-                    fact("last active", s.lastAt.map { Words.ago($0) == "now" ? "now" : "\(Words.ago($0)) ago" })
-                    fact("job", s.jobId)
-                    if let at = cachedAt { fact("from", Words.time(at)) }
-                }
-                .font(.rowSmall)
-                Spacer()
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .navigationTitle(Words.title(s))
+    func apply(cached: Bool?) {
+        let next = notes() + BoardRows.flatten(model.groups, openOlder: openOlder, cached: model.cachedAt != nil)
+        applying = true
+        defer { applying = false }
+        if rows.isEmpty || next.isEmpty {
+            rows = next
+            table.reloadData()
         } else {
-            Text("Select a session")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            let edit = BoardRows.edit(from: rows, to: next)
+            if !edit.isEmpty {
+                rows = next
+                if !edit.removed.isEmpty || !edit.inserted.isEmpty {
+                    table.beginUpdates()
+                    table.removeRows(at: edit.removed, withAnimation: [])
+                    table.insertRows(at: edit.inserted, withAnimation: [])
+                    table.endUpdates()
+                }
+                if !edit.reloaded.isEmpty { table.reloadData(forRowIndexes: edit.reloaded, columnIndexes: [0]) }
+            }
+        }
+        // The selection follows its key to wherever the row is now.
+        let at = model.selection.flatMap { k in rows.firstIndex { $0.session?.key == k } }
+        if let at {
+            if table.selectedRow != at { table.selectRowIndexes([at], byExtendingSelection: false) }
+        } else if table.selectedRow >= 0 {
+            table.deselectAll(nil)
+        }
+        empty.isHidden = !rows.isEmpty
+        if rows.isEmpty { empty.stringValue = emptyWords() }
+        if let cached { onApplied?(cached) }
+        onSelect?()
+    }
+
+    private func emptyWords() -> String {
+        switch model.status {
+        case .absent: "fleetd not running\nFleet shows what fleetd sees. Install it with: fleetd install-service"
+        case let .refused(why): "fleetd refused the connection\n\(why)"
+        case .reconnecting: "connecting…"
+        case .live: "No sessions"
         }
     }
 
-    @ViewBuilder private func fact(_ k: String, _ v: String?) -> some View {
-        if let v, !v.isEmpty {
-            GridRow {
-                Text(k).foregroundStyle(.secondary)
-                Text(v).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
-            }
+    /// The 30 s tick: the 48 h fold is re-read (through the model, coalesced), and the visible rows' ages move.
+    /// Nothing else is redrawn.
+    func tick() {
+        model.refresh()
+        let now = Date()
+        let visible = table.rows(in: table.visibleRect)
+        for r in visible.lowerBound..<visible.upperBound {
+            (table.view(atColumn: 0, row: r, makeIfNecessary: false) as? RowCell)?.tick(now: now)
         }
     }
-}
 
-/// An empty board: why, in words (the app never starts fleetd itself).
-struct EmptyBoard: View {
-    let status: BoardClient.Status
+    /// Lays out and draws the table now and hands it to the window server (the bench's "on screen").
+    func paint() {
+        table.layoutSubtreeIfNeeded()
+        table.displayIfNeeded()
+        view.window?.displayIfNeeded()
+        CATransaction.flush()
+    }
 
-    var body: some View {
-        switch status {
-        case .absent:
-            ContentUnavailableView {
-                Label("fleetd not running", systemImage: "bolt.horizontal.circle")
-            } description: {
-                Text("Fleet shows what fleetd sees. Install it as a login service with\n`fleetd install-service`")
-            }
-        case let .refused(why):
-            ContentUnavailableView("fleetd refused the connection", systemImage: "exclamationmark.triangle",
-                                   description: Text(why))
-        case .reconnecting:
-            ProgressView().controlSize(.small)
-        case .live:
-            Text("No sessions").foregroundStyle(.secondary)
+    @objc private func clicked() {
+        let r = table.clickedRow
+        guard r >= 0, r < rows.count, case let .older(g, _, open) = rows[r] else { return }
+        if open { openOlder.remove(g) } else { openOlder.insert(g) }
+        UserDefaults.standard.set(openOlder.sorted(), forKey: Self.openKey)
+        apply(cached: nil)
+    }
+
+    // MARK: - table
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        switch rows[row] {
+        case .session: 30
+        case .header: 34
+        case .older: 26
+        case .note: 20
         }
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        func reuse<T: NSTableCellView>(_ id: NSUserInterfaceItemIdentifier, _ make: () -> T) -> T {
+            (tableView.makeView(withIdentifier: id, owner: nil) as? T) ?? make()
+        }
+        switch rows[row] {
+        case let .session(s, cached):
+            let c = reuse(RowCell.id, RowCell.init)
+            c.show(s, cached: cached)
+            return c
+        case let .header(_, name, tally):
+            let c = reuse(HeaderCell.id, HeaderCell.init)
+            c.show(name: name, tally: tally)
+            c.needsLayout = true
+            return c
+        case let .older(_, n, open):
+            let c = reuse(LineCell.id, LineCell.init)
+            c.text.stringValue = "\(open ? "▾" : "▸") \(n) older"
+            c.text.textColor = .secondaryLabelColor
+            c.toolTip = "Done or ended more than 48 hours ago"
+            return c
+        case let .note(id, text):
+            let c = reuse(LineCell.id, LineCell.init)
+            c.text.stringValue = text
+            c.text.textColor = id == "why" ? Palette.red : .secondaryLabelColor
+            c.toolTip = id == "from" ? "The board as it was then, until fleetd answers" : nil
+            return c
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { rows[row].session != nil }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !applying else { return }
+        let r = table.selectedRow
+        model.selection = r >= 0 && r < rows.count ? rows[r].session?.key : nil
+        onSelect?()
     }
 }

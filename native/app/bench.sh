@@ -1,7 +1,7 @@
 #!/bin/bash
 # The app's launch budgets (spec §9.3), as plan 1's bench gates the daemon's: Fleet.app's own --bench mode, run 1 + 3
 # times (the first warms the disk cache and writes the board cache), the median of the 3 against the budget.
-#   launch to the last board on screen  ≤ 50 ms   (lastBoardMs, from the board cache)
+#   launch to the last board on screen  ≤ 120 ms  (lastBoardMs, from the board cache; Ruling P3-R6)
 #   launch to the live board on screen  ≤ 200 ms  (liveMs, against a warm fleetd)
 # Run against a running fleetd (FLEETD_SOCK to pick one). Builds the app first unless FLEET_BENCH_NOBUILD=1.
 set -euo pipefail
@@ -16,7 +16,7 @@ done
 /usr/bin/python3 - "$work" <<'PY'
 import json, statistics, sys, pathlib
 runs = [json.loads((pathlib.Path(sys.argv[1]) / f"run{i}.json").read_text()) for i in (1, 2, 3)]
-budgets = {"lastBoardMs": 50, "liveMs": 200}
+budgets = {"lastBoardMs": 120, "liveMs": 200}
 ok = True
 for k, b in budgets.items():
     vals = [r.get(k) for r in runs]

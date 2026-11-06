@@ -87,12 +87,18 @@ public final class BoardCache {
             sessions: board.sessions.values.sorted { ($0.key.profile, $0.key.sessionId) < ($1.key.profile, $1.key.sessionId) },
             meta: board.meta))
         let url = url
-        disk.async {
-            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: url, options: .atomic)
-            // It holds session titles: yours alone, as fleetd's socket is.
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        }
+        disk.async { Self.writeFile(data, to: url) }
+    }
+
+    /// The temp file is 0600 from its first byte, in a 0700 folder, then renamed over the cache: the titles in it are
+    /// never readable by anyone else, and a reader sees the old file or the new one, never half of one.
+    private nonisolated static func writeFile(_ data: Data, to url: URL) {
+        let fm = FileManager.default
+        let dir = url.deletingLastPathComponent()
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).\(getpid()).tmp")
+        guard fm.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600]) else { return }
+        if rename(tmp.path, url.path) != 0 { try? fm.removeItem(at: tmp) }
     }
 
     public nonisolated static func encode(_ c: Contents) -> Data {
@@ -105,13 +111,13 @@ public final class BoardCache {
         return out
     }
 
-    public nonisolated static func decode(_ data: Data) -> Contents? {
-        let d = Data(data)  // indices from 0, whatever slice came in
-        var at = 0
+    /// Reads in place: the mapped file is indexed, and each frame decoded from its slice, with no copy of either.
+    public nonisolated static func decode(_ d: Data) -> Contents? {
+        var at = d.startIndex
         func take(_ n: Int) -> Data? {
-            guard n >= 0, d.count - at >= n else { return nil }
+            guard n >= 0, d.endIndex - at >= n else { return nil }
             defer { at += n }
-            return d.subdata(in: at..<(at + n))
+            return d[at..<(at + n)]
         }
         func le(_ n: Int) -> UInt64? {
             guard let b = take(n) else { return nil }
@@ -122,7 +128,7 @@ public final class BoardCache {
             return try? Frame.decode(body)
         }
         guard take(magic.count) == magic, le(2) == UInt64(Frame.proto), let ms = le(8) else { return nil }
-        guard case let .snapshot(_, _, machine, sessions)? = frame(), case let .meta(meta)? = frame(), at == d.count
+        guard case let .snapshot(_, _, machine, sessions)? = frame(), case let .meta(meta)? = frame(), at == d.endIndex
         else { return nil }
         return Contents(
             savedAt: Date(timeIntervalSince1970: Double(Int64(bitPattern: ms)) / 1000), machine: machine,
