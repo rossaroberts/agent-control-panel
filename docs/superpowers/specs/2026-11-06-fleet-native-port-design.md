@@ -111,9 +111,9 @@ listed in the port log as deliberately dropped with a reason.
   "needs you" pushes.
 - **Clients talk to the hub** for the board and for every action. A terminal on a redbat session is a pty on
   redbat, streamed by the hub.
-- **The Mac fast path (Claude's call).** A Mac round trip to redbat would break the ≤ 100 ms budget for Mac
-  sessions, so the Mac app also connects to the Mac's own `fleetd` and takes Mac sessions' live state and Mac
-  terminals straight from it, merged with the hub's board by session id. The hub stays the only source of the
+- **The Mac fast path (Ross: the Mac is where he works; the mechanism is Claude's call).** A round trip to
+  redbat (67 ms average, section 9.1) would break every Mac budget, so the Mac app also connects to the Mac's own `fleetd` and takes Mac sessions' live state, Mac
+  terminals and every action on a Mac session straight from it (section 9.2 rule 1), merged with the hub's board by session id. The hub stays the only source of the
   shared state. Both report the same state for a session because the same code decides it.
 - **When the hub is unreachable** (redbat down, no network) the Mac app keeps working on the Mac's own
   sessions from the local `fleetd`, shows a plain "hub unreachable" banner, and shows renames and archive as
@@ -224,22 +224,66 @@ project's `CLAUDE.md`, `AGENTS.md`, the memory index and its notes, the latest `
 - Context stays scoped to the paths it reads today plus whatever Ross adds; it never reads or writes
   outside them.
 
-## 9. Speed budgets (acceptance)
+## 9. Performance first (Ross: "optimized for performance, lean, really nailing it")
 
-Measured on the Mac on a normal day (not under the swap thrash of 2026-10-31):
+Speed is the product, not a property to check at the end. Ross does most of his work on the Mac, so **the Mac
+path is the one to make blazing fast**; redbat must be as fast as the network allows, with nothing of ours on
+top of it.
+
+### 9.1 The measured ground (2026-11-06)
+
+Mac → redbat over Tailscale is a direct peer link (not relayed), but jittery: ICMP round trip **24 / 67 / 134 ms**
+(min / avg / max over 5 pings). Anything that crosses to redbat pays that, at least once. So:
+
+### 9.2 Rules
+
+1. **Nothing Mac-local ever crosses the network.** For Mac sessions, the Mac app reads state, opens and types
+   into terminals, launches, sends, archives and answers permissions through the Mac's own `fleetd`, which then
+   tells the hub. The hub is never on a Mac hot path. If redbat vanished mid-keystroke, Mac work would not
+   notice.
+2. **Redbat costs one round trip, never more.** A redbat terminal is one stream straight to the pty on redbat:
+   no ssh hop, no relay process, no second hop through another machine. Keystrokes go as they are typed;
+   output comes as it is produced.
+3. **Predictive echo on redbat terminals (Claude's call).** Like mosh: typed characters show at once,
+   marked (faint underline) until redbat confirms them, so typing into a redbat session feels local despite
+   the 67 ms. On by default for redbat, never for the Mac (it does not need it), switchable per session.
+4. **Events, not polls.** State comes from file-system events and hook posts the instant they happen
+   (FSEvents with no coalescing delay on the Mac, inotify on redbat). The reconcile pass is a safety net, not
+   the source.
+5. **Deltas, not snapshots.** After the first snapshot on connect, only what changed crosses the wire, in a
+   compact binary encoding. No JSON re-serialising the whole board.
+6. **Read only what is new.** Transcripts (hundreds of MB) are read from the last offset, never re-scanned.
+   Per-session state is updated incrementally.
+7. **Nothing in between.** No web view, no JavaScript, no Node, no Python pty relay, no ssh on the hot path.
+   The app draws natively; the terminal renders on the GPU; long lists are lazily drawn.
+8. **Warm by default.** The Mac's recent Claude Code terminals stay attached and their screens buffered, so
+   switching is a redraw, not an attach. The app keeps the last board on disk and shows it at launch before
+   the first delta arrives (marked as "from <time>" for the instant it takes to refresh).
+9. **Lean.** One static `fleetd` binary per machine, no runtime to install. The app has no third-party
+   runtime. Idle means idle: no timers spinning, no CPU while nothing changes.
+10. **Measured on every change.** A benchmark suite covers each budget below and runs on every PR; a
+    regression beyond its budget fails the PR. The builder builds the harness first, before features.
+
+### 9.3 Budgets (acceptance)
+
+Measured on the Mac on a normal day (not under the swap thrash of 2026-10-31). Today's Node panel is measured
+with the same harness first, so every number has a "before".
 
 | Path | Budget |
 |---|---|
-| App launch to a full board (from a warm `fleetd`) | ≤ 300 ms |
-| A state change on the Mac to on screen | ≤ 100 ms |
-| A state change on redbat to on screen (over Tailscale) | ≤ 300 ms |
-| Switch to a recently opened session's terminal | ≤ 50 ms |
-| Open a session's terminal cold | ≤ 500 ms Mac, ≤ 1 s redbat |
-| Keystroke echo in the terminal, Mac session | indistinguishable from Terminal.app |
-| Satellite table on open | instant from cache, fresh within its interval |
-| `fleetd` idle cost | ≈ 0 % CPU, a small, stable memory footprint |
-
-The builder sets up the measurement harness so these are checked, not felt.
+| App launch to a full board (cold app, warm `fleetd`) | ≤ 200 ms; last board shown in ≤ 50 ms |
+| A Mac session's state change to on screen | ≤ 30 ms |
+| A redbat session's state change to on screen | one round trip + ≤ 20 ms |
+| Switch to a recently opened Mac terminal | one frame (≤ 16 ms) |
+| Open a Mac terminal cold | ≤ 150 ms |
+| Open a redbat terminal cold | one round trip + ≤ 150 ms |
+| Keystroke echo, Mac terminal | indistinguishable from Terminal.app (≤ 1 frame over the pty) |
+| Keystroke echo, redbat terminal | predicted at once; confirmed in one round trip |
+| Typing or speaking a message to a session, to it arriving | Mac ≤ 20 ms; redbat one round trip + ≤ 20 ms |
+| ⌘K quick switcher, open and filter | ≤ 1 frame per keystroke |
+| `fleetd` idle | 0 % CPU sampled over a minute; ≤ 30 MB resident |
+| Fleet.app idle with the board open | ≈ 0 % CPU; ≤ 150 MB resident |
+| Satellite on open | instant from cache; fresh within its interval |
 
 ## 10. Accounts and machines
 
@@ -274,6 +318,7 @@ the Mac and redbat; more by adding to the config.
 - Typing and speaking into a session, both instant. (Ross)
 - Tailscale for everything between devices. (Ross, earlier in this conversation)
 - A full switch, no side-by-side period. (Ross)
+- Performance first, lean, Mac path fastest, redbat as fast as the network allows. (Ross)
 - Archive and unarchive freely, by hand. (Ross)
 - Launcher presets are the existing start scripts and run the session-start ritual. (Ross)
 
