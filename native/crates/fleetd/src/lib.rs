@@ -7,6 +7,7 @@ pub mod attach_cmd;
 pub mod bench;
 pub mod board_meta;
 pub mod client;
+pub mod health;
 #[cfg(target_os = "macos")]
 pub mod kq;
 pub mod machine;

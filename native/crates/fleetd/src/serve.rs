@@ -224,6 +224,7 @@ async fn handle(
 
     // Subscribe before reading the board: a delta between the two is then in the receiver, not lost; the `seq` check
     // below drops the ones the board already holds.
+    let _client = store.board_client();
     let mut rx = store.subscribe();
     let mut meta = store.subscribe_meta();
     let mut last = match since.and_then(|n| store.since(n).map(|d| (n, d))) {

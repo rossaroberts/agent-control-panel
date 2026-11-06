@@ -8,7 +8,7 @@ use std::sync::Arc;
 use fleet_model::wire::Frame;
 use fleet_read::home::home_dir;
 use fleetd::store::Store;
-use fleetd::{attach, bench, client, machine, out, serve, service, terms, watch};
+use fleetd::{attach, bench, client, health, machine, out, serve, service, terms, watch};
 
 const USAGE: &str = "usage: fleetd serve | snapshot [--json] | watch | attach {--list|<profile>/<job>|codex/<id>|--trust <profile> <dir>} | install-service | uninstall-service\n       fleetd roster-parity [--rounds N] [--interval SECS] [--out FILE]";
 
@@ -99,6 +99,8 @@ fn run_serve() {
             store.run()
         );
         let machine = machine::machine_name(&home);
+        // The machine's health is sampled while a Board client is connected, and not otherwise.
+        let _health = health::spawn(store.clone(), health::Options::default());
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("SIGTERM handler");
         tokio::select! {

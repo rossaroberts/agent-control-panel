@@ -112,7 +112,10 @@ struct Shared {
     home: PathBuf,
     /// The Node panel's folder (`FLEETD_PANEL_DIR`, else `Library/Application Support/Agent Panel` under the home), as the
     /// file events name it when it exists: read-only, watched for its four board files.
-    panel_dir: PathBuf,
+    panel_dir: Mutex<PathBuf>,
+    /// The panel's folder did not exist at start, so `panel_dir` is not yet in the form file events name it: the
+    /// reconcile settles that when the folder appears.
+    panel_pending: AtomicBool,
     store: Arc<Store>,
     fleet: Mutex<Fleet>,
     roster: Box<dyn RosterSource + Send + Sync>,
@@ -143,6 +146,27 @@ struct Shared {
 pub struct WatchHandle {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
+}
+
+impl Shared {
+    /// The panel's folder as file events name it (once it exists).
+    fn panel_dir(&self) -> PathBuf {
+        self.panel_dir.lock().unwrap().clone()
+    }
+
+    /// The panel's folder has appeared since the start: its canonical path from now on. Whether this was the moment.
+    fn settle_panel(&self) -> bool {
+        if !self.panel_pending.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut d = self.panel_dir.lock().unwrap();
+        let Ok(canon) = d.canonicalize() else {
+            return false;
+        };
+        *d = canon;
+        self.panel_pending.store(false, Ordering::SeqCst);
+        true
+    }
 }
 
 impl WatchHandle {
@@ -330,10 +354,14 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join("Library/Application Support/Agent Panel"));
-    let panel_dir = panel_dir.canonicalize().unwrap_or(panel_dir);
+    let (panel_dir, panel_pending) = match panel_dir.canonicalize() {
+        Ok(d) => (d, false),
+        Err(_) => (panel_dir, true),
+    };
     let shared = Arc::new(Shared {
         home,
-        panel_dir,
+        panel_dir: Mutex::new(panel_dir),
+        panel_pending: AtomicBool::new(panel_pending),
         store,
         fleet: Mutex::new(fleet),
         roster: opts.roster,
@@ -429,7 +457,7 @@ fn arm(sh: &Shared) {
         RecursiveMode::Recursive,
     ));
     // The panel's folder holds the four board files and, below, a lot the board does not read.
-    want.push((sh.panel_dir.clone(), RecursiveMode::NonRecursive));
+    want.push((sh.panel_dir(), RecursiveMode::NonRecursive));
     #[cfg(target_os = "macos")]
     for d in profiles
         .iter()
@@ -545,11 +573,12 @@ fn dispatch(sh: &Arc<Shared>, rx: mpsc::Receiver<Vec<PathBuf>>) {
         while let Ok(more) = rx.try_recv() {
             paths.extend(more);
         }
+        let panel = sh.panel_dir();
         let routes: Vec<Route> = {
             let f = sh.fleet.lock().unwrap();
             paths
                 .iter()
-                .filter_map(|p| route(&sh.home, &sh.panel_dir, &f, p))
+                .filter_map(|p| route(&sh.home, &panel, &f, p))
                 .collect()
         };
         // kqueue has these: FSEvents is only discovery for them.
@@ -869,16 +898,18 @@ fn kq_loop(sh: &Arc<Shared>) {
                         *was = now;
                         ch
                     };
+                    let panel = sh.panel_dir();
                     let f = sh.fleet.lock().unwrap();
                     routes.extend(
                         changed
                             .iter()
-                            .filter_map(|n| route(&sh.home, &sh.panel_dir, &f, &d.join(n))),
+                            .filter_map(|n| route(&sh.home, &panel, &f, &d.join(n))),
                     );
                 }
                 Target::File(p) => {
+                    let panel = sh.panel_dir();
                     let f = sh.fleet.lock().unwrap();
-                    routes.extend(route(&sh.home, &sh.panel_dir, &f, &p));
+                    routes.extend(route(&sh.home, &panel, &f, &p));
                 }
                 Target::Pid(p) => exited.push(p),
             }
@@ -1135,8 +1166,8 @@ impl Refresh {
 }
 
 /// Reads the board's inputs again (without the board lock), lays them into the board, and sends what changed: the
-/// sessions whose title, epic, archive mark or account moved (`publish`; the start has no sessions yet), and the groups
-/// and accounts.
+/// sessions whose title, epic, archive mark or account moved (`publish`; the start has no sessions yet; a read of
+/// accounts only publishes when a login moved), and the groups and accounts.
 fn refresh_board(sh: &Arc<Shared>, what: Refresh, publish: bool) {
     let (profiles, codex_home) = {
         let f = sh.fleet.lock().unwrap();
@@ -1148,7 +1179,7 @@ fn refresh_board(sh: &Arc<Shared>, what: Refresh, publish: bool) {
             f.codex.home.clone(),
         )
     };
-    let panel = what.panel.then(|| read_panel_meta(&sh.panel_dir));
+    let panel = what.panel.then(|| read_panel_meta(&sh.panel_dir()));
     let accounts = what.accounts.then(|| {
         let limits: HashMap<_, _> = profiles
             .iter()
@@ -1160,11 +1191,13 @@ fn refresh_board(sh: &Arc<Shared>, what: Refresh, publish: bool) {
     if let Some(p) = panel {
         f.board.panel = p;
     }
+    let mut logins_moved = false;
     if let Some((a, limits)) = accounts {
+        logins_moved = f.board.emails != a.emails || f.board.codex_email != a.codex_email;
         f.board.set_accounts(a);
         f.board.claude_limits = limits;
     }
-    if publish {
+    if publish && (what.panel || logins_moved) {
         let all = f.all_sessions(now_ms());
         sh.store.replace(f.in_machine(), all);
     }
@@ -1176,9 +1209,15 @@ fn refresh_board(sh: &Arc<Shared>, what: Refresh, publish: bool) {
 fn reconcile(sh: &Arc<Shared>, rosters: bool) {
     let found = claude_profiles(&sh.home);
     let added = sh.fleet.lock().unwrap().add_profiles(found);
-    // A new profile's login is looked up now; everyone's with the 5-minute safety run.
+    // The panel's folder made after the start: watched under its real name and its four files read at once.
+    if sh.settle_panel() {
+        arm(sh);
+        refresh_board(sh, Refresh::PANEL, true);
+    }
+    // A new profile's login is looked up now; everyone's with the 5-minute safety run. A login that moved changes the
+    // `account` of the sessions shown.
     if rosters || !added.is_empty() {
-        refresh_board(sh, Refresh::ACCOUNTS, false);
+        refresh_board(sh, Refresh::ACCOUNTS, true);
     }
     #[cfg(target_os = "macos")]
     let plan = sh

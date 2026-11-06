@@ -38,6 +38,19 @@ pub struct Store {
     /// The board's groups, accounts and health: not per session, so not in the deltas. A connection sends the current
     /// one right after its first frame and again whenever it changes.
     meta: watch::Sender<Meta>,
+    /// How many Board connections are open: the health probe samples only while there is one.
+    clients: watch::Sender<usize>,
+}
+
+/// One open Board connection, counted in `Store::subscribe_clients` until this is dropped.
+pub struct BoardClient {
+    store: std::sync::Arc<Store>,
+}
+
+impl Drop for BoardClient {
+    fn drop(&mut self) {
+        self.store.clients.send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 impl Default for Store {
@@ -74,7 +87,21 @@ impl Store {
             }),
             tx: broadcast::channel(RING).0,
             meta: watch::channel(Meta::default()).0,
+            clients: watch::channel(0).0,
         }
+    }
+
+    /// Counts a Board connection until the returned guard is dropped.
+    pub fn board_client(self: &std::sync::Arc<Self>) -> BoardClient {
+        self.clients.send_modify(|n| *n += 1);
+        BoardClient {
+            store: self.clone(),
+        }
+    }
+
+    /// The number of open Board connections, and when it changes.
+    pub fn subscribe_clients(&self) -> watch::Receiver<usize> {
+        self.clients.subscribe()
     }
 
     /// The board's meta now.
@@ -88,8 +115,7 @@ impl Store {
         self.meta.subscribe()
     }
 
-    /// Changes the meta in place; `f` says whether it changed anything. Readers are woken only when it did. Whether it
-    /// did.
+    /// Changes the meta in place; `f` says whether it changed anything. Readers are woken only when it did.
     pub fn modify_meta(&self, f: impl FnOnce(&mut Meta) -> bool) -> bool {
         self.meta.send_if_modified(f)
     }

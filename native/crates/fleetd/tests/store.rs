@@ -1738,3 +1738,68 @@ async fn codex_s_account_and_limits_come_from_its_login_and_its_logs() {
         ]
     );
 }
+
+fn start_fast(home: &Home) -> (Arc<Store>, WatchHandle, Receiver<Delta>) {
+    use fleetd::watch::Options;
+    let store = Arc::new(Store::new());
+    let opts = Options {
+        reconcile_every: Duration::from_millis(200),
+        roster_safety_every: Duration::from_millis(200),
+        ..Options::default()
+    };
+    let h = fleetd::watch::watch_with(&home.root, store.clone(), opts).unwrap();
+    let rx = store.subscribe();
+    (store, h, rx)
+}
+
+/// A panel folder that is made after the start is read at once, with its files already in it, when the reconcile finds it
+/// (no later event would come for files that were there before the watch).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panel_folder_made_after_the_start_is_read_when_found() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    fs::remove_dir_all(home.panel()).unwrap();
+    let (store, _h, mut rx) = start_fast(&home);
+    assert_eq!(session(&store, 0).title.as_deref(), Some("fixture 0"));
+    // The folder arrives whole: made elsewhere, then renamed into place, so no event is for a file in it.
+    let tmp = home.root.join("panel-new");
+    fs::create_dir_all(&tmp).unwrap();
+    fs::write(
+        tmp.join("fleet-labels.json"),
+        json!({key(0): {"title": "From the new folder"}}).to_string(),
+    )
+    .unwrap();
+    fs::rename(&tmp, home.panel()).unwrap();
+    wait_for(&mut rx, Duration::from_secs(3), |s| {
+        s.title.as_deref() == Some("From the new folder")
+    })
+    .await
+    .expect("the label in the folder that appeared");
+    // And it is watched from then on.
+    home.panel_file(
+        "fleet-labels.json",
+        &json!({key(0): {"title": "Changed after"}}).to_string(),
+    );
+    wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.title.as_deref() == Some("Changed after")
+    })
+    .await
+    .expect("the folder is watched");
+}
+
+/// A login that changes reaches the sessions' `account` (and the accounts) by the next reconcile's account read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_login_change_updates_the_sessions_account() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    home.login("first.person@example.com");
+    let (store, _h, mut rx) = start_fast(&home);
+    assert_eq!(session(&store, 0).account.as_deref(), Some("first.person"));
+    home.login("second.person@example.com");
+    wait_for(&mut rx, Duration::from_secs(3), |s| {
+        s.account.as_deref() == Some("second.person")
+    })
+    .await
+    .expect("the session's new account");
+    assert_eq!(store.meta().accounts[0].name, "second.person");
+}

@@ -82,6 +82,12 @@ missing, truncated or non-JSON one counts as empty. A session is keyed `<machine
   you made (labels' groups that are not an epic), sorted; `accounts` hold one per engine and email with the newest plan
   limits its status lines (Claude Code) or logs (Codex) reported. A `Limit` is as last reported: a client shows a window
   whose `resets_at` has passed as 0 used. `health` is `None` until the machine's health is read.
+  The daemon samples it only while at least one board connection is open: the first sample at once when a client
+  connects, then every 5 s. `cpu_pct` is the one-minute load over the cores (held to 100), `mem_pct` active + wired +
+  compressor memory over the installed memory (Linux: total less available), `disk_pct` how full the home folder's
+  volume is, `dev` the ports listened on by `node`/`next*`/`vite`/`bun`/`deno` processes and `db` the running
+  `supabase_db_*` containers, both counted as `fleet/machine.mjs` counts them and asked at most every 30 s. A Meta is sent
+  when any of these moves. A client that connects after a quiet spell gets the last health held, then the fresh one.
 
 ## Terminals connections (`role: Terminals`)
 
