@@ -24,13 +24,17 @@ final class PageWindow: NSWindow {
 }
 
 @MainActor
-final class PageWindowController: NSObject, WKNavigationDelegate {
+final class PageWindowController: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     let page: Page
     private(set) var window: PageWindow?
     private(set) var webView: WKWebView?
     private var showingOffline = false
+    private var backButton: NSButton?, forwardButton: NSButton?
     /// A login just typed with "Remember" ticked: kept in the keychain once the page loads (a refused one is dropped).
     private var pending: (user: String, password: String, space: URLProtectionSpace)?
+    /// The 401s waiting on the one sheet; answered (cancelled) if the window closes, whatever else happens.
+    private let waiting = ChallengeQueue()
+    private var sheetOpen = false
 
     init(page: Page) {
         self.page = page
@@ -42,25 +46,59 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
         NSApp.activate()
     }
 
+    /// Closes the window (and with it the web view and any sheet).
+    func close() { window?.close() }
+
     private func build() {
         let w = PageWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = page.name
         w.isReleasedWhenClosed = false
+        w.delegate = self
         w.center()
         w.setFrameAutosaveName("FleetPage-\(page.name)")  // after center(): a saved frame wins
-        let cfg = WKWebViewConfiguration()
-        let v = WKWebView(frame: w.contentLayoutRect, configuration: cfg)
+        let v = WKWebView(frame: w.contentLayoutRect, configuration: WKWebViewConfiguration())
         v.autoresizingMask = [.width, .height]
         v.navigationDelegate = self
+        v.uiDelegate = self
         v.allowsBackForwardNavigationGestures = true
         w.contentView = v
         w.onKey = { [weak self] a in self?.handle(a) ?? false }
+        w.addTitlebarAccessoryViewController(buttons())
         window = w
         webView = v
         load()
     }
+
+    /// Back, Forward and Reload, visible in the title bar (the keys work too).
+    private func buttons() -> NSTitlebarAccessoryViewController {
+        func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
+            let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: tip) ?? NSImage(),
+                             target: self, action: action)
+            b.bezelStyle = .texturedRounded
+            b.toolTip = tip
+            return b
+        }
+        let back = button("chevron.left", "Back (\u{2318}\u{2325}\u{2190})", #selector(goBack))
+        let fwd = button("chevron.right", "Forward (\u{2318}\u{2325}\u{2192})", #selector(goForward))
+        let reload = button("arrow.clockwise", "Reload (\u{2318}R)", #selector(reloadPage))
+        back.isEnabled = false
+        fwd.isEnabled = false
+        backButton = back
+        forwardButton = fwd
+        let stack = NSStackView(views: [back, fwd, reload])
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        let vc = NSTitlebarAccessoryViewController()
+        vc.view = stack
+        vc.layoutAttribute = .trailing
+        return vc
+    }
+
+    @objc private func goBack() { _ = handle(.back) }
+    @objc private func goForward() { _ = handle(.forward) }
+    @objc private func reloadPage() { _ = handle(.reload) }
 
     private func load() {
         guard let u = page.address, let v = webView else { return }
@@ -79,7 +117,61 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
         return true
     }
 
+    private func syncButtons() {
+        backButton?.isEnabled = webView?.canGoBack ?? false
+        forwardButton?.isEnabled = webView?.canGoForward ?? false
+    }
+
+    // MARK: - closing
+
+    func windowWillClose(_ notification: Notification) {
+        if let w = window, let sheet = w.attachedSheet { w.endSheet(sheet) }
+        waiting.cancelAll()  // no 401 is left unanswered
+        pending = nil
+        webView?.stopLoading()
+        webView?.navigationDelegate = nil
+        webView?.uiDelegate = nil
+        // Released once the close has finished; the next open builds a fresh view (the frame is remembered).
+        DispatchQueue.main.async { [self] in
+            window?.contentView = nil
+            window?.delegate = nil
+            webView = nil
+            window = nil
+        }
+    }
+
     // MARK: - navigation
+
+    /// Only http and https go anywhere; anything else is cancelled.
+    func webView(
+        _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
+    ) {
+        route(PageNavPolicy.decide(url: action.request.url, pageURL: page.address, newWindow: action.targetFrame == nil),
+              decisionHandler)
+    }
+
+    /// target=_blank and window.open: never a second web view; same server loads here, another goes to the browser.
+    func webView(
+        _ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+        for action: WKNavigationAction, windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        route(PageNavPolicy.decide(url: action.request.url, pageURL: page.address, newWindow: true)) { _ in }
+        return nil
+    }
+
+    private func route(_ d: NavDecision, _ decide: @MainActor (WKNavigationActionPolicy) -> Void) {
+        switch d {
+        case .allow: decide(.allow)
+        case .cancel: decide(.cancel)
+        case .loadHere(let u):
+            decide(.cancel)
+            webView?.load(URLRequest(url: u))
+        case .external(let u):
+            decide(.cancel)
+            NSWorkspace.shared.open(u)
+        }
+    }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         fail(error)
@@ -89,16 +181,16 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
 
     private func fail(_ error: Error) {
         pending = nil
-        if (error as NSError).code == NSURLErrorCancelled { return }
-        guard PageAuth.isUnreachable(error) else { return }
+        guard let text = PageAuth.message(for: error, page: page.name) else { return }
         showingOffline = true
-        let name = page.name.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+        let safe = text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
         webView?.loadHTMLString(
             """
             <html><body style="font: 15px 'Inter Tight', -apple-system, sans-serif; color: #1a1a1a; \
             margin: 0; display: flex; height: 100vh; align-items: center; justify-content: center">
-            <p>\(name) needs the CHAI VPN \u{2014} connect and press Reload</p></body></html>
+            <p>\(safe)</p></body></html>
             """, baseURL: nil)
+        syncButtons()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -107,6 +199,7 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
             PageAuth.remember(user: p.user, password: p.password, for: p.space)
             pending = nil
         }
+        syncButtons()
     }
 
     func webView(
@@ -114,6 +207,9 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
         completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
         let space = challenge.protectionSpace
+        // A login is only ever asked for, or sent, on behalf of the page's own server.
+        let own = page.address.map { PageAuth.sameOrigin(host: space.host, port: space.port, page: $0) } ?? false
+        guard own else { return completionHandler(.cancelAuthenticationChallenge, nil) }
         if challenge.previousFailureCount > 0 {
             PageAuth.forget(for: space)
             pending = nil
@@ -125,19 +221,25 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
         case .useStored(let c): completionHandler(.useCredential, c)
         case .systemDefault: completionHandler(.performDefaultHandling, nil)
         case .prompt:
+            waiting.add { d, c in MainActor.assumeIsolated { completionHandler(d, c) } }
+            guard !sheetOpen else { return }  // one sheet answers every 401 waiting on it
+            sheetOpen = true
             ask(space: space, retry: challenge.previousFailureCount > 0) { [weak self] user, password, remember in
-                guard let user else { return completionHandler(.cancelAuthenticationChallenge, nil) }
-                if remember { self?.pending = (user, password, space) }
-                completionHandler(.useCredential, URLCredential(user: user, password: password, persistence: .forSession))
+                guard let self else { return }
+                self.sheetOpen = false
+                guard let user else { return self.waiting.cancelAll() }
+                if remember { self.pending = (user, password, space) }
+                self.waiting.resolve(URLCredential(user: user, password: password, persistence: .forSession))
             }
         }
     }
 
-    /// The login sheet: user, password, "Remember in Keychain" (ticked).
+    /// The login sheet: which server asks (host:port), user, password, "Remember in Keychain" (ticked).
     private func ask(space: URLProtectionSpace, retry: Bool, done: @escaping @MainActor (String?, String, Bool) -> Void) {
+        guard let w = window else { return done(nil, "", false) }
         let alert = NSAlert()
         alert.messageText = retry ? "Sign in to \(page.name) again" : "Sign in to \(page.name)"
-        alert.informativeText = "\(space.host)" + (space.realm.map { " \u{2014} \($0)" } ?? "")
+        alert.informativeText = "\(space.host):\(space.port)" + (space.realm.map { " \u{2014} \($0)" } ?? "")
         let user = NSTextField(frame: NSRect(x: 0, y: 56, width: 260, height: 24))
         user.placeholderString = "User"
         let pass = NSSecureTextField(frame: NSRect(x: 0, y: 28, width: 260, height: 24))
@@ -151,7 +253,7 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
         alert.addButton(withTitle: "Sign In")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = user
-        let finish: (NSApplication.ModalResponse) -> Void = { r in
+        alert.beginSheetModal(for: w) { r in
             MainActor.assumeIsolated {
                 if r == .alertFirstButtonReturn {
                     done(user.stringValue, pass.stringValue, remember.state == .on)
@@ -160,7 +262,6 @@ final class PageWindowController: NSObject, WKNavigationDelegate {
                 }
             }
         }
-        if let w = window { alert.beginSheetModal(for: w, completionHandler: finish) } else { finish(alert.runModal()) }
     }
 }
 
@@ -182,6 +283,7 @@ final class PagesController: NSObject, NSMenuDelegate {
         m.delegate = self
         let top = NSMenuItem(title: "Pages", action: nil, keyEquivalent: "")
         top.submenu = m
+        menuNeedsUpdate(m)  // filled now, not only when first opened: ⌘⇧V works on a cold launch
         return top
     }
 
@@ -189,7 +291,7 @@ final class PagesController: NSObject, NSMenuDelegate {
         menu.removeAllItems()
         let list = pages.all
         for p in list {
-            let key = p == list.first(where: { $0.name == "Vitals" }) ? "v" : ""
+            let key = p == list.first(where: { $0.name.caseInsensitiveCompare("Vitals") == .orderedSame }) ? "v" : ""
             let item = NSMenuItem(title: p.name, action: #selector(open(_:)), keyEquivalent: key)
             if !key.isEmpty { item.keyEquivalentModifierMask = [.command, .shift] }
             item.target = self
@@ -215,7 +317,11 @@ final class PagesController: NSObject, NSMenuDelegate {
     }
 
     func show(_ p: Page) {
-        let c = controllers[p.name].flatMap { $0.page == p ? $0 : nil } ?? PageWindowController(page: p)
+        if let old = controllers[p.name], old.page != p {  // its address changed: the old window goes
+            old.close()
+            controllers[p.name] = nil
+        }
+        let c = controllers[p.name] ?? PageWindowController(page: p)
         controllers[p.name] = c
         c.show()
     }
@@ -251,7 +357,14 @@ final class PagesController: NSObject, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = name
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        if pages.add(name: name.stringValue, url: url.stringValue) == .invalid { NSSound.beep() }
+        switch pages.add(name: name.stringValue, url: url.stringValue) {
+        case .invalid: NSSound.beep()
+        case .replaced:  // same name, maybe a new address: the old window (and its web view) goes
+            for k in controllers.keys where k.caseInsensitiveCompare(name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame {
+                controllers.removeValue(forKey: k)?.close()
+            }
+        case .added: break
+        }
     }
 
     @objc private func removePage(_ sender: NSMenuItem) {
@@ -262,7 +375,7 @@ final class PagesController: NSObject, NSMenuDelegate {
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        controllers.removeValue(forKey: name)?.window?.close()
+        controllers.removeValue(forKey: name)?.close()
         pages.remove(name: name)
     }
 }

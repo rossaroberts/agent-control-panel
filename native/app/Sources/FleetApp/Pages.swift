@@ -54,14 +54,14 @@ struct Pages {
         all = all.filter { $0.name != name }
     }
 
-    /// What was typed as an address: http or https with a host; a bare host.name gets https.
+    /// What was typed as an address: http or https with a host and no user:pass@; a bare host.name gets https.
     static func parseURL(_ typed: String) -> URL? {
         var t = typed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
         if !t.contains("://") { t = "https://" + t }
         guard let u = URL(string: t), let s = u.scheme?.lowercased(), s == "http" || s == "https",
-            let h = u.host, !h.isEmpty
-        else { return nil }
+            let h = u.host, !h.isEmpty, u.user == nil, u.password == nil
+        else { return nil }  // user:pass@host is refused: a password never goes into the saved list
         return u
     }
 }
