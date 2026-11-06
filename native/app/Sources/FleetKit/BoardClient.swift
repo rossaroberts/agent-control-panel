@@ -43,8 +43,14 @@ public actor BoardClient {
 
     /// Starts (or restarts, on another socket) the connection loop.
     public func start(socket url: URL) {
+        start(endpoint: .unix(url))
+    }
+
+    /// Starts (or restarts, on another endpoint) the connection loop: a Unix socket, or another machine's fleetd over
+    /// TCP. The conversation, the backoff and the statuses are the same for both.
+    public func start(endpoint: Endpoint) {
         halt()
-        task = Task { await self.run(url) }
+        task = Task { await self.run(endpoint) }
     }
 
     /// Ends the connection, and every `statuses()` stream.
@@ -85,15 +91,19 @@ public actor BoardClient {
         for w in watchers.values { w.yield(s) }
     }
 
-    private func run(_ url: URL) async {
+    private func run(_ endpoint: Endpoint) async {
         var backoff = Self.backoffFloor
         // A Hello with no since asks for a Snapshot: after the board lost step it must not resume from where it was.
         var fresh = false
         while !Task.isCancelled {
             let sock: FrameSocket
             do {
-                sock = try FrameSocket.connect(url)
+                // Off the actor: while a dead host takes its time, status, stop() and start(endpoint:) still answer.
+                sock = try await FrameSocket.connectOffActor(endpoint)
             } catch {
+                // A loop stopped (or replaced by a new start) while connecting says nothing more: the status is no
+                // longer its to set.
+                if Task.isCancelled { break }
                 set(error as? SocketError == .absent ? .absent : .reconnecting)
                 try? await Task.sleep(for: backoff)
                 backoff = min(backoff * 2, Self.backoffCeiling)

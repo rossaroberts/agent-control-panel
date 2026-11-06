@@ -262,6 +262,254 @@ private func cpuMs() -> Double {
     return t(u.ru_utime) + t(u.ru_stime)
 }
 
+/// A loopback TCP relay to a Unix socket, standing in for the path a phone takes to a Mac's fleetd: it accepts on
+/// 127.0.0.1 (a port the kernel picks) and, for each connection, pumps bytes both ways to the socket at `target` on two
+/// threads of its own. Only its own fds and threads are ever stopped.
+private final class TCPRelay: @unchecked Sendable {
+    let port: UInt16
+    private let listener: Int32
+    private let target: URL
+    private let lock = NSLock()
+    private var stopped = false
+    private var conns: [Int32] = []
+    private let threads = DispatchGroup()
+
+    init(to target: URL) throws {
+        self.target = target
+        let l = socket(AF_INET, SOCK_STREAM, 0)
+        guard l >= 0 else { throw SocketError.failed(errno: errno) }
+        var one: Int32 = 1
+        _ = setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        addr.sin_port = 0
+        let ok = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(l, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0 && listen(l, 16) == 0
+            }
+        }
+        guard ok else { throw SocketError.failed(errno: errno) }
+        var bound = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(l, $0, &len) }
+        }
+        listener = l
+        port = UInt16(bigEndian: bound.sin_port)
+        threads.enter()
+        Thread { [self] in
+            acceptLoop()
+            threads.leave()
+        }.start()
+    }
+
+    private func acceptLoop() {
+        while !lock.withLock({ stopped }) {
+            var p = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+            guard poll(&p, 1, 20) == 1 else { continue }
+            let c = accept(listener, nil, nil)
+            guard c >= 0 else { continue }
+            var one: Int32 = 1
+            _ = setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            guard let u = connectUnix() else {
+                Darwin.close(c)
+                continue
+            }
+            let keep = lock.withLock { () -> Bool in
+                if stopped { return false }
+                conns += [c, u]
+                return true
+            }
+            guard keep else {
+                Darwin.close(c)
+                Darwin.close(u)
+                continue
+            }
+            for (from, to) in [(c, u), (u, c)] {
+                threads.enter()
+                Thread { [self] in
+                    Self.pump(from, to)
+                    threads.leave()
+                }.start()
+            }
+        }
+    }
+
+    private func connectUnix() -> Int32? {
+        let u = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard u >= 0 else { return nil }
+        var one: Int32 = 1
+        _ = setsockopt(u, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        let path = Array(target.path.utf8)
+        withUnsafeMutableBytes(of: &addr.sun_path) { $0.copyBytes(from: path) }
+        let r = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(u, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if r != 0 {
+            Darwin.close(u)
+            return nil
+        }
+        return u
+    }
+
+    /// Copies `from` to `to` until either side ends, then ends both (so the other pump stops too).
+    private static func pump(_ from: Int32, _ to: Int32) {
+        var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        outer: while true {
+            let n = buf.withUnsafeMutableBytes { read(from, $0.baseAddress!, $0.count) }
+            if n < 0 && errno == EINTR { continue }
+            guard n > 0 else { break }
+            var at = 0
+            while at < n {
+                let w = buf.withUnsafeBytes { write(to, $0.baseAddress! + at, n - at) }
+                if w < 0 && errno == EINTR { continue }
+                guard w > 0 else { break outer }
+                at += w
+            }
+        }
+        _ = shutdown(from, SHUT_RDWR)
+        _ = shutdown(to, SHUT_RDWR)
+    }
+
+    /// Stops accepting, ends every relayed connection, waits for its threads, and closes its fds.
+    func stop() {
+        let fds = lock.withLock { () -> [Int32] in
+            stopped = true
+            return conns
+        }
+        for f in fds { _ = shutdown(f, SHUT_RDWR) }
+        threads.wait()
+        for f in fds { Darwin.close(f) }
+        Darwin.close(listener)
+    }
+}
+
+/// A loopback port that was bound and then let go of: nothing listens on it now.
+private func closedPort() throws -> UInt16 {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw SocketError.failed(errno: errno) }
+    defer { Darwin.close(fd) }
+    var addr = sockaddr_in()
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let ok = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0 }
+    }
+    guard ok else { throw SocketError.failed(errno: errno) }
+    var bound = sockaddr_in()
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    _ = withUnsafeMutablePointer(to: &bound) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+    }
+    return UInt16(bigEndian: bound.sin_port)
+}
+
+/// A loopback port where a connect neither completes nor is refused: the network's black hole (a Mac asleep, a
+/// tailnet path down), made on this machine. A listener that never accepts, its backlog filled with connections of
+/// this helper's own: the kernel then drops every further SYN, and a connect waits as for a host that does not answer.
+/// Backlog 1 rather than 0, as Darwin takes 0 to mean `kern.ipc.somaxconn` (128); the fill goes on until a probe stays
+/// pending, so it holds whatever the kernel's limit is. Bound on 127.0.0.1, and on ::1 too when `v6` (one port for
+/// both, as "localhost" names both). Only its own fds are ever closed.
+private final class BlackHole {
+    let port: UInt16
+    private var fds: [Int32] = []
+
+    init(v6: Bool = false) throws {
+        var tries = 0
+        while true {
+            tries += 1
+            fds = []
+            guard let l4 = Self.listener(AF_INET, port: 0) else { throw SocketError.failed(errno: errno) }
+            fds.append(l4)
+            let p = Self.boundPort(l4)
+            if v6 {
+                guard let l6 = Self.listener(AF_INET6, port: p) else {
+                    // That port is taken on ::1: another one.
+                    for f in fds { Darwin.close(f) }
+                    if tries < 20 { continue }
+                    throw SocketError.failed(errno: errno)
+                }
+                fds.append(l6)
+            }
+            port = p
+            break
+        }
+        try fill(AF_INET)
+        if v6 { try fill(AF_INET6) }
+    }
+
+    deinit { for f in fds { Darwin.close(f) } }
+
+    private static func addr(_ family: Int32, port: UInt16, _ body: (UnsafePointer<sockaddr>, socklen_t) -> Int32) -> Int32 {
+        if family == AF_INET {
+            var a = sockaddr_in()
+            a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            a.sin_family = sa_family_t(AF_INET)
+            a.sin_addr.s_addr = inet_addr("127.0.0.1")
+            a.sin_port = port.bigEndian
+            return withUnsafePointer(to: &a) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { body($0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+        }
+        var a = sockaddr_in6()
+        a.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+        a.sin6_family = sa_family_t(AF_INET6)
+        a.sin6_addr = in6addr_loopback
+        a.sin6_port = port.bigEndian
+        return withUnsafePointer(to: &a) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { body($0, socklen_t(MemoryLayout<sockaddr_in6>.size)) }
+        }
+    }
+
+    private static func listener(_ family: Int32, port: UInt16) -> Int32? {
+        let fd = socket(family, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        if family == AF_INET6 {
+            var one: Int32 = 1
+            _ = setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, socklen_t(MemoryLayout<Int32>.size))
+        }
+        guard addr(family, port: port, { bind(fd, $0, $1) }) == 0, listen(fd, 1) == 0 else {
+            Darwin.close(fd)
+            return nil
+        }
+        return fd
+    }
+
+    private static func boundPort(_ fd: Int32) -> UInt16 {
+        var a = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &a) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        return UInt16(bigEndian: a.sin_port)
+    }
+
+    /// Connects to the listener until one connect stays pending for 200 ms: the backlog is full.
+    private func fill(_ family: Int32) throws {
+        for _ in 0..<512 {
+            let c = socket(family, SOCK_STREAM, 0)
+            guard c >= 0 else { throw SocketError.failed(errno: errno) }
+            _ = fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK)
+            _ = Self.addr(family, port: port) { Darwin.connect(c, $0, $1) }
+            var p = pollfd(fd: c, events: Int16(POLLOUT), revents: 0)
+            if poll(&p, 1, 200) == 0 {
+                Darwin.close(c)  // the probe: never queued, nothing to keep
+                return
+            }
+            fds.append(c)
+        }
+        throw SocketError.failed(errno: EAGAIN)
+    }
+}
+
 @MainActor @Suite(.serialized) struct ClientTests {
     /// (a) Connect and get the Snapshot; a hook write arrives as a Delta in < 20 ms.
     @Test func connectsGetsTheSnapshotAndAHookWriteArrivesFast() async throws {
@@ -717,6 +965,123 @@ private func cpuMs() -> Double {
         await client.stop()
         let seen = await reader.value  // returns only if the stream finished
         #expect(seen >= 1)
+    }
+
+    /// The board over TCP, through a loopback relay to the fixture's socket (the phone's path to a Mac): live, with the
+    /// fixture's three sessions.
+    @Test func boardOverTCP() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let relay = try TCPRelay(to: fx.socket)
+        let board = Board()
+        let client = BoardClient(board: board)
+        try await cleaning {
+            // The daemon may still be binding its socket: the relay's first connections can fail and the client retries.
+            #expect(await until(15) { FileManager.default.fileExists(atPath: fx.socket.path) })
+            await client.start(endpoint: .tcp(host: "127.0.0.1", port: relay.port))
+            #expect(await until(5) { await client.status == .live && board.sessions.count == 3 })
+            #expect(board.machine == "fixture-mac")
+        } then: {
+            await client.stop()
+            relay.stop()
+            fx.stopDaemon()
+        }
+    }
+
+    /// Nothing listening on a TCP port is `.absent`, as a missing socket is.
+    @Test func tcpRefusedIsAbsent() throws {
+        let port = try closedPort()
+        #expect(throws: SocketError.absent) { try FrameSocket.connect(.tcp(host: "127.0.0.1", port: port)) }
+    }
+
+    /// A host that never answers (a black hole: SYNs dropped, nothing refused) is `.absent` once the connect timeout
+    /// is spent, not after the kernel's own ~75 s.
+    @Test func tcpTimeoutIsAbsent() throws {
+        let hole = try BlackHole()
+        let t0 = ContinuousClock.now
+        #expect(throws: SocketError.absent) { try FrameSocket.connect(.tcp(host: "127.0.0.1", port: hole.port)) }
+        let took = ContinuousClock.now - t0
+        #expect(took >= .milliseconds(2900) && took < .seconds(4), "took \(took)")
+        #expect(FrameSocket.tcpConnectTimeout == .seconds(3))
+        withExtendedLifetime(hole) {}  // held open until here: released early, it would refuse instead
+    }
+
+    /// The timeout is the whole connect's, not each address's: "localhost" names ::1 and 127.0.0.1, both black holes
+    /// here, and it is `.absent` in 3 s, not 6.
+    @Test func tcpDeadlineIsSharedAcrossAddresses() throws {
+        let hole = try BlackHole(v6: true)
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var list: UnsafeMutablePointer<addrinfo>?
+        try #require(getaddrinfo("localhost", String(hole.port), &hints, &list) == 0)
+        var count = 0
+        var at = list
+        while let ai = at {
+            count += 1
+            at = ai.pointee.ai_next
+        }
+        freeaddrinfo(list)
+        try #require(count >= 2, "localhost resolves to \(count) address(es) here")
+        let t0 = ContinuousClock.now
+        #expect(throws: SocketError.absent) { try FrameSocket.connect(.tcp(host: "localhost", port: hole.port)) }
+        let took = ContinuousClock.now - t0
+        #expect(took >= .milliseconds(2900) && took < .seconds(4), "took \(took) over \(count) addresses")
+        withExtendedLifetime(hole) {}
+    }
+
+    /// A connect pending on a dead host does not hold either client's actor: status, input and stop() answer at once.
+    @Test func aPendingConnectDoesNotHoldTheActor() async throws {
+        let hole = try BlackHole()
+        let endpoint = Endpoint.tcp(host: "127.0.0.1", port: hole.port)
+        let client = BoardClient(board: Board())
+        let terms = TermClient()
+        await client.start(endpoint: endpoint)
+        await terms.start(endpoint: endpoint)
+        try await cleaning {
+            // Well inside the first 3 s attempt: both loops are in their connect.
+            try await Task.sleep(for: .milliseconds(300))
+            var t0 = ContinuousClock.now
+            _ = await client.status
+            #expect(ContinuousClock.now - t0 < .milliseconds(100), "status took \(ContinuousClock.now - t0)")
+            t0 = ContinuousClock.now
+            await terms.input(1, Data("x".utf8))
+            _ = await terms.connected
+            #expect(ContinuousClock.now - t0 < .milliseconds(100), "terminals took \(ContinuousClock.now - t0)")
+            t0 = ContinuousClock.now
+            await client.stop()
+            #expect(ContinuousClock.now - t0 < .milliseconds(100), "board stop took \(ContinuousClock.now - t0)")
+            t0 = ContinuousClock.now
+            await terms.stop()
+            #expect(ContinuousClock.now - t0 < .milliseconds(100), "terminals stop took \(ContinuousClock.now - t0)")
+        } then: {
+            await client.stop()
+            await terms.stop()
+            // Held open until here (released early, it would refuse, and nothing would be pending). Closing it then
+            // refuses the connects still pending on their threads, which end on their own.
+            withExtendedLifetime(hole) {}
+        }
+    }
+
+    /// A TCP connection turns Nagle off: a keystroke's frame goes out at once, not behind the last one's ack.
+    @Test func tcpNoDelay() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let relay = try TCPRelay(to: fx.socket)
+        defer {
+            relay.stop()
+            fx.stopDaemon()
+        }
+        let sock = try FrameSocket.connect(.tcp(host: "127.0.0.1", port: relay.port))
+        defer { sock.close() }
+        let fd = try #require(sock.fdForTesting)
+        var v: Int32 = 0
+        var len = socklen_t(MemoryLayout<Int32>.size)
+        #expect(getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, &len) == 0)
+        // Darwin reports the flag bit (TF_NODELAY, 4), not 1: on is any non-zero value.
+        #expect(v != 0, "TCP_NODELAY is \(v)")
+        // Blocking again after the timed connect: the read thread blocks in read(2), it does not spin on EAGAIN.
+        #expect(fcntl(fd, F_GETFL, 0) & O_NONBLOCK == 0)
     }
 
     /// (d) No socket: `.absent`, and no busy loop (CPU over 5 s ≈ 0).

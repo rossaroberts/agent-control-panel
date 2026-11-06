@@ -278,8 +278,13 @@ public actor TermClient {
     }
 
     public func start(socket url: URL) {
+        start(endpoint: .unix(url))
+    }
+
+    /// As `start(socket:)`, on any endpoint: a Unix socket, or another machine's fleetd over TCP.
+    public func start(endpoint: Endpoint) {
         stop()
-        task = Task { await self.run(url) }
+        task = Task { await self.run(endpoint) }
     }
 
     /// Ends the connection and every terminal (each `end` yields nil). The daemon releases them as at a hang-up.
@@ -426,10 +431,11 @@ public actor TermClient {
         socket?.enqueue(frames)
     }
 
-    private func run(_ url: URL) async {
+    private func run(_ endpoint: Endpoint) async {
         var backoff = BoardClient.backoffFloor
         while !Task.isCancelled {
-            guard let sock = try? FrameSocket.connect(url) else {
+            // Off the actor: while a dead host takes its time, input, open and stop() still answer.
+            guard let sock = try? await FrameSocket.connectOffActor(endpoint) else {
                 try? await Task.sleep(for: backoff)
                 backoff = min(backoff * 2, BoardClient.backoffCeiling)
                 continue

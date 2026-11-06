@@ -4,14 +4,24 @@
 // write that waits on the daemon's backpressure never stops output being read.
 //
 // Raw sockets rather than Network.framework: a blocking read on a dedicated thread is the shortest path from the
-// kernel to the decoder (no event-loop hop), and a Unix endpoint needs nothing NWConnection adds.
+// kernel to the decoder (no event-loop hop), and a Unix endpoint needs nothing NWConnection adds. The same holds over
+// TCP (a phone reaching a Mac's fleetd across the tailnet): once connected, a TCP fd reads and writes exactly as a Unix
+// one does, so the frame loop, the gate and the write queue are shared, and only the connect differs.
 
 import Darwin
 import Foundation
 import Synchronization
 
+/// Where a daemon listens: its Unix socket on this machine, or a TCP address (another machine's fleetd, reached over
+/// the network). Both carry the same framed conversation.
+public enum Endpoint: Sendable, Equatable {
+    case unix(URL)
+    case tcp(host: String, port: UInt16)
+}
+
 public enum SocketError: Error, Equatable, Sendable {
-    /// No daemon: the socket file is not there, or nothing listens on it (a stale file).
+    /// No daemon: the socket file is not there, or nothing listens on it (a stale file). Over TCP: the name does not
+    /// resolve, or the host refuses, cannot be reached, or does not answer (a Mac asleep or off the tailnet).
     case absent
     /// The path does not fit a `sockaddr_un`.
     case pathTooLong
@@ -98,6 +108,129 @@ public final class FrameSocket: Sendable {
     deinit {
         fd.shutdown()
         gate.shutDown()
+    }
+
+    /// The fd, for a test's getsockopt; nil once closed.
+    var fdForTesting: Int32? { fd.value }
+
+    /// Connects to `endpoint`, blocking the caller until it is connected or refused (as the Unix connect does). Throws
+    /// `SocketError.absent` when no daemon is there.
+    public static func connect(_ endpoint: Endpoint) throws -> FrameSocket {
+        switch endpoint {
+        case let .unix(url): return try connect(url)
+        case let .tcp(host, port): return try connectTCP(host: host, port: port)
+        }
+    }
+
+    /// Every address `host` resolves to, in the resolver's order, until one takes the connection. A name that does not
+    /// resolve, and a host that refuses or cannot be reached, are `.absent`: to a client that is a daemon not there
+    /// now, and it keeps retrying on its backoff (a Mac waking, a tailnet coming back), where `.failed` would be a fault.
+    private static func connectTCP(host: String, port: UInt16) throws -> FrameSocket {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var list: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &list) == 0, let first = list else { throw SocketError.absent }
+        defer { freeaddrinfo(first) }
+        // One deadline for every address the name gave (a dual-stack name has two): the whole connect takes at most
+        // `tcpConnectTimeout`, so a dead host is `.absent` in that time however many addresses it has.
+        let deadline = ContinuousClock.now + tcpConnectTimeout
+        var last: Int32 = ECONNREFUSED
+        var at: UnsafeMutablePointer<addrinfo>? = first
+        while let ai = at {
+            at = ai.pointee.ai_next
+            guard ContinuousClock.now < deadline else {
+                last = ETIMEDOUT
+                break
+            }
+            let fd = socket(ai.pointee.ai_family, ai.pointee.ai_socktype, ai.pointee.ai_protocol)
+            guard fd >= 0 else {
+                last = errno
+                continue
+            }
+            // As for the Unix socket: close-on-exec before anything else can fork, and no SIGPIPE from a write to a
+            // connection the far side dropped (the write fails with EPIPE instead, which ends the connection).
+            _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+            var one: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            var e = connectWithin(fd, ai.pointee.ai_addr, ai.pointee.ai_addrlen, deadline)
+            if e == 0 {
+                // Nagle off: a keystroke (one small TermIn) goes out at once, not held behind the previous one's ack.
+                // Over a Unix socket there is no such delay; over a tailnet it would be a round trip per keystroke. A
+                // connection that cannot have it is not used: typing over it would lag, which is the fault to avoid.
+                if setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size)) == 0 {
+                    return FrameSocket(fd: fd)
+                }
+                e = errno
+            }
+            last = e
+            Darwin.close(fd)
+        }
+        switch last {
+        case ECONNREFUSED, EHOSTUNREACH, ENETUNREACH, ETIMEDOUT, EADDRNOTAVAIL: throw SocketError.absent
+        default: throw SocketError.failed(errno: last)
+        }
+    }
+
+    /// How long a TCP connect is given, over every address its name resolves to (the name lookup itself comes first). A host that drops packets (a Mac asleep, a tailnet
+    /// path down) would otherwise hold the connect for the kernel's ~75 s, while the client shows nothing new and a
+    /// `stop()` then `start(endpoint:)` (another host chosen in Settings) waits behind it (Ruling P9-R11). A reachable
+    /// fleetd over a tailnet answers in a round trip or two, well inside this.
+    public static let tcpConnectTimeout: Duration = .seconds(3)
+
+    /// Connects `fd` to `addr`, waiting at most until `deadline`: a non-blocking connect, a poll for it to finish, its outcome
+    /// from SO_ERROR, then the fd made blocking again (the read thread blocks in read(2), as on a Unix socket). The
+    /// errno of the failure (ETIMEDOUT when the time ran out), or 0.
+    private static func connectWithin(
+        _ fd: Int32, _ addr: UnsafeMutablePointer<sockaddr>?, _ len: socklen_t, _ deadline: ContinuousClock.Instant
+    ) -> Int32 {
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return errno }
+        var e: Int32 = 0
+        if Darwin.connect(fd, addr, len) != 0 {
+            e = errno
+            if e == EINPROGRESS || e == EINTR {
+                // The connect carries on in the kernel: wait for it, against a deadline that a signal does not reset.
+                var p = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                while true {
+                    let left = deadline - ContinuousClock.now
+                    let ms = Int32(clamping: max(0, left.components.seconds * 1000
+                        + left.components.attoseconds / 1_000_000_000_000_000))
+                    let n = poll(&p, 1, ms)
+                    let pollErr = errno
+                    if n > 0 {
+                        var soError: Int32 = 0
+                        var l = socklen_t(MemoryLayout<Int32>.size)
+                        e = getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &l) == 0 ? soError : errno
+                        break
+                    }
+                    if n == 0 {
+                        e = ETIMEDOUT
+                        break
+                    }
+                    if pollErr != EINTR {
+                        e = pollErr
+                        break
+                    }
+                    // Interrupted: poll again for what is left (the loop's next poll of 0 ms ends it once it is past).
+                }
+            }
+        }
+        guard e == 0 else { return e }
+        return fcntl(fd, F_SETFL, flags) == 0 ? 0 : errno
+    }
+
+    /// `connect(endpoint)` on a thread of its own, awaited: the caller (a client's actor) stays free for as long as
+    /// the connect takes (up to `tcpConnectTimeout` for a dead host, longer for a slow name lookup), so its status,
+    /// `stop()` and `start(endpoint:)` answer meanwhile. A plain thread, not the cooperative pool or a detached task: a
+    /// thread blocked in connect(2) must not take one of the pool's few threads from the app's other work.
+    static func connectOffActor(_ endpoint: Endpoint) async throws -> FrameSocket {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<FrameSocket, Error>) in
+            let t = Thread { c.resume(with: Result { try connect(endpoint) }) }
+            t.name = "FleetKit.FrameSocket.connect"
+            t.qualityOfService = .userInitiated
+            t.start()
+        }
     }
 
     /// Connects to the socket at `url`. Throws `SocketError.absent` when no daemon is there.

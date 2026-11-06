@@ -29,8 +29,13 @@ public final class BoardCache {
 
     public nonisolated static var defaultURL: URL {
         if let p = ProcessInfo.processInfo.environment["FLEET_BOARD_CACHE"], !p.isEmpty { return URL(fileURLWithPath: p) }
+#if os(macOS)
         return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Fleet/board.cache")
+#else
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Fleet/board.cache")
+#endif
     }
 
     public let url: URL
