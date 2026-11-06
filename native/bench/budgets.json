@@ -1,22 +1,22 @@
 {
   "hookToDeltaP95Ms": {
-    "budget": 2.11,
+    "budget": 1,
     "floor": 1
   },
   "snapshotOnConnectMs": {
-    "budget": 4.36,
+    "budget": 4.1,
     "floor": 1
   },
   "transcriptToDeltaP95Ms": {
-    "budget": 3.24,
+    "budget": 2.99,
     "floor": 1
   },
   "idleCpuMsPer60s": {
-    "budget": 60,
-    "floor": 0
+    "budget": 50,
+    "floor": 20
   },
   "rssMb": {
-    "budget": 15.28,
+    "budget": 15.18,
     "floor": 15
   }
 }

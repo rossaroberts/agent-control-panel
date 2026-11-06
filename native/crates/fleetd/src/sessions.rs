@@ -24,9 +24,9 @@ use std::sync::Arc;
 
 use crate::procscan::{MuseProc, Scan};
 pub use crate::reads::{
-    gone, hook_path, jobs_signature, new_rollout, new_tail, read_hook_file, read_hook_file_with,
-    read_status_file, sig_of, status_path, take, transcript_of, FileRead, Seen, SharedRollout,
-    SharedTail, Sig, TailView,
+    gone, hook_path, jobs_signature, new_rollout, new_tail, read_capped, read_hook_file,
+    read_hook_file_with, read_status_file, reconcile_hook, reconcile_status, sig_of, status_path,
+    take, transcript_of, FileRead, Reader, Seen, SharedRollout, SharedTail, Sig, TailView,
 };
 
 /// Rollouts followed at most from the recent list (`codexHome` slices to 60); logs a running Codex holds open come on top.
@@ -586,7 +586,7 @@ impl Fleet {
     // ------------------------------------------------------------ the reconcile
 
     /// What the reconcile re-reads, taken under the board lock (handles and names only, no reads).
-    pub fn reconcile_plan(&self) -> Plan {
+    pub fn reconcile_plan(&self, followed: impl Fn(&Path) -> bool) -> Plan {
         Plan {
             profiles: self
                 .profiles
@@ -602,6 +602,9 @@ impl Fleet {
                             cwd: c.row.cwd.clone(),
                             tail: c.tail.clone(),
                             look: c.tail.is_none() && c.no_transcript.as_ref() != Some(&c.row.cwd),
+                            followed: c.tail.as_ref().is_some_and(|t| followed(t.path())),
+                            hook_sig: c.hook_sig,
+                            status_sig: c.status_sig,
                         })
                         .collect(),
                     jobs_sig: ps.jobs_sig.clone(),
@@ -683,6 +686,10 @@ pub struct PlanSession {
     pub tail: Option<SharedTail>,
     /// No transcript followed, and the last look (if any) was under another folder.
     pub look: bool,
+    /// The tail is on the hot path (kqueue): the reconcile verifies it whatever its stat says.
+    pub followed: bool,
+    pub hook_sig: Option<Sig>,
+    pub status_sig: Option<Sig>,
 }
 
 pub struct PlanProfile {
@@ -743,6 +750,17 @@ pub struct Reconciled {
 /// where none is followed (and not already missed under the same folder), the jobs' records, and the process scan (its
 /// result kept only when it worked: R14). A rollout neither held open nor written in the recent window is let go.
 pub fn reconcile_read(plan: &Plan, scan: Option<Scan>, muse_on: bool, now: i64) -> Reconciled {
+    reconcile_read_with(plan, scan, muse_on, now, &read_capped)
+}
+
+/// `reconcile_read` reading file bodies with `read` (the seam a test counts reads through).
+pub fn reconcile_read_with(
+    plan: &Plan,
+    scan: Option<Scan>,
+    muse_on: bool,
+    now: i64,
+    read: &Reader,
+) -> Reconciled {
     let profiles = plan
         .profiles
         .iter()
@@ -753,7 +771,7 @@ pub fn reconcile_read(plan: &Plan, scan: Option<Scan>, muse_on: bool, now: i64) 
                 .iter()
                 .map(|s| {
                     let tail = s.tail.as_ref().map(|t| {
-                        let (r, seen) = t.run(|t| t.reconcile());
+                        let (r, seen) = t.run(|t| t.reconcile_if(s.followed));
                         let read = if gone(&r) {
                             TailRead::Gone
                         } else {
@@ -774,8 +792,8 @@ pub fn reconcile_read(plan: &Plan, scan: Option<Scan>, muse_on: bool, now: i64) 
                         sid: s.sid.clone(),
                         pid: s.pid,
                         cwd: s.cwd.clone(),
-                        hook: read_hook_file(&pp.profile, &s.sid),
-                        status: read_status_file(&pp.profile, &s.sid),
+                        hook: reconcile_hook(&pp.profile, &s.sid, s.hook_sig, read),
+                        status: reconcile_status(&pp.profile, &s.sid, s.status_sig, read),
                         pid_alive: s.pid.map(pid_alive),
                         tail,
                         looked,

@@ -1047,3 +1047,71 @@ async fn the_open_files_limit_is_raised_and_bounds_the_follows() {
     assert_eq!(follow_cap(100), 25);
     assert_eq!(follow_cap(8192), 256);
 }
+
+/// Ruling R20: a reconcile of an unchanged home stats each hook file and reads no body; a hook that moved is read once.
+#[test]
+fn a_reconcile_of_an_unchanged_home_reads_no_hook_file_bodies() {
+    use fleet_model::decide::RosterRow;
+    use fleet_read::profiles::Profile;
+    use fleet_read::roster::RosterRead;
+    use fleetd::sessions::{read_hook_file, reconcile_read_with, Fleet, RosterGot};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    let pdir = dir.path().join(".claude");
+    fs::create_dir_all(pdir.join("fleet-state")).unwrap();
+    let p = Profile {
+        id: "default".into(),
+        dir: pdir.clone(),
+        plain: true,
+        config: dir.path().join(".claude.json"),
+    };
+    let mut f = Fleet::new("fixture-mac".into(), dir.path().join(".codex"));
+    f.add_profiles(vec![p.clone()]);
+    let rows: Vec<_> = (0..20)
+        .map(|i| RosterRow {
+            session_id: Some(sid(i)),
+            pid: Some(std::process::id()),
+            pid_alive: true,
+            status: Some("idle".into()),
+            ..RosterRow::default()
+        })
+        .collect();
+    let read = RosterRead {
+        rows,
+        active_known: true,
+    };
+    f.apply_roster(0, Ok(read), RosterGot::default(), now_ms());
+    let hook = |n: usize, at: i64| {
+        fs::write(
+            pdir.join("fleet-state/.t"),
+            json!({"e": "Stop", "at": at}).to_string(),
+        )
+        .unwrap();
+        fs::rename(
+            pdir.join("fleet-state/.t"),
+            pdir.join(format!("fleet-state/{}.json", sid(n))),
+        )
+        .unwrap();
+    };
+    // Hook files for 10 of the 20 sessions, read once as the watcher does.
+    for n in 0..10 {
+        hook(n, now_ms());
+        f.merge_hook(0, &sid(n), read_hook_file(&p, &sid(n)));
+    }
+    let reads = Rc::new(Cell::new(0usize));
+    let counter = reads.clone();
+    let count = move |path: &Path| -> std::io::Result<Vec<u8>> {
+        counter.set(counter.get() + 1);
+        fs::read(path)
+    };
+    let plan = f.reconcile_plan(|_| false);
+    reconcile_read_with(&plan, None, false, now_ms(), &count);
+    assert_eq!(reads.get(), 0, "an unchanged home reads no hook body");
+
+    // One hook moves; one session that had none gets one: two bodies, and no more.
+    hook(3, now_ms() + 5);
+    hook(15, now_ms());
+    reconcile_read_with(&plan, None, false, now_ms(), &count);
+    assert_eq!(reads.get(), 2);
+}

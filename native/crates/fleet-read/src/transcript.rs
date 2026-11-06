@@ -180,6 +180,16 @@ impl Tail {
     /// and reads the file again from scratch when they are not (rewritten in place), then reads what was appended.
     /// Whether the summary or the facts changed.
     pub fn reconcile(&mut self) -> io::Result<bool> {
+        self.reconcile_if(true)
+    }
+
+    /// `reconcile`, but the fingerprint check is made only when `verify` is set (a tail the hot path follows) or the
+    /// file's stat moved since the last read (Ruling R20). A file whose stat has not moved is not opened at all: its
+    /// advance is one stat.
+    pub fn reconcile_if(&mut self, verify: bool) -> io::Result<bool> {
+        if !verify && !self.reader.moved()? {
+            return self.advance();
+        }
         if self.reader.verify()? {
             return self.advance();
         }

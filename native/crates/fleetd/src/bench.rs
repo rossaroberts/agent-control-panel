@@ -27,7 +27,16 @@ struct Opts {
     transcript: PathBuf,
 }
 
-fn opts(args: &[String]) -> Result<Opts, String> {
+/// The bench writes hook files and appends to transcripts, so it is for fixtures only: it runs only with `FLEETD_HOME`
+/// set, and only on a profile and a transcript that lie under it (Global Constraints: fleetd never writes to Claude
+/// Code's or Codex's records). `home` is the value of `FLEETD_HOME`, if any.
+fn opts(args: &[String], home: Option<PathBuf>) -> Result<Opts, String> {
+    let home = home
+        .filter(|h| !h.as_os_str().is_empty())
+        .ok_or("bench: refusing to run without FLEETD_HOME (it is for fixture homes only)")?;
+    let home = home
+        .canonicalize()
+        .map_err(|e| format!("bench: FLEETD_HOME: {e}"))?;
     let mode = args.first().cloned().ok_or("bench: a mode is needed")?;
     let get = |k: &str| {
         args.windows(2)
@@ -40,12 +49,39 @@ fn opts(args: &[String]) -> Result<Opts, String> {
             v.parse().map_err(|_| format!("bench: {k} is a number"))
         })
     };
+    let under_home = |k: &str| -> Result<PathBuf, String> {
+        let p = PathBuf::from(get(k)?)
+            .canonicalize()
+            .map_err(|e| format!("bench: {k}: {e}"))?;
+        if p.starts_with(&home) {
+            Ok(p)
+        } else {
+            Err(format!("bench: {k} is not under FLEETD_HOME"))
+        }
+    };
+    let (mut profile, mut sid, mut transcript) = (PathBuf::new(), String::new(), PathBuf::new());
+    match mode.as_str() {
+        "hook" => profile = under_home("--profile")?,
+        "transcript" => transcript = under_home("--transcript")?,
+        "snapshot" => {}
+        m => return Err(format!("bench: unknown mode {m}")),
+    }
+    if mode != "snapshot" {
+        sid = get("--sid")?;
+        if sid.len() != 36
+            || !sid
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase() || b == b'-')
+        {
+            return Err("bench: --sid must match ^[0-9a-f-]{36}$".into());
+        }
+    }
     Ok(Opts {
         n: num("--n", 50)?,
         gap: Duration::from_millis(num("--gap-ms", 10)? as u64),
-        profile: get("--profile").unwrap_or_default().into(),
-        sid: get("--sid").unwrap_or_default(),
-        transcript: get("--transcript").unwrap_or_default().into(),
+        profile,
+        sid,
+        transcript,
         mode,
     })
 }
@@ -107,7 +143,8 @@ async fn connected() -> io::Result<Client> {
 }
 
 pub async fn run(args: &[String]) -> io::Result<()> {
-    let o = opts(args).map_err(io::Error::other)?;
+    let home = std::env::var_os("FLEETD_HOME").map(PathBuf::from);
+    let o = opts(args, home).map_err(io::Error::other)?;
     let mut ms = Vec::with_capacity(o.n);
     match o.mode.as_str() {
         "hook" => {
@@ -151,4 +188,153 @@ pub async fn run(args: &[String]) -> io::Result<()> {
     }
     println!("{}", json!({ "ms": ms }));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    const SID: &str = "bbbbbbbb-0000-4000-8000-000000000001";
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A home with a profile and a transcript, and a second folder outside it.
+    fn fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".claude-work/fleet-state")).unwrap();
+        fs::write(home.path().join("t.jsonl"), "").unwrap();
+        (home, tempfile::tempdir().unwrap())
+    }
+
+    fn err(a: &[&str], home: Option<PathBuf>) -> String {
+        opts(&args(a), home).err().expect("a refusal")
+    }
+
+    #[test]
+    fn a_fixture_home_is_accepted() {
+        let (h, _) = fixture();
+        let p = h.path().join(".claude-work");
+        let t = h.path().join("t.jsonl");
+        let o = opts(
+            &args(&["hook", "--profile", p.to_str().unwrap(), "--sid", SID]),
+            Some(h.path().into()),
+        )
+        .unwrap();
+        assert_eq!(o.profile, p.canonicalize().unwrap());
+        let o = opts(
+            &args(&[
+                "transcript",
+                "--transcript",
+                t.to_str().unwrap(),
+                "--sid",
+                SID,
+            ]),
+            Some(h.path().into()),
+        )
+        .unwrap();
+        assert_eq!(o.transcript, t.canonicalize().unwrap());
+        assert!(opts(&args(&["snapshot"]), Some(h.path().into())).is_ok());
+    }
+
+    #[test]
+    fn it_refuses_without_fleetd_home() {
+        let (h, _) = fixture();
+        let p = h.path().join(".claude-work");
+        let a = ["hook", "--profile", p.to_str().unwrap(), "--sid", SID];
+        assert!(err(&a, None).contains("FLEETD_HOME"));
+        assert!(err(&a, Some(PathBuf::new())).contains("FLEETD_HOME"));
+    }
+
+    #[test]
+    fn it_refuses_a_profile_or_transcript_outside_the_home() {
+        let (h, other) = fixture();
+        let out = other.path().to_str().unwrap();
+        assert!(err(
+            &["hook", "--profile", out, "--sid", SID],
+            Some(h.path().into())
+        )
+        .contains("not under FLEETD_HOME"));
+        let f = other.path().join("t.jsonl");
+        fs::write(&f, "").unwrap();
+        assert!(err(
+            &[
+                "transcript",
+                "--transcript",
+                f.to_str().unwrap(),
+                "--sid",
+                SID
+            ],
+            Some(h.path().into())
+        )
+        .contains("not under FLEETD_HOME"));
+    }
+
+    #[test]
+    fn it_refuses_dot_dot_traversal_out_of_the_home() {
+        let (h, other) = fixture();
+        let sneaky = format!(
+            "{}/.claude-work/../../{}",
+            h.path().display(),
+            other.path().strip_prefix("/").unwrap().display()
+        );
+        let e = err(
+            &["hook", "--profile", &sneaky, "--sid", SID],
+            Some(h.path().into()),
+        );
+        assert!(
+            e.contains("not under FLEETD_HOME") || e.contains("--profile"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn it_refuses_a_symlink_that_leaves_the_home() {
+        let (h, other) = fixture();
+        let link = h.path().join("link");
+        std::os::unix::fs::symlink(other.path(), &link).unwrap();
+        assert!(err(
+            &["hook", "--profile", link.to_str().unwrap(), "--sid", SID],
+            Some(h.path().into())
+        )
+        .contains("not under FLEETD_HOME"));
+    }
+
+    #[test]
+    fn hook_needs_a_profile_and_transcript_needs_a_transcript() {
+        let (h, _) = fixture();
+        assert!(err(&["hook", "--sid", SID], Some(h.path().into())).contains("--profile is needed"));
+        assert!(err(&["transcript", "--sid", SID], Some(h.path().into()))
+            .contains("--transcript is needed"));
+    }
+
+    #[test]
+    fn it_refuses_a_session_id_that_is_not_36_of_hex_and_dash() {
+        let (h, _) = fixture();
+        let p = h.path().join(".claude-work");
+        let p = p.to_str().unwrap();
+        for bad in [
+            "",
+            "../../../etc/passwd",
+            "BBBBBBBB-0000-4000-8000-000000000001",
+            "bbbbbbbb-0000-4000-8000-00000000000g",
+            "bbbbbbbb-0000-4000-8000-00000000000",
+            "bbbbbbbb-0000-4000-8000-0000000000011",
+        ] {
+            let e = err(
+                &["hook", "--profile", p, "--sid", bad],
+                Some(h.path().into()),
+            );
+            assert!(e.contains("--sid"), "{bad}: {e}");
+        }
+        assert!(err(&["hook", "--profile", p], Some(h.path().into())).contains("--sid is needed"));
+    }
+
+    #[test]
+    fn an_unknown_mode_is_refused() {
+        let (h, _) = fixture();
+        assert!(err(&["frob"], Some(h.path().into())).contains("unknown mode"));
+    }
 }

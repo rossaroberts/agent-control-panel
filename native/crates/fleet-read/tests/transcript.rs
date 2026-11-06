@@ -363,3 +363,45 @@ fn reconcile_catches_a_rewrite_in_place() {
     assert!(!t.reconcile().unwrap());
     assert_eq!(t.bytes_read(), read);
 }
+
+/// Ruling R20: the reconcile's fingerprint check is skipped for a tail that is not followed and whose stat has not
+/// moved, but R11's guarantee holds for any tail whose stat moved, and always for a followed one.
+#[test]
+fn reconcile_if_verifies_followed_tails_and_tails_whose_stat_moved() {
+    let said = |text: &str, tokens: u64| {
+        format!(
+            "{}\n",
+            json!({"type":"assistant","timestamp":"2026-11-06T12:00:00.000Z",
+                   "message":{"model":"claude-fixture-2","stop_reason":"end_turn",
+                              "content":[{"type":"text","text":text}],"usage":{"input_tokens":tokens}}})
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("t.jsonl");
+    fs::write(&file, said("Before the rewrite.", 7)).unwrap();
+    let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+    let rewrite = |text: &str, at: std::time::SystemTime| {
+        let mut f = OpenOptions::new().write(true).open(&file).unwrap();
+        f.write_all(said(text, 8).as_bytes()).unwrap();
+        f.set_times(FileTimes::new().set_modified(at)).unwrap();
+    };
+
+    // Stat moved (mtime): caught without being followed.
+    let mut t = Tail::open(&file).unwrap();
+    rewrite("Rewrite in place!!!", mtime + Duration::from_secs(10));
+    assert!(t.reconcile_if(false).unwrap());
+    assert_eq!(t.summary().said.as_deref(), Some("Rewrite in place!!!"));
+
+    // Stat unmoved (same inode, length and mtime put back): only a followed tail is checked.
+    let mut t = Tail::open(&file).unwrap();
+    let at = fs::metadata(&file).unwrap().modified().unwrap();
+    rewrite("Other words, again", at);
+    t.reconcile_if(false).unwrap();
+    assert_eq!(
+        t.summary().said.as_deref(),
+        Some("Rewrite in place!!!"),
+        "an unmoved stat is not opened"
+    );
+    assert!(t.reconcile_if(true).unwrap());
+    assert_eq!(t.summary().said.as_deref(), Some("Other words, again"));
+}

@@ -15,6 +15,14 @@ fn ms(t: std::time::SystemTime) -> Option<i64> {
         .map(|d| d.as_millis() as i64)
 }
 
+fn stat_of(m: &fs::Metadata) -> (u64, u64, i128) {
+    (
+        m.ino(),
+        m.len(),
+        m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
+    )
+}
+
 fn read_at(f: &mut File, from: u64, len: u64) -> io::Result<Vec<u8>> {
     f.seek(SeekFrom::Start(from))?;
     let mut buf = Vec::with_capacity(len as usize);
@@ -36,6 +44,9 @@ pub(crate) struct LineReader {
     /// The last bytes (at most `FINGERPRINT`) before `offset`, as read: a file rewritten in place past them since is
     /// caught by `verify` (Ruling R11).
     fingerprint: Vec<u8>,
+    /// The file's (inode, length, mtime ns) as stat'ed at the start of the last read: the reconcile skips the fingerprint
+    /// check of a file whose stat has not moved since.
+    stat: (u64, u64, i128),
 }
 
 /// How many bytes before the offset `verify` compares.
@@ -80,6 +91,7 @@ impl LineReader {
             written_at: meta.modified().ok().and_then(ms),
             bytes_read: 0,
             fingerprint: Vec::new(),
+            stat: stat_of(&meta),
         };
         // The head and the tail overlap in a file under tail + head: then one read of it all.
         let (head_bytes, body) = if start > 0 && start < head {
@@ -116,6 +128,7 @@ impl LineReader {
             return Ok(Step::Reopen);
         }
         self.written_at = written_at;
+        self.stat = stat_of(&meta);
         if meta.len() > self.offset {
             let mut f = File::open(&self.path)?;
             let new = read_at(&mut f, self.offset, meta.len() - self.offset)?;
@@ -124,6 +137,11 @@ impl LineReader {
         } else {
             Ok(Step::Unchanged)
         }
+    }
+
+    /// Whether the file's stat (inode, length, mtime) differs from the last read's. An error when it cannot be stat'ed.
+    pub(crate) fn moved(&self) -> io::Result<bool> {
+        Ok(stat_of(&fs::metadata(&self.path)?) != self.stat)
     }
 
     /// Whether the file still holds, just before the offset, the bytes read there: false when it was replaced, shrank, or

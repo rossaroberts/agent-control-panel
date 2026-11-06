@@ -102,6 +102,8 @@ pub enum FileRead<T> {
     Read { sig: Sig, v: Option<T> },
     /// The read itself failed (too many open files, permissions, I/O): it proves nothing, and what is held stays.
     Failed,
+    /// Not read: its version is the one already held (a reconcile's stat found it unmoved).
+    Unchanged,
 }
 
 impl<T> FileRead<T> {
@@ -123,7 +125,7 @@ impl<T> FileRead<T> {
 /// How a file's bytes are read: at most 64 KiB + 1 (the parsers refuse more).
 pub type Reader = dyn Fn(&Path) -> io::Result<Vec<u8>>;
 
-fn read_capped(f: &Path) -> io::Result<Vec<u8>> {
+pub fn read_capped(f: &Path) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     std::fs::File::open(f)?
         .take(fleet_read::hookfile::MAX_BYTES + 1)
@@ -160,6 +162,33 @@ pub fn read_hook_file_with(p: &Profile, sid: &str, read: &Reader) -> FileRead<Ho
     read_small(&hook_path(p, sid), read, parse_hook)
 }
 
+/// What a reconcile does about a hook file: nothing but a stat when its version is the one held (`held` the sig of the
+/// last read, `None` for none), else the read. Missing and nothing held is unchanged too.
+pub fn reconcile_hook(
+    p: &Profile,
+    sid: &str,
+    held: Option<Sig>,
+    read: &Reader,
+) -> FileRead<HookEvent> {
+    if valid_id(sid) && sig_of(&hook_path(p, sid)) == held {
+        return FileRead::Unchanged;
+    }
+    read_hook_file_with(p, sid, read)
+}
+
+/// The same for a status file.
+pub fn reconcile_status(
+    p: &Profile,
+    sid: &str,
+    held: Option<Sig>,
+    read: &Reader,
+) -> FileRead<StatusSnap> {
+    if sig_of(&status_path(p, sid)) == held {
+        return FileRead::Unchanged;
+    }
+    read_small(&status_path(p, sid), read, |b| parse_status(sid, b))
+}
+
 pub fn read_hook_file(p: &Profile, sid: &str) -> FileRead<HookEvent> {
     read_hook_file_with(p, sid, &read_capped)
 }
@@ -173,7 +202,7 @@ pub fn read_status_file(p: &Profile, sid: &str) -> FileRead<StatusSnap> {
 /// the slower never overwrites the newer). Whether anything changed.
 pub fn take<T>(held: &mut Option<T>, sig: &mut Option<Sig>, r: FileRead<T>) -> bool {
     match r {
-        FileRead::Failed => false,
+        FileRead::Failed | FileRead::Unchanged => false,
         FileRead::Gone => {
             let had = sig.is_some() || held.is_some();
             *held = None;

@@ -846,7 +846,14 @@ fn run_scan(sh: &Shared) {
 fn reconcile(sh: &Arc<Shared>, rosters: bool) {
     let found = claude_profiles(&sh.home);
     let added = sh.fleet.lock().unwrap().add_profiles(found);
-    let plan = sh.fleet.lock().unwrap().reconcile_plan();
+    #[cfg(target_os = "macos")]
+    let plan = sh
+        .fleet
+        .lock()
+        .unwrap()
+        .reconcile_plan(|p| sh.kq.is_followed(p));
+    #[cfg(not(target_os = "macos"))]
+    let plan = sh.fleet.lock().unwrap().reconcile_plan(|_| false);
     let got = reconcile_read(&plan, scan(), muse_installed(&sh.home), now_ms());
     let mut wanted: HashSet<usize> = added.into_iter().collect();
     {
