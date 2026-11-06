@@ -1,7 +1,22 @@
 {
-  "hookToDeltaP95Ms": { "budget": 5, "floor": 1 },
-  "snapshotOnConnectMs": { "budget": 5, "floor": 1 },
-  "transcriptToDeltaP95Ms": { "budget": 5, "floor": 1 },
-  "idleCpuMsPer60s": { "budget": 60, "floor": 0 },
-  "rssMb": { "budget": 30, "floor": 15 }
+  "hookToDeltaP95Ms": {
+    "budget": 2.11,
+    "floor": 1
+  },
+  "snapshotOnConnectMs": {
+    "budget": 4.36,
+    "floor": 1
+  },
+  "transcriptToDeltaP95Ms": {
+    "budget": 3.24,
+    "floor": 1
+  },
+  "idleCpuMsPer60s": {
+    "budget": 60,
+    "floor": 0
+  },
+  "rssMb": {
+    "budget": 15.28,
+    "floor": 15
+  }
 }

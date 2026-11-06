@@ -8,7 +8,7 @@ use std::sync::Arc;
 use fleet_model::wire::Frame;
 use fleet_read::home::home_dir;
 use fleetd::store::Store;
-use fleetd::{client, machine, out, serve, service, watch};
+use fleetd::{bench, client, machine, out, serve, service, watch};
 
 const USAGE: &str = "usage: fleetd serve | snapshot [--json] | watch | install-service | uninstall-service\n       fleetd roster-parity [--rounds N] [--interval SECS] [--out FILE]";
 
@@ -19,6 +19,7 @@ fn main() {
         Some("serve") => run_serve(),
         Some("snapshot") => run_snapshot(args.iter().any(|a| a == "--json")),
         Some("watch") => run_watch(),
+        Some("bench") => done(runtime().block_on(bench::run(&args[1..]))),
         Some("install-service") => done(service::install()),
         Some("uninstall-service") => done(service::uninstall()),
         _ => {
