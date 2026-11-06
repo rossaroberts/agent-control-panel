@@ -58,7 +58,9 @@ impl Server {
             store.upsert((0..n).map(|i| sess(i, "start")).collect());
         }
         let (listener, _guard) = bind(&path).unwrap();
-        let task = tokio::spawn(serve(listener, store.clone(), "fixture-mac".into()));
+        let terms =
+            Arc::new(fleetd::terms::Terms::new(dir.path().to_path_buf(), |_| false).unwrap());
+        let task = tokio::spawn(serve(listener, store.clone(), "fixture-mac".into(), terms));
         Server {
             _dir: dir,
             path,
@@ -412,24 +414,6 @@ async fn a_malformed_current_proto_hello_says_so() {
     st.write_all(&[2, 0, 0, 0, 0x00, 0x03]).await.unwrap();
     match read_frame(&mut st, MAX_FRAME).await.unwrap() {
         Frame::Error { message } => assert_eq!(message, "malformed Hello"),
-        f => panic!("{f:?}"),
-    }
-}
-
-/// A Terminals connection is understood but not served yet; a board connection is unaffected.
-#[tokio::test]
-async fn a_terminals_hello_is_answered_with_an_error_for_now() {
-    let s = Server::start(2);
-    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
-    let hello = Frame::Hello {
-        proto: PROTO,
-        since: None,
-        run: None,
-        role: Role::Terminals,
-    };
-    write_frame(&mut st, &hello).await.unwrap();
-    match read_frame(&mut st, MAX_FRAME).await.unwrap() {
-        Frame::Error { message } => assert_eq!(message, "terminals not available yet"),
         f => panic!("{f:?}"),
     }
 }

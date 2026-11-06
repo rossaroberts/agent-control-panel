@@ -8,7 +8,7 @@ use std::sync::Arc;
 use fleet_model::wire::Frame;
 use fleet_read::home::home_dir;
 use fleetd::store::Store;
-use fleetd::{bench, client, machine, out, serve, service, watch};
+use fleetd::{bench, client, machine, out, serve, service, terms, watch};
 
 const USAGE: &str = "usage: fleetd serve | snapshot [--json] | watch | install-service | uninstall-service\n       fleetd roster-parity [--rounds N] [--interval SECS] [--out FILE]";
 
@@ -68,10 +68,18 @@ fn run_serve() {
         })
     };
     let store = Arc::new(Store::new());
-    let handle = watch::watch(&home, store.clone()).unwrap_or_else(|e| {
+    let handle = Arc::new(watch::watch(&home, store.clone()).unwrap_or_else(|e| {
         eprintln!("fleetd: watch: {e}");
         exit(1)
-    });
+    }));
+    // The terminals ask the board whether a running Codex holds a thread (lock order: terminals, then board).
+    let held = handle.clone();
+    let terms = Arc::new(
+        terms::Terms::new(home.clone(), move |sid| held.codex_held(sid)).unwrap_or_else(|e| {
+            eprintln!("fleetd: terminals: {e}");
+            exit(1)
+        }),
+    );
     let _guard = rt.block_on(async {
         eprintln!(
             "fleetd: serving {} (run {:016x})",
@@ -82,7 +90,7 @@ fn run_serve() {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("SIGTERM handler");
         tokio::select! {
-            _ = serve::serve(listener, store, machine) => {}
+            _ = serve::serve(listener, store, machine, terms) => {}
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
         }

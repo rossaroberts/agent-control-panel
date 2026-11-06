@@ -30,6 +30,9 @@ while True:
     l = line.strip()
     if l == b'flood':
         os.write(1, b'X' * 5000000 + b'\r\nFLOODED\r\n')
+    elif l == b'flood50':
+        for _ in range(50): os.write(1, b'X' * 1000000)
+        os.write(1, b'\r\nFLOODED\r\n')
     elif l == b'exit-soon':
         time.sleep(0.3); os.write(1, b'LAST WORDS\r\n'); sys.exit(0)
     else:

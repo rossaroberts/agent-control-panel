@@ -48,7 +48,7 @@ and its first field is `proto`; `Error` is variant 3 with one `message` string.
      `Hello` of an older shape is still read as far as its `proto`.
    - `Error` (`malformed Hello`) when the bytes of a `proto` 3 `Hello` do not decode.
    - `Error` (`expected Hello`) when the first frame is not a `Hello`.
-   - `Error` (`terminals not available yet`) when `role` is `Terminals`, until the terminal service lands.
+   - nothing, when `role` is `Terminals`: the connection is a Terminals connection from here on (below).
    - a `Delta` holding everything changed since `since` (each session as it is now, each one gone), when `since` is
      given **and `run` equals this daemon's run** and the server still holds the deltas back to `since`. When the
      client is already current that delta is empty (`upsert` and `remove` both empty, `seq` = the client's `since`):
@@ -59,12 +59,38 @@ and its first field is `proto`; `Error` is variant 3 with one `message` string.
 
 ## Terminals connections (`role: Terminals`)
 
-A separate connection from the board, opened by a client that wants ptys. Frames carry a client-chosen `ref` naming one
-terminal; the client sends `TermOpen { ref, target, cols, rows }` and the server answers with `TermOut` frames (the
-program's output, in order, never dropped) and, when it is over, one `TermEnd { ref, error }`. `TermIn` (at most 64 KiB
-of keystrokes), `TermSize` and `TermClose` go the other way. A `TermOpen` that cannot be served is answered with a
-`TermEnd` carrying `error`. Closing a terminal ends only the attach, never the session. The server reads at most 65 KiB (64 KiB of input plus framing)
-per client frame on this connection. Until the service lands the server answers this role with an `Error`.
+A separate connection from the board, opened by a client that wants ptys; board and terminal connections are fully
+independent (a terminal flood never delays a board's deltas). The server sends nothing after the `Hello` until the client
+asks. Frames carry a client-chosen `ref` naming one terminal of this connection.
+
+- **`TermOpen { ref, target, cols, rows }`** opens a terminal: the server answers with `TermOut` frames (the program's
+  output, in order, never dropped) and, when it is over, one `TermEnd { ref, error: None }`. An open that cannot be
+  served is answered with `TermEnd { ref, error }`, `error` being `term.mjs`'s words (`Pick a background session, or a
+  folder that exists.`, `Too many terminals open.`, `Too many terminals open in this tab.`, `It is open in another
+  Fleet terminal already.`, or the busy reason). A `ref` already open on this connection is left as it is (no answer).
+  The server handles the open before it reads the next frame, so a `TermIn` sent right behind it finds it open. At most
+  8 terminals per connection and 24 in all; cols are clamped to 20-400 and rows to 5-200.
+- **`TermIn { ref, data }`** is keystrokes, **at most 64 KiB** (65,536 bytes) of `data`. A `TermIn` of more is a client
+  bug: the server answers `Error` (`TermIn of <n> bytes; at most 65536`) and closes the connection (its terminals are
+  released, as at any hang-up), and none of that frame's bytes reach the program. Send a paste in pieces.
+- **`TermSize { ref, cols, rows }`**: the window changed; sizes are coalesced to at most one per 16 ms (the latest).
+- **`TermClose { ref }`** releases the terminal: the server answers `TermEnd { ref, error: None }`. Closing ends only the
+  attach, never the session: a `claude attach` terminal is kept warm for a reopen, Codex and trust-folder ones end.
+- A `TermIn`, `TermSize` or `TermClose` for a `ref` that is not open (never opened, closed, or ended) is ignored: no
+  answer, no error.
+- Hanging up releases every terminal of the connection, as `TermClose` would, without the `TermEnd`s.
+- Any other frame, a body that does not decode, or a body over 65 KiB (64 KiB of input plus framing) is answered with an
+  `Error` and the connection closes.
+
+**Backpressure, both ways; nothing is dropped.**
+
+- Output: when more than 1 MiB of a connection's output is waiting to be written to it, the server stops reading every
+  pty of that connection until it is down to 512 KiB, so the programs block on their output. A slow reader is never
+  disconnected for being slow on this connection (there is no 30 s write limit here) and never costs unbounded memory.
+- Input: when a terminal holds 1 MiB of input its program has not read, the server keeps the `TermIn` that did not fit
+  and **stops reading this connection's frames** until it fits (offered again every 5 ms while held, and only then): a
+  `TermSize`, `TermClose` or another terminal's `TermIn` behind it waits too, and the client's own writes block once the
+  socket's buffer is full. If that terminal ends while its input is held, the held frame is let go and reading resumes.
 
 ## Rules a client relies on
 
@@ -81,7 +107,7 @@ per client frame on this connection. Until the service lands the server answers 
   drop each key in `remove`.
 - **`Unreachable` is never produced by `fleetd` for its own machine.** It is the state a client gives a session of a
   machine it cannot reach (another Mac's daemon, a lost connection); a local board never holds it.
-- A write the client cannot keep up with for 30 s ends the connection.
+- On a board connection, a write the client cannot keep up with for 30 s ends the connection.
 
 ## Versioning
 
