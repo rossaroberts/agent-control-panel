@@ -3,17 +3,22 @@
 //! to arrive. `native/bench/run.mjs` starts the daemon over a fixture home and reads the JSON this prints:
 //! `{"ms":[...]}`, one number per sample, in milliseconds. Reading postcard from Node would add a decoder to the
 //! measurement; this keeps the clock on one side of the socket.
+//!
+//! `term-echo`, `term-warm` and `term-cold` time terminals (plan 2): a keystroke's echo through fleetd against the same
+//! program on a pty of the bench's own (`{"ms":[...],"direct":[...]}`, sampled in turn), a warm terminal's reopen to its
+//! first repaint byte, and a cold open to its first byte. The programs are the fixture home's stand-in `claude attach`.
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fleet_model::types::AttachTarget;
 use fleet_model::wire::Frame;
 use serde_json::json;
 use tokio::time::timeout;
 
-use crate::client::Client;
+use crate::client::{term_connect, Client, TermRx, TermTx};
 use crate::serve::socket_path;
 
 const WAIT: Duration = Duration::from_secs(3);
@@ -84,10 +89,12 @@ fn opts(args: &[String], home: Option<PathBuf>) -> Result<Opts, String> {
     match mode.as_str() {
         "hook" => profile = under_home("--profile")?,
         "transcript" => transcript = under_home("--transcript")?,
-        "snapshot" => {}
+        // The terminal modes touch no file of ours: they open terminals on the daemon, whose programs are the fixture
+        // home's stand-in `claude` (the home check above is what keeps them off a real one).
+        "snapshot" | "term-echo" | "term-warm" | "term-cold" => {}
         m => return Err(format!("bench: unknown mode {m}")),
     }
-    if mode != "snapshot" {
+    if matches!(mode.as_str(), "hook" | "transcript") {
         sid = get("--sid")?;
         if sid.len() != 36
             || !sid
@@ -163,6 +170,219 @@ async fn connected() -> io::Result<Client> {
     }
 }
 
+// ---- terminals
+
+/// The fixture `claude attach <job>` for a job starting with `e` runs `stty raw -echo; exec cat` (so a keystroke goes
+/// through the program, as it does for a real session); any other prints a banner and then cats.
+fn target(job: &str) -> AttachTarget {
+    AttachTarget::Claude {
+        profile: "default".into(),
+        job: job.into(),
+    }
+}
+
+async fn open(tx: &mut TermTx, job: &str) -> io::Result<()> {
+    tx.send(&Frame::TermOpen {
+        r#ref: 1,
+        target: target(job),
+        cols: 100,
+        rows: 30,
+    })
+    .await
+}
+
+/// Reads until a `TermOut` arrives (its bytes), or fails on a `TermEnd` or after `WAIT`.
+async fn next_out(rx: &mut TermRx) -> io::Result<Vec<u8>> {
+    loop {
+        match timeout(WAIT, rx.next())
+            .await
+            .map_err(|_| io::Error::other("bench: no terminal output in 3 s"))??
+        {
+            Frame::TermOut { data, .. } => return Ok(data),
+            Frame::TermEnd { error, .. } => {
+                return Err(io::Error::other(format!(
+                    "bench: terminal ended: {}",
+                    error.unwrap_or_default()
+                )))
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reads until the `TermEnd` that answers a close, dropping any output before it.
+async fn until_end(rx: &mut TermRx) -> io::Result<()> {
+    loop {
+        if let Frame::TermEnd { .. } = timeout(WAIT, rx.next())
+            .await
+            .map_err(|_| io::Error::other("bench: no TermEnd in 3 s"))??
+        {
+            return Ok(());
+        }
+    }
+}
+
+/// Reads whatever arrives in the next `ms` and drops it.
+async fn settle(rx: &mut TermRx, ms: u64) {
+    let _ = timeout(Duration::from_millis(ms), async {
+        while rx.next().await.is_ok() {}
+    })
+    .await;
+}
+
+/// `cat` on a pty of the bench's own, raw and without echo: the same program, with no fleetd in front of it.
+struct Direct {
+    master: std::os::fd::OwnedFd,
+    child: std::process::Child,
+}
+
+impl Direct {
+    fn start() -> io::Result<Direct> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let (mut m, mut s) = (0, 0);
+        // SAFETY: openpty fills two fds we then own.
+        let (master, slave) = unsafe {
+            if libc::openpty(
+                &mut m,
+                &mut s,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            (OwnedFd::from_raw_fd(m), OwnedFd::from_raw_fd(s))
+        };
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", "stty raw -echo; exec cat"])
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
+        // SAFETY: a session of its own, before exec.
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        Ok(Direct {
+            master,
+            child: c.spawn()?,
+        })
+    }
+
+    /// Sends one byte and waits for it to come back; the time that took.
+    fn ping(&self, b: u8) -> io::Result<f64> {
+        use std::os::fd::AsRawFd;
+        let fd = self.master.as_raw_fd();
+        let t0 = Instant::now();
+        // SAFETY: one byte out of and into our own buffers on our own fd.
+        unsafe {
+            if libc::write(fd, (&b as *const u8).cast(), 1) != 1 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut p = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            loop {
+                if t0.elapsed() > WAIT || libc::poll(&mut p, 1, 100) < 0 {
+                    return Err(io::Error::other("bench: no direct echo in 3 s"));
+                }
+                if p.revents & libc::POLLIN != 0 {
+                    let mut got = [0u8; 64];
+                    let n = libc::read(fd, got.as_mut_ptr().cast(), got.len());
+                    if n > 0 && got[..n as usize].contains(&b) {
+                        return Ok(t0.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Direct {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Keystroke echo through fleetd against a direct pty, sampled in turn (so drift in the machine hits both alike).
+async fn term_echo(o: &Opts) -> io::Result<serde_json::Value> {
+    let (mut tx, mut rx) = term_connect(&socket_path()).await?;
+    open(&mut tx, "e0000001").await?;
+    let direct = Direct::start()?;
+    // The shell has to have run `stty raw -echo` before a byte is a fair sample; warm both up.
+    settle(&mut rx, 400).await;
+    let key = |i: usize| b'a' + (i % 26) as u8;
+    for i in 0..20 {
+        direct.ping(key(i))?;
+        tx.send(&Frame::TermIn {
+            r#ref: 1,
+            data: vec![key(i)],
+        })
+        .await?;
+        next_out(&mut rx).await?;
+    }
+    let (mut through, mut base) = (Vec::with_capacity(o.n), Vec::with_capacity(o.n));
+    for i in 0..o.n {
+        base.push(direct.ping(key(i))?);
+        let t0 = Instant::now();
+        tx.send(&Frame::TermIn {
+            r#ref: 1,
+            data: vec![key(i)],
+        })
+        .await?;
+        next_out(&mut rx).await?;
+        through.push(t0.elapsed().as_secs_f64() * 1000.0);
+        tokio::time::sleep(o.gap).await;
+    }
+    Ok(json!({ "ms": through, "direct": base }))
+}
+
+/// Reopen of a warm terminal to its first byte (the replayed ring); the very first open is cold and not a sample.
+async fn term_warm(o: &Opts) -> io::Result<Vec<f64>> {
+    let (mut tx, mut rx) = term_connect(&socket_path()).await?;
+    open(&mut tx, "a0000001").await?;
+    next_out(&mut rx).await?;
+    let mut ms = Vec::with_capacity(o.n);
+    for _ in 0..o.n {
+        tx.send(&Frame::TermClose { r#ref: 1 }).await?;
+        until_end(&mut rx).await?;
+        tokio::time::sleep(o.gap).await;
+        let t0 = Instant::now();
+        open(&mut tx, "a0000001").await?;
+        next_out(&mut rx).await?;
+        ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        settle(&mut rx, 20).await;
+    }
+    tx.send(&Frame::TermClose { r#ref: 1 }).await?;
+    until_end(&mut rx).await?;
+    Ok(ms)
+}
+
+/// Open of a terminal that has never run to its first byte: a new job each time, so none is warm.
+async fn term_cold(o: &Opts) -> io::Result<Vec<f64>> {
+    let (mut tx, mut rx) = term_connect(&socket_path()).await?;
+    let mut ms = Vec::with_capacity(o.n);
+    for i in 0..o.n {
+        let job = format!("c{:07x}", i + 1);
+        let t0 = Instant::now();
+        open(&mut tx, &job).await?;
+        next_out(&mut rx).await?;
+        ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        tx.send(&Frame::TermClose { r#ref: 1 }).await?;
+        until_end(&mut rx).await?;
+        tokio::time::sleep(o.gap).await;
+    }
+    Ok(ms)
+}
+
 pub async fn run(args: &[String]) -> io::Result<()> {
     let home = std::env::var_os("FLEETD_HOME").map(PathBuf::from);
     let o = opts(args, home).map_err(io::Error::other)?;
@@ -205,6 +425,12 @@ pub async fn run(args: &[String]) -> io::Result<()> {
                 tokio::time::sleep(o.gap).await;
             }
         }
+        "term-echo" => {
+            println!("{}", term_echo(&o).await?);
+            return Ok(());
+        }
+        "term-warm" => ms = term_warm(&o).await?,
+        "term-cold" => ms = term_cold(&o).await?,
         m => return Err(io::Error::other(format!("bench: unknown mode {m}"))),
     }
     println!("{}", json!({ "ms": ms }));
@@ -362,6 +588,17 @@ mod tests {
             assert!(e.contains("--sid"), "{bad}: {e}");
         }
         assert!(err(&["hook", "--profile", p], Some(h.path().into())).contains("--sid is needed"));
+    }
+
+    #[test]
+    fn the_terminal_modes_need_the_same_home_rules() {
+        let (h, _) = fixture();
+        for m in ["term-echo", "term-warm", "term-cold"] {
+            assert!(opts(&args(&[m]), Some(h.path().into())).is_ok(), "{m}");
+            assert!(err(&[m], None).contains("FLEETD_HOME"), "{m}");
+            let real = real_home().expect("a password entry");
+            assert!(err(&[m], Some(real)).contains("real home"), "{m}");
+        }
     }
 
     #[test]

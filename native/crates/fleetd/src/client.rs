@@ -41,3 +41,40 @@ impl Client {
         read_frame(&mut self.r, MAX_FRAME).await
     }
 }
+
+/// The send half of a Terminals connection (`fleetd attach`, the terminal bench).
+pub struct TermTx {
+    w: OwnedWriteHalf,
+}
+
+/// The receive half: `TermOut` and `TermEnd` frames, and an `Error` before the server hangs up.
+pub struct TermRx {
+    r: OwnedReadHalf,
+}
+
+/// Connects with `role: Terminals`. The two halves are separate so a caller can read output while its own write waits
+/// on a server that has stopped reading input (the server's backpressure): a single task doing both could deadlock.
+pub async fn term_connect(path: &Path) -> io::Result<(TermTx, TermRx)> {
+    let (r, mut w) = UnixStream::connect(path).await?.into_split();
+    let hello = Frame::Hello {
+        proto: PROTO,
+        since: None,
+        run: None,
+        role: Role::Terminals,
+    };
+    write_frame(&mut w, &hello).await?;
+    Ok((TermTx { w }, TermRx { r }))
+}
+
+impl TermTx {
+    pub async fn send(&mut self, frame: &Frame) -> io::Result<()> {
+        write_frame(&mut self.w, frame).await
+    }
+}
+
+impl TermRx {
+    /// The next frame; `UnexpectedEof` when the server closed.
+    pub async fn next(&mut self) -> io::Result<Frame> {
+        read_frame(&mut self.r, MAX_FRAME).await
+    }
+}

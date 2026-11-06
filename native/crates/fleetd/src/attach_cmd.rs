@@ -16,21 +16,21 @@ pub struct Cmd {
 }
 
 /// `^[\w.-]{1,40}$`
-fn profile_ok(s: &str) -> bool {
+pub fn profile_ok(s: &str) -> bool {
     (1..=40).contains(&s.len())
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 /// `^[0-9a-f]{8}$`
-fn job_ok(s: &str) -> bool {
+pub fn job_ok(s: &str) -> bool {
     s.len() == 8
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
-fn uuid_ok(s: &str) -> bool {
+pub fn uuid_ok(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     let lens = [8, 4, 4, 4, 12];
     parts.len() == 5

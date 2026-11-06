@@ -33,6 +33,20 @@ currently over alone (`ratchet.mjs`). `budgets.json` holds each budget and its f
 `ps` reports CPU time in 10 ms steps, and the latency floors are 2 ms (hook, transcript, snapshot) and RSS 20 MB so that
 a ratchet never lands inside the run-to-run spread (Ruling R23). A budget only moves down. Only `results/before.json` is committed.
 
+## Terminals (plan 2)
+
+`fleetd bench term-echo | term-warm | term-cold` are further modes of the same hidden subcommand, with the same
+`FLEETD_HOME` rules (it refuses to run without it, and refuses your real home); they write no files, and open terminals
+on the daemon, whose programs are the fixture home's stand-in `claude attach <job>` (`fixture.mjs`: a job id starting
+with `e` runs `stty raw -echo; exec cat`, any other prints a banner and then cats). `run.mjs` runs them after the idle window.
+
+- `termEchoAddedP95Ms`: one keystroke to its echo through fleetd, against the same `cat` on a pty of the bench's own,
+  sampled in turn (300 each); the budget is the ADDED p95 (through fleetd minus direct). Floor 0.5 ms (Ruling P2-R1).
+- `termWarmReopenP95Ms`: a released `claude attach` terminal reopened, to the first replayed byte (50). Floor 8 ms.
+- `termColdOpenP95Ms`: a terminal that never ran, to its first byte (30, a new job each time). Floor 50 ms.
+
+Same median-of-3 gate and ratchet as above.
+
 ## Not in a budget
 
 A session that is neither live nor recently written is not followed by kqueue. Its first event after going dormant

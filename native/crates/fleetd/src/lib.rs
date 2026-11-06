@@ -2,6 +2,7 @@
 //! truthful `Session` per session and the numbered deltas between; the socket serves both to clients.
 
 pub mod alarm;
+pub mod attach;
 pub mod attach_cmd;
 pub mod bench;
 pub mod client;

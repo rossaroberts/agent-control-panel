@@ -8,15 +8,27 @@
     "floor": 2
   },
   "transcriptToDeltaP95Ms": {
-    "budget": 2.99,
+    "budget": 2.95,
     "floor": 2
   },
   "idleCpuMsPer60s": {
-    "budget": 50,
+    "budget": 37.5,
     "floor": 20
   },
   "rssMb": {
     "budget": 20,
     "floor": 20
+  },
+  "termEchoAddedP95Ms": {
+    "budget": 0.5,
+    "floor": 0.5
+  },
+  "termWarmReopenP95Ms": {
+    "budget": 8,
+    "floor": 8
+  },
+  "termColdOpenP95Ms": {
+    "budget": 50,
+    "floor": 50
   }
 }

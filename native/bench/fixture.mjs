@@ -58,6 +58,7 @@ export function buildHome(pid) {
 D="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 case "$1" in
   agents) case "$*" in *--all*) cat "$D/.bench-roster.json";; *) cat "$D/.bench-active.json";; esac;;
+  attach) case "$2" in e*) stty raw -echo; exec cat;; *) printf 'BANNER %s\r\n' "$2"; exec cat;; esac;;
   auth) echo '{"loggedIn":true,"email":"me@example.test"}';;
   *) exit 1;;
 esac

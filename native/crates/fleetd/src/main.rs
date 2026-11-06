@@ -8,9 +8,9 @@ use std::sync::Arc;
 use fleet_model::wire::Frame;
 use fleet_read::home::home_dir;
 use fleetd::store::Store;
-use fleetd::{bench, client, machine, out, serve, service, terms, watch};
+use fleetd::{attach, bench, client, machine, out, serve, service, terms, watch};
 
-const USAGE: &str = "usage: fleetd serve | snapshot [--json] | watch | install-service | uninstall-service\n       fleetd roster-parity [--rounds N] [--interval SECS] [--out FILE]";
+const USAGE: &str = "usage: fleetd serve | snapshot [--json] | watch | attach {--list|<profile>/<job>|codex/<id>|--trust <profile> <dir>} | install-service | uninstall-service\n       fleetd roster-parity [--rounds N] [--interval SECS] [--out FILE]";
 
 fn main() {
     // A panic on any thread ends the process: every shared structure is behind a std Mutex, so a panicking watcher
@@ -30,6 +30,7 @@ fn main() {
         Some("serve") => run_serve(),
         Some("snapshot") => run_snapshot(args.iter().any(|a| a == "--json")),
         Some("watch") => run_watch(),
+        Some("attach") => exit(attach::run(&args[1..])),
         Some("bench") => done(runtime().block_on(bench::run(&args[1..]))),
         Some("install-service") => done(service::install()),
         Some("uninstall-service") => done(service::uninstall()),
