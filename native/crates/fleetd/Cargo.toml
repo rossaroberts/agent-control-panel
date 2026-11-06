@@ -1,0 +1,9 @@
+[package]
+name = "fleetd"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+fleet-model = { path = "../fleet-model" }
+fleet-read = { path = "../fleet-read" }

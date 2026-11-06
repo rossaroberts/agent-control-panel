@@ -1,0 +1,8 @@
+[package]
+name = "fleet-read"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+fleet-model = { path = "../fleet-model" }
