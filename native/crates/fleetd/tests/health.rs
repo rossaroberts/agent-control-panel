@@ -35,8 +35,7 @@ fn the_values_are_percents_and_agree_with_the_system_tools() {
         assert!(v <= 100, "{f:?}");
     }
 
-    // Disk: `df -k $HOME` prints the capacity (on APFS its Used is the data volume's, ours the container's: a few
-    // points apart, never below it).
+    // Disk: the slow path runs the same `df -k $HOME` Node does.
     let home = std::env::var("HOME").unwrap();
     let df = tool("df", &["-k", &home]);
     let cap: i64 = df
@@ -46,8 +45,11 @@ fn the_values_are_percents_and_agree_with_the_system_tools() {
         .split_whitespace()
         .find_map(|w| w.strip_suffix('%')?.parse().ok())
         .expect("df capacity");
+    let ours = health::df_pct(std::path::Path::new(&home)).expect("df answered");
+    assert!((cap - ours as i64).abs() <= 1, "df {cap} vs ours {ours}");
+    // The first sample's stand-in (statfs) is the fuller figure on APFS, never below df's.
     let gap = f.disk_pct as i64 - cap;
-    assert!((-1..=5).contains(&gap), "df {cap} vs {f:?}");
+    assert!((-1..=5).contains(&gap), "df {cap} vs statfs {f:?}");
     assert!(f.disk_pct > 0);
 
     // CPU: the load over the cores, as `sysctl vm.loadavg` and `hw.ncpu` say (load moves, so a margin).
@@ -234,4 +236,56 @@ async fn a_connected_client_is_sent_the_health_within_six_seconds() {
     .await;
     assert!(again.is_ok(), "the changed health is sent");
     server.abort();
+}
+
+#[test]
+fn df_is_read_as_node_reads_it() {
+    let out = "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk3s5 482797652 332938868 118039640 74% 4458592 1180396400 0% /System/Volumes/Data\n";
+    assert_eq!(health::parse_df_pct(out), Some(74));
+    assert_eq!(health::parse_df_pct("header only\n"), None);
+    assert_eq!(health::parse_df_pct("h\n/dev/x 1 1 0 0% 1 1 0% /\n"), None);
+    assert_eq!(health::parse_df_pct(""), None);
+}
+
+#[test]
+fn cpu_rounding_and_clamping() {
+    // The load is rounded to a tenth first: 0.04 is 0.0.
+    assert_eq!(health::cpu_from(0.04, 10.0), 0);
+    assert_eq!(health::cpu_from(0.05, 1.0), 10); // 0.1 on one core
+    assert_eq!(health::cpu_from(2.46, 10.0), 25); // 2.5 -> 25
+    assert_eq!(health::cpu_from(30.0, 10.0), 100); // held to 100
+    assert_eq!(health::pct(-3.0), 0);
+    assert_eq!(health::pct(49.5), 50);
+    assert_eq!(health::pct(49.49), 49);
+    assert_eq!(health::pct(250.0), 100);
+    assert_eq!(health::pct(f64::NAN), 0);
+}
+
+/// A command that runs past its limit is killed (our own child) and reaped.
+#[test]
+fn a_command_past_its_limit_is_killed_and_reaped() {
+    let t = Instant::now();
+    let runner =
+        std::thread::spawn(|| health::run_cmd("sleep", &["30"], &[], Duration::from_millis(200)));
+    // The child's pid: our one `sleep` child (looked up, never signalled).
+    let me = std::process::id().to_string();
+    let mut pid = 0;
+    while pid == 0 && t.elapsed() < Duration::from_millis(150) {
+        pid = tool("pgrep", &["-P", &me, "-x", "sleep"])
+            .split_whitespace()
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0);
+    }
+    let (ok, out) = runner.join().unwrap();
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    assert!(!ok);
+    assert_eq!(out, "");
+    assert!(pid > 0, "the sleep child was not seen");
+    // Reaped inside run_cmd: waiting for it again finds no such child (ECHILD), so it is no zombie.
+    let mut status = 0;
+    // SAFETY: waitpid on one pid, no hang; `status` is a valid out pointer.
+    let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let err = std::io::Error::last_os_error().raw_os_error();
+    assert!(r == -1 && err == Some(libc::ECHILD), "r {r} err {err:?}");
 }

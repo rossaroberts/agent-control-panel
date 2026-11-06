@@ -13,10 +13,9 @@
 //!   Node leaves out only its own process.
 //! - `db` is the number of `supabase_db_*` containers in `docker ps` (Node's `stacks.length`); 0 where docker is
 //!   absent or fails.
-//! - `disk_pct` is `statfs` on the home folder: used / (used + available) rounded up, the formula `df -k $HOME` prints.
-//!   On APFS the free count is the container's, shared by every volume, so this reads a few points above `df`'s own
-//!   Used column (which is the data volume's alone): 76 against 74 on the development Mac. It is the fuller disk, and
-//!   no subprocess serves it.
+//! - `disk_pct` is what `df -k $HOME` prints, run as Node runs it, in the slow path (every 30 s). Until its first answer
+//!   lands it is the last value held, or on the very first sample `statfs`'s figure (on APFS that reads a few points
+//!   high: the free count is the container's, shared by every volume). `df` itself is the oracle: `statfs` is not it.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -115,6 +114,7 @@ async fn sampler(
             tokio::select! {
                 _ = tick.tick() => {
                     samples.fetch_add(1, Ordering::SeqCst);
+                    let first = samples.load(Ordering::SeqCst) == 1;
                     let fast = sample_fast();
                     let due = last_slow.is_none_or(|t| t.elapsed() >= opts.slow_every);
                     let mut slow = None;
@@ -135,7 +135,7 @@ async fn sampler(
                                 let store = store.clone();
                                 tokio::spawn(async move {
                                     if let Ok(r) = job.await {
-                                        apply(&store, |h| (h.dev, h.db) = r);
+                                        apply(&store, |h| r.lay_in(h));
                                     }
                                 });
                             }
@@ -144,10 +144,11 @@ async fn sampler(
                     apply(&store, |h| {
                         h.cpu_pct = fast.cpu_pct;
                         h.mem_pct = fast.mem_pct;
-                        h.disk_pct = fast.disk_pct;
-                        if let Some((dev, db)) = slow {
-                            h.dev = dev;
-                            h.db = db;
+                        if first {
+                            h.disk_pct = fast.disk_pct;
+                        }
+                        if let Some(r) = slow {
+                            r.lay_in(h);
                         }
                     });
                 }
@@ -191,7 +192,8 @@ pub fn sample_fast() -> Fast {
     }
 }
 
-fn pct(x: f64) -> u8 {
+/// A percent held to 0-100.
+pub fn pct(x: f64) -> u8 {
     x.round().clamp(0.0, 100.0) as u8
 }
 
@@ -204,8 +206,12 @@ pub fn cpu_pct() -> u8 {
     }
     // SAFETY: sysconf has no preconditions.
     let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }.max(1) as f64;
-    // Node rounds the load to a tenth before it divides.
-    pct(100.0 * ((l[0] * 10.0).round() / 10.0) / cpus)
+    cpu_from(l[0], cpus)
+}
+
+/// The percent for a one-minute `load` on `cpus` cores: Node rounds the load to a tenth before it divides.
+pub fn cpu_from(load: f64, cpus: f64) -> u8 {
+    pct(100.0 * ((load * 10.0).round() / 10.0) / cpus)
 }
 
 /// Memory in use (active + wired + compressor on macOS; total less available on Linux) as a percent of the total.
@@ -281,7 +287,8 @@ fn mem_used_total() -> Option<(u64, u64)> {
     (total > 0).then_some((total.saturating_sub(avail) * 1024, total * 1024))
 }
 
-/// How full the volume holding `dir` is: used over used plus available, rounded up (`df`'s formula over `statfs`).
+/// The first sample's disk figure, before `df` has answered: used over used plus available over `statfs`, rounded up.
+/// On APFS it is a few points above `df -k` (the free count is the container's).
 pub fn disk_pct(dir: &Path) -> Option<u8> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
@@ -306,11 +313,49 @@ pub fn disk_pct(dir: &Path) -> Option<u8> {
 
 // ------------------------------------------------------------------------------------------------ subprocess answers
 
-/// Dev servers and database stacks, by one `lsof` (or `ss`) and one `docker ps`.
-fn sample_slow() -> (u16, u16) {
-    let dev = dev_servers();
-    let db = db_stacks();
-    (dev, db)
+/// What the subprocesses answer: dev servers, database stacks, and the disk as `df` prints it (`None`: no answer).
+#[derive(Clone, Copy, Debug)]
+struct Slow {
+    dev: u16,
+    db: u16,
+    disk: Option<u8>,
+}
+
+impl Slow {
+    fn lay_in(self, h: &mut Health) {
+        h.dev = self.dev;
+        h.db = self.db;
+        if let Some(d) = self.disk {
+            h.disk_pct = d;
+        }
+    }
+}
+
+/// One `lsof` (or `ss`), one `docker ps`, one `df`.
+fn sample_slow() -> Slow {
+    Slow {
+        dev: dev_servers(),
+        db: db_stacks(),
+        disk: df_pct(&fleet_read::home::home_dir()),
+    }
+}
+
+/// Node's disk read: the first `NN%` on the second line of `df -k <dir>`; none when it is absent or 0.
+pub fn parse_df_pct(out: &str) -> Option<u8> {
+    let line = out.lines().nth(1)?;
+    let at = line.find('%')?;
+    let digits = line[..at]
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .filter(|d| !d.is_empty())?;
+    digits.parse::<u8>().ok().filter(|n| *n > 0)
+}
+
+/// `df -k <dir>`'s capacity.
+pub fn df_pct(dir: &Path) -> Option<u8> {
+    let d = dir.to_string_lossy();
+    let (_, out) = run_cmd(&bin("df"), &["-k", &d], &[], LSOF_WITHIN);
+    parse_df_pct(&out)
 }
 
 fn dev_servers() -> u16 {
@@ -448,7 +493,7 @@ fn is_executable(p: &Path) -> bool {
 
 /// Runs `cmd` with no marker of a session in its environment, for at most `within`, then kills it (our own child only).
 /// Whether it exited 0, and what it wrote to stdout (whatever came before a kill too).
-fn run_cmd(
+pub fn run_cmd(
     cmd: &str,
     args: &[&str],
     env: &[(String, OsString)],
