@@ -52,7 +52,7 @@ extension SessionState {
 
     /// `fleet.html` `ORDER` (line 619): needs-you 0, working 1, capped 2, ready 3, closed 4. Done, ended, and
     /// unreachable (which fleet.html has no word for) sort as closed.
-    var order: Int {
+    public var order: Int {
         switch self {
         case .needsYou: 0
         case .working: 1
