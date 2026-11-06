@@ -10,6 +10,8 @@
 //       in the rail between two warm terminals; ⌘1; Return into the terminal; ⌃` back to the rail; a key's echo;
 //       ⌘K opening, each keystroke filtering, Esc closing it; ⌘⇧F there and back; a delta on screen. Also checks
 //       that Return in a terminal reaches its program (the Go menu's Return must not take it).
+//   FleetApp --ui-bench out.json --idle
+//       the same synthetic board with one terminal shown and focused, then idle until killed (the idle-CPU check)
 //   FleetApp --live-switch <session-or-job> <session-or-job> out.json
 //       against the running fleetd: opens the two (the keyboard stays in the rail; nothing is typed), lets each draw,
 //       then times ⌘[ and ⌘] between them 3 times each, and writes the times and the bytes typed (0).
@@ -21,6 +23,7 @@ import FleetKit
 @MainActor final class EchoBackend: TermBackend {
     private var terms: [UInt32: PaneTerm] = [:]
     private(set) var typed: [UInt32: [UInt8]] = [:]
+    var onConnection: ((Bool) -> Void)?
 
     func open(_ term: PaneTerm, target: AttachTarget, cols: UInt16, rows: UInt16) {
         terms[term.ref] = term
@@ -141,6 +144,22 @@ import FleetKit
         let pause = { try? await Task.sleep(for: .milliseconds(60)) }
         // The board on screen.
         while nav.rail.rows.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        // `--idle`: one terminal shown with the keyboard in it (its caret on), then nothing, for the idle-CPU check
+        // (measured from outside; the caller ends it).
+        if CommandLine.arguments.contains("--idle") {
+            nav.open(Self.sessions()[4].key, focus: true)
+            try? await Task.sleep(for: .seconds(1))
+            // FLEET_IDLE_BLINK=1: the cursor blinks as in a key window with the keyboard in it (which a bench launched
+            // beside someone at work cannot always get), the worst case for idle.
+            if ProcessInfo.processInfo.environment["FLEET_IDLE_BLINK"] == "1", let v = pane.shownTerm?.view {
+                v.caretViewTracksFocus = false
+                v.getTerminal().setCursorStyle(.blinkBlock)
+            }
+            try? await Task.sleep(for: .seconds(1))
+            let state: [String: Any] = ["key": window.isKeyWindow, "terminalFocused": pane.terminalHasFocus]
+            if let data = try? JSONSerialization.data(withJSONObject: state) { try? data.write(to: out) }
+            return
+        }
         await pause()
         let all = Self.sessions()
         // ⌘1 is the first of Needs you as the board orders it (the oldest wait first).
@@ -305,6 +324,59 @@ import FleetKit
         json["medianMs"] = Stopwatch.median(back + forward)
         json["renderer"] = pane.shownTerm.map { $0.view.isUsingMetalRenderer ? "metal" : "coregraphics" } ?? "none"
         // The pair as it ended, on screen (B, after the last ⌘]): the swapped-in view drew.
-        try? windowPNG(window)?.write(to: out.deletingPathExtension().appendingPathExtension("png"))
+        if let (png, viewDrawn) = windowPNG(window, rail: nav.rail) {
+            try? png.write(to: out.deletingPathExtension().appendingPathExtension("png"))
+            json["shot"] = viewDrawn ? "view-drawn" : "window server"
+        }
+    }
+}
+
+/// `--term-check <job> <seconds> out.json`, against a throwaway fleetd (FLEETD_SOCK): shows a live background job of the
+/// daemon's own machine in the pane and records, every 10 ms, what the header says and the terminal's phase, as they
+/// change, then the screen's last lines. The fleetd restart check (Review (a)) kills and restarts that daemon while it
+/// runs.
+@MainActor enum TermCheck {
+    static func arguments() -> (String, Double, URL)? {
+        let a = CommandLine.arguments
+        guard let i = a.firstIndex(of: "--term-check"), i + 3 < a.count, let secs = Double(a[i + 2]) else { return nil }
+        return (a[i + 1], secs, URL(fileURLWithPath: a[i + 3]))
+    }
+
+    static func run(job: String, seconds: Double, out: URL, model: BoardModel, pane: TerminalPaneController) async {
+        let start = ContinuousClock.now
+        while model.machine == nil, ContinuousClock.now - start < .seconds(10) { try? await Task.sleep(for: .milliseconds(10)) }
+        let s = Session(
+            key: SessionKey(machine: model.machine ?? "?", profile: "default", sessionId: "term-check"), engine: .claude,
+            name: nil, cwd: nil, state: .waiting, reason: "term check", live: true, pid: nil, stage: nil, model: nil,
+            effort: nil, contextTokens: nil, lastAt: nil, said: nil, doing: nil, lastAsk: nil, firstAsk: nil,
+            startedAt: nil, hookAt: nil, writtenAt: nil, jobId: job, title: "term check", epic: nil, archived: false,
+            account: nil)
+        pane.show(s, open: true, focus: false)
+        var events: [[String: Any]] = []
+        var last = ""
+        let end = ContinuousClock.now + .milliseconds(Int(seconds * 1000))
+        while ContinuousClock.now < end {
+            let phase = pane.shownTerm.map { "\($0.phase)" } ?? "none"
+            let now = "\(pane.statusText ?? "-") | \(phase)"
+            if now != last {
+                let ms = Double((ContinuousClock.now - start).components.attoseconds) / 1e15
+                    + Double((ContinuousClock.now - start).components.seconds) * 1000
+                events.append(["ms": (ms * 10).rounded() / 10, "status": pane.statusText ?? "-", "phase": phase])
+                last = now
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        var lines: [String] = []
+        if let t = pane.shownTerm?.view.getTerminal() {
+            for r in 0..<t.rows {
+                let l = t.getLine(row: r)?.translateToString(trimRight: true) ?? ""
+                if !l.isEmpty { lines.append(l) }
+            }
+        }
+        let json: [String: Any] = ["events": events, "screen": lines, "repliesDropped": pane.shownTerm?.repliesDropped ?? -1]
+        if let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .prettyPrinted]) {
+            try? data.write(to: out)
+        }
+        NSApp.terminate(nil)
     }
 }

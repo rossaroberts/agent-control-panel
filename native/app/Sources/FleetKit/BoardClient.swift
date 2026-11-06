@@ -61,6 +61,12 @@ public actor BoardClient {
         socket = nil
     }
 
+    /// Closes the connection now and connects again, resuming from the board's run and seq (only what changed is sent):
+    /// as after a lost connection (Ruling A-R2). Not `stop()`.
+    public func reconnect() {
+        socket?.close()
+    }
+
     /// The status now, then each change.
     public func statuses() -> AsyncStream<Status> {
         let (stream, sink) = AsyncStream<Status>.makeStream()

@@ -59,13 +59,20 @@ public struct WarmSet<Key: Hashable & Sendable>: Sendable {
         self.limit = max(1, limit)
     }
 
-    /// `k` is the newest now; returns the keys let go of to stay within the limit, oldest first.
-    public mutating func use(_ k: Key) -> [Key] {
+    /// `k` is the newest now; returns the keys let go of to stay within the limit, oldest first. `keeping` (the one on
+    /// screen) is never let go of, wherever it is in the order.
+    public mutating func use(_ k: Key, keeping: Key? = nil) -> [Key] {
         keys.removeAll { $0 == k }
         keys.append(k)
-        guard keys.count > limit else { return [] }
-        let out = Array(keys.prefix(keys.count - limit))
-        keys.removeFirst(out.count)
+        var out: [Key] = []
+        var i = 0
+        while keys.count > limit, i < keys.count {
+            if keys[i] == k || keys[i] == keeping {
+                i += 1
+            } else {
+                out.append(keys.remove(at: i))
+            }
+        }
         return out
     }
 

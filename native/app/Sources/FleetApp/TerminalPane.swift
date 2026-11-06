@@ -27,6 +27,8 @@ import SwiftTerm
     func input(_ ref: UInt32, _ data: Data)
     func size(_ ref: UInt32, cols: UInt16, rows: UInt16)
     func close(_ ref: UInt32)
+    /// Told whether the connection is up, now and at every change.
+    var onConnection: ((Bool) -> Void)? { get set }
 }
 
 /// The app's backend: one TermClient. Every operation goes through one ordered queue, so keystrokes, sizes and closes
@@ -41,13 +43,17 @@ import SwiftTerm
     }
 
     private let ops: AsyncStream<Op>.Continuation
-    /// Bytes of keystrokes sent (the live check proves it typed nothing).
+    /// Bytes sent to programs: keystrokes and the terminal's replies to live queries (the live check counts them).
     private(set) var bytesTyped = 0
+    var onConnection: ((Bool) -> Void)?
 
     init(client: TermClient) {
         self.client = client
         let (stream, ops) = AsyncStream<Op>.makeStream()
         self.ops = ops
+        Task { @MainActor [weak self] in
+            for await up in await client.connections() { self?.onConnection?(up) }
+        }
         Task { @MainActor in
             for await op in stream {
                 switch op {
@@ -55,7 +61,9 @@ import SwiftTerm
                     let t = await client.open(ref, target: target, cols: cols, rows: rows)
                     term.drain(t)
                 case let .input(ref, data):
-                    await client.input(ref, data)
+                    // Refused while the connection is down and 64 KiB is held already (A-R2): said, not dropped
+                    // silently.
+                    if await client.input(ref, data) == .inputFull { NSSound.beep() }
                 case let .size(ref, cols, rows):
                     await client.size(ref, cols: cols, rows: rows)
                 case let .close(ref):
@@ -111,6 +119,54 @@ import SwiftTerm
     private var sizing: Coalescer!
     private var sent: (UInt16, UInt16)?
     private var closed = false
+    /// The replay window (Review I4): fleetd answers an open of a kept-warm terminal with the end of its ring, and that
+    /// ring holds the program's old queries (DA, DSR, OSC 11, XTVERSION, DECRQM). SwiftTerm answers every query it
+    /// parses, and an answer to a replayed one would reach the live program as input. So the terminal's replies made
+    /// while feeding the replay are dropped. The replay is what arrives within `replayWindow` of the open (or of a
+    /// reconnect's reopen) and the burst that runs on from it (chunks under `burstGap` apart): fleetd queues the whole
+    /// ring at once, before anything live. A fresh `claude attach` takes well over 50 ms to print, so its startup
+    /// queries are answered. Keystrokes are never dropped: they do not come from feeding.
+    static let replayWindow: Duration = .milliseconds(50)
+    static let burstGap: Duration = .milliseconds(10)
+    private var replayFrom: ContinuousClock.Instant?
+    private var lastChunk: ContinuousClock.Instant?
+    private var feeding = false
+    /// Bytes of replies dropped (the tests).
+    private(set) var repliesDropped = 0
+
+    /// Review (b): under Metal a blinking cursor is a full redraw every 0.7 s (SwiftTerm's renderer timer), 180 ms of
+    /// CPU a minute, measured, against an idle budget of 50. So after `blinkRest` with nothing typed or printed a
+    /// blinking cursor holds steady (as many terminals stop blinking when idle), and the program's own style is back at
+    /// the next key or output.
+    static let blinkRest: Duration = .seconds(10)
+    private var restingFrom: CursorStyle?
+    private var rest: DispatchWorkItem?
+
+    private func active() {
+        if let style = restingFrom {
+            restingFrom = nil
+            view.getTerminal().setCursorStyle(style)
+        }
+        rest?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.resting() }
+        rest = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(Int(Self.blinkRest.components.seconds)), execute: work)
+    }
+
+    func resting() {
+        guard !closed else { return }
+        let t = view.getTerminal()
+        let steady: CursorStyle
+        switch t.options.cursorStyle {
+        case .blinkBlock: steady = .steadyBlock
+        case .blinkBar: steady = .steadyBar
+        case .blinkUnderline: steady = .steadyUnderline
+        case .steadyBlock, .steadyBar, .steadyUnderline: return
+        }
+        restingFrom = t.options.cursorStyle
+        t.setCursorStyle(steady)
+    }
+
     /// Whether this terminal has the keyboard of the key window (what a program that asks for focus reports, DECSET
     /// 1004, is told). SwiftTerm assumes focused until told; out of sight it is not.
     private(set) var focused = false
@@ -147,6 +203,8 @@ import SwiftTerm
     func open() {
         guard !closed, let backend else { return }
         phase = .connecting
+        replayFrom = .now
+        lastChunk = nil
         let t = view.getTerminal()
         sent = (UInt16(clamping: t.cols), UInt16(clamping: t.rows))
         backend.open(self, target: target, cols: sent!.0, rows: sent!.1)
@@ -175,14 +233,39 @@ import SwiftTerm
         }
     }
 
+    /// The connection is back and TermClient has opened this again: what comes first is a replay again.
+    func reopened() {
+        guard !closed else { return }
+        if case .ended = phase { return }
+        replayFrom = .now
+        lastChunk = nil
+        phase = .connecting
+        onPhase?()
+    }
+
+    /// Whether output arriving now is still the replay.
+    private func inReplay(_ now: ContinuousClock.Instant) -> Bool {
+        guard let from = replayFrom else { return false }
+        if let last = lastChunk, now - last < Self.burstGap { return true }
+        if now - from < Self.replayWindow { return true }
+        replayFrom = nil
+        return false
+    }
+
     func received(_ d: Data) {
+        let now = ContinuousClock.now
+        let replay = inReplay(now)
+        lastChunk = now
+        active()
         if phase != .live {
             phase = .live
             onPhase?()
         }
+        feeding = replay
         d.withUnsafeBytes { raw in
             view.feed(byteArray: ArraySlice(raw.bindMemory(to: UInt8.self)))
         }
+        feeding = false
         onFed?()
     }
 
@@ -200,6 +283,7 @@ import SwiftTerm
         closed = true
         drainTask?.cancel()
         drainTask = nil
+        rest?.cancel()
         backend?.close(ref)
         view.terminalDelegate = nil
         view.removeFromSuperview()
@@ -223,6 +307,12 @@ import SwiftTerm
             if data.count == 1, data.first == 13 { open() }
             return
         }
+        // Sent while the replay is being fed: the terminal's answer to an old query, not a key.
+        if feeding {
+            repliesDropped += data.count
+            return
+        }
+        active()
         backend?.input(ref, Data(data))
     }
 
@@ -326,11 +416,28 @@ final class TerminalPaneController: NSViewController {
     private var catchUp: DispatchWorkItem?
     /// Called when a terminal's phase moves or output is fed (the bench).
     var onFed: (() -> Void)?
+    /// Whether the Terminals connection is up (M2: "reconnecting…" follows it, not only the board's).
+    private(set) var termConnected = true
 
     init(model: BoardModel, backend: TermBackend) {
         self.model = model
         self.backend = backend
         super.init(nibName: nil, bundle: nil)
+        backend.onConnection = { [weak self] up in self?.connection(up) }
+    }
+
+    private var wasDown = false
+    private var termEverUp = false
+
+    private func connection(_ up: Bool) {
+        termConnected = up
+        if up { termEverUp = true }
+        if !up, termEverUp { wasDown = true }
+        if up, wasDown {
+            wasDown = false
+            for t in terms.values { t.reopened() }
+        }
+        refreshStatus()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -477,12 +584,23 @@ final class TerminalPaneController: NSViewController {
         return true
     }
 
+    /// Whether there is a terminal to give the keyboard to (shown, or being made, or one Return opens).
+    var canFocus: Bool {
+        guard let k = shownKey else { return false }
+        if terms[k] != nil || pending[k] != nil { return true }
+        guard let s = header.session else { return false }
+        if case .none = attach(s) { return false }
+        return true
+    }
+
     var terminalHasFocus: Bool {
         guard let fr = view.window?.firstResponder as? NSView else { return false }
         return terms.values.contains { fr === $0.view || fr.isDescendant(of: $0.view) }
     }
 
     var warmKeys: [SessionKey] { warm.keys }
+    /// What the header's right side says now (the checks).
+    var statusText: String? { header.status?.0 }
     func term(for key: SessionKey) -> PaneTerm? { terms[key] }
 
     // MARK: -
@@ -513,7 +631,7 @@ final class TerminalPaneController: NSViewController {
         t.view.isHidden = true
         body.addSubview(t.view)
         if s.engine != .codex {
-            for k in warm.use(s.key) where k != shownKey { terms.removeValue(forKey: k)?.close() }
+            for k in warm.use(s.key, keeping: shownKey) { terms.removeValue(forKey: k)?.close() }
         }
         if shownKey == s.key { swapIn(t, focus: focus) }
         t.open()
@@ -530,7 +648,9 @@ final class TerminalPaneController: NSViewController {
         if t.view.frame != termFrame { t.view.frame = termFrame }
         t.view.autoresizingMask = [.width, .height]
         if t.view.isHidden { t.view.isHidden = false }
-        if t.engine != .codex { _ = warm.use(t.key) }
+        if t.engine != .codex {
+            for k in warm.use(t.key) where k != t.key { terms.removeValue(forKey: k)?.close() }
+        }
         if focus { view.window?.makeFirstResponder(t.view) }
         refreshStatus()
     }
@@ -581,7 +701,9 @@ final class TerminalPaneController: NSViewController {
     private func refreshStatus() {
         let next: (String, NSColor)?
         switch model.status {
-        case .reconnecting where shownTerm != nil: next = ("reconnecting…", Palette.orange)
+        case _ where shownTerm != nil && !termConnected && termEverUp: next = ("reconnecting…", Palette.orange)
+        // The board's status starts as reconnecting: before its first Snapshot it is "connecting…" (below).
+        case .reconnecting where shownTerm != nil && model.board.run != nil: next = ("reconnecting…", Palette.orange)
         case .absent where shownTerm != nil: next = ("fleetd not running", Palette.red)
         case let .refused(why) where shownTerm != nil: next = ("fleetd refused: \(why)", Palette.red)
         default:

@@ -188,6 +188,20 @@ public actor TermClient {
     /// The most output one terminal holds unread before the client stops reading the socket (Ruling P3-R5); it reads
     /// again once that terminal is down to half.
     public static let outputLimit = 1024 * 1024
+    /// The most input one terminal holds while the connection is down (Ruling A-R2); past it `input` refuses.
+    public static let heldMax = 64 * 1024
+
+    /// What `input` did with the keys.
+    public enum InputResult: Equatable, Sendable {
+        /// On the socket.
+        case sent
+        /// The connection is down: held, and sent after the terminal is opened again on the next connection.
+        case held
+        /// Refused, nothing of it taken: `heldMax` is held already (the client's InputFull; type again once back).
+        case inputFull
+        /// No such terminal open.
+        case notOpen
+    }
 
     private final class Open {
         let id: UInt64
@@ -196,6 +210,9 @@ public actor TermClient {
         var rows: UInt16
         let output: OutputBuffer
         let end: AsyncStream<String?>.Continuation
+        /// Keystrokes typed while the connection was down (Ruling A-R2, P2-R4: never dropped), sent right after this
+        /// terminal's TermOpen on the next connection. At most `heldMax`.
+        var held = Data()
 
         init(id: UInt64, target: AttachTarget, cols: UInt16, rows: UInt16, output: OutputBuffer,
              end: AsyncStream<String?>.Continuation) {
@@ -229,6 +246,30 @@ public actor TermClient {
 
     public init() {}
 
+    private var watchers: [UUID: AsyncStream<Bool>.Continuation] = [:]
+
+    /// Whether the Terminals connection is up: now, then at every change (a view shows "reconnecting…" while it is
+    /// down; the terminals are opened again when it is back).
+    public func connections() -> AsyncStream<Bool> {
+        let (stream, c) = AsyncStream<Bool>.makeStream()
+        let id = UUID()
+        watchers[id] = c
+        c.yield(connected)
+        c.onTermination = { [weak self] _ in
+            guard let self else { return }
+            Task { await self.unwatch(id) }
+        }
+        return stream
+    }
+
+    private func unwatch(_ id: UUID) { watchers[id] = nil }
+
+    private func setConnected(_ up: Bool) {
+        guard up != connected else { return }
+        connected = up
+        for c in watchers.values { c.yield(up) }
+    }
+
     /// `data` as `TermIn` frames of at most `Frame.termInMax` (64 KiB) each, in order.
     public static func inputFrames(ref: UInt32, data: Data) -> [Frame] {
         stride(from: data.startIndex, to: data.endIndex, by: Frame.termInMax).map {
@@ -247,7 +288,7 @@ public actor TermClient {
         task = nil
         socket?.close()
         socket = nil
-        connected = false
+        setConnected(false)
         dropAll()
     }
 
@@ -272,11 +313,35 @@ public actor TermClient {
     }
 
     /// Keystrokes or a paste, split into `TermIn`s of at most 64 KiB that go out back to back. Returns once they are on
-    /// the socket (which waits while the program does not read). Input for a terminal that is not open, or typed while
-    /// the connection is down, is not sent: the terminal is opened again when the connection is back.
-    public func input(_ ref: UInt32, _ data: Data) async {
-        guard terms[ref] != nil, !data.isEmpty, let sock = socket else { return }
-        try? await sock.send(Self.inputFrames(ref: ref, data: data))
+    /// the socket (which waits while the program does not read). Typed while the connection is down, they are held
+    /// (Ruling A-R2: never dropped, P2-R4) and sent, in order, right after the terminal's TermOpen on the next
+    /// connection; past `heldMax` held, the input is refused whole (`inputFull`).
+    @discardableResult
+    public func input(_ ref: UInt32, _ data: Data) async -> InputResult {
+        guard let t = terms[ref] else { return .notOpen }
+        if data.isEmpty { return .sent }
+        guard let sock = socket, t.held.isEmpty else { return hold(t, data) }
+        do {
+            try await sock.send(Self.inputFrames(ref: ref, data: data))
+            return .sent
+        } catch {
+            // The connection went while these were on their way: held for the next one rather than lost.
+            guard terms[ref] === t else { return .notOpen }
+            return hold(t, data)
+        }
+    }
+
+    private func hold(_ t: Open, _ data: Data) -> InputResult {
+        guard t.held.count + data.count <= Self.heldMax else { return .inputFull }
+        t.held.append(data)
+        return .held
+    }
+
+    /// Closes the connection now and connects again (the usual backoff from its floor), every open terminal opened
+    /// again at its last size, with no end reaching its view: as when the daemon restarts (Ruling A-R2, for a phone
+    /// back from the background). Not `stop()`: the terminals are kept.
+    public func reconnect() {
+        socket?.close()
     }
 
     public func size(_ ref: UInt32, cols: UInt16, rows: UInt16) {
@@ -375,12 +440,16 @@ public actor TermClient {
             }
             // The Hello and every open terminal's TermOpen, in one write, ahead of anything sent from here on.
             let hello = Frame.hello(proto: Frame.proto, since: nil, run: nil, role: .terminals)
-            let reopen = terms.sorted { $0.key < $1.key }.map {
-                Frame.termOpen(ref: $0.key, target: $0.value.target, cols: $0.value.cols, rows: $0.value.rows)
+            // Each terminal's held keys go right behind its TermOpen (the daemon opens it before reading on).
+            let reopen = terms.sorted { $0.key < $1.key }.flatMap { ref, t -> [Frame] in
+                let held = t.held
+                t.held = Data()
+                return [Frame.termOpen(ref: ref, target: t.target, cols: t.cols, rows: t.rows)]
+                    + Self.inputFrames(ref: ref, data: held)
             }
             sock.enqueue([hello] + reopen)
             socket = sock
-            connected = true
+            setConnected(true)
             // A view still behind from before holds this connection too, until it catches up.
             over = Set(terms.values.filter { $0.output.isOver }.map(\.id))
             if !over.isEmpty { sock.pause() }
@@ -405,7 +474,7 @@ public actor TermClient {
             sock.close()
             if socket === sock {
                 socket = nil
-                connected = false
+                setConnected(false)
                 // The daemon released this connection's terminals: the owed ends will not come, and the open ones are
                 // opened again on the next connection.
                 for list in closing.values { for t in list { end(t, nil) } }

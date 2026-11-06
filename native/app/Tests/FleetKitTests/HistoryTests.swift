@@ -80,6 +80,17 @@ import Testing
         #expect(Set(w.keys) == ["b", "d", "e", "f", "g", "h"])
     }
 
+    /// M1: the one on screen is never let go of, even when it is the oldest (it was neither closed nor kept before).
+    @Test func theOneOnScreenIsNeverLetGoOf() {
+        var w = WarmSet<String>(limit: 2)
+        _ = w.use("shown")
+        _ = w.use("a")
+        #expect(w.use("b", keeping: "shown") == ["a"])
+        #expect(Set(w.keys) == ["shown", "b"])
+        #expect(w.use("c", keeping: "shown") == ["b"])
+        #expect(w.contains("shown"))
+    }
+
     @Test func removeForgetsOne() {
         var w = WarmSet<String>(limit: 2)
         _ = w.use("a")

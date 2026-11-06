@@ -2,7 +2,8 @@
 // moves between sessions: the rail's selection, explicit opens, history (⌘[ ⌘]), the Nth needs-you (⌘1–⌘9), the
 // quick switcher (⌘K) and the full-window terminal (⌘⇧F).
 //
-//   ↑ ↓            the rail (the table's own keys); a row settled on for 300 ms opens, passing through opens nothing
+//   ↑ ↓            the rail (Go menu, enabled only while the rail has the keyboard); a row settled on for 300 ms opens,
+//                  passing through opens nothing
 //   Return, click  opens the session's terminal and gives it the keyboard
 //   ⌃`             terminal ↔ rail (fleet.html's key). Esc is the program's inside a terminal (Claude Code's interrupt,
 //                  as in fleet.html: "Esc is Claude Code's there"); in the switcher it closes it
@@ -91,9 +92,12 @@ final class Navigator: NSObject, NSMenuItemValidation {
     func open(_ key: SessionKey, focus: Bool, push: Bool = true) {
         settle?.cancel()
         model.selection = key
+        rail.reveal(key)  // M5: a folded row chosen from ⌘K unfolds its group
         rail.select(key)
         pane.show(model.selected, open: true, focus: focus)
-        if !focus, pane.terminalHasFocus == false, window?.firstResponder !== rail.table, !switcherOpen {
+        // I3: wherever the keyboard was (the switcher's field, a terminal left behind), it is in the rail now unless
+        // a terminal took it; one still being made takes it from the rail when it is.
+        if !pane.terminalHasFocus, !switcherOpen, window?.firstResponder !== rail.table {
             window?.makeFirstResponder(rail.table)
         }
         if push { history.push(key) }
@@ -106,6 +110,8 @@ final class Navigator: NSObject, NSMenuItemValidation {
         if let k = model.selection, pane.shownKey != k { pane.show(model.selected, open: true, focus: true) }
         pane.activate()
         if let k = model.selection { history.push(k) }
+        // I3: no terminal for it (nothing to attach, or one still being made): the keyboard is in the rail.
+        if !pane.terminalHasFocus, window?.firstResponder !== rail.table { toRail() }
     }
 
     /// The keyboard to the rail, on the session shown.
@@ -114,7 +120,38 @@ final class Navigator: NSObject, NSMenuItemValidation {
     }
 
     @objc func toggleFocus(_ sender: Any?) {
-        if pane.terminalHasFocus { toRail() } else { enter() }
+        if pane.terminalHasFocus || !pane.canFocus { toRail() } else { enter() }
+    }
+
+    /// M4: the plain keys in the menus. ↑/↓ move the rail's selection (as its own keys do: a row settled on opens),
+    /// only while the rail has the keyboard; Esc closes the switcher, or brings the keyboard back to the rail when it
+    /// is nowhere. In a terminal all three are the program's (the items are disabled there, so the key goes on to it).
+    @objc func railUp(_ sender: Any?) { railMove(-1) }
+    @objc func railDown(_ sender: Any?) { railMove(1) }
+
+    private func railMove(_ by: Int) {
+        let rows = rail.rows
+        let at = model.selection.flatMap { k in rows.firstIndex { $0.session?.key == k } }
+        var i = at ?? (by > 0 ? -1 : rows.count)
+        repeat { i += by } while i >= 0 && i < rows.count && rows[i].session == nil
+        guard i >= 0, i < rows.count else { return }
+        rail.table.selectRowIndexes([i], byExtendingSelection: false)
+        rail.table.scrollRowToVisible(i)
+    }
+
+    @objc func escape(_ sender: Any?) {
+        if switcherOpen {
+            switcher.close()
+            window?.makeFirstResponder(before ?? rail.table)
+        } else {
+            toRail()
+        }
+    }
+
+    private var escapable: Bool {
+        if switcherOpen { return true }
+        let fr = window?.firstResponder
+        return fr == nil || fr === window
     }
 
     @objc func back(_ sender: Any?) {
@@ -189,10 +226,9 @@ final class Navigator: NSObject, NSMenuItemValidation {
 
     private func keyDown(_ e: NSEvent) -> Bool {
         let mods = e.modifierFlags.intersection([.command, .shift, .control, .option])
-        guard !mods.isEmpty, let chars = e.charactersIgnoringModifiers?.lowercased(), e.window === window else {
-            return false
-        }
+        guard let chars = e.charactersIgnoringModifiers?.lowercased(), e.window === window else { return false }
         for item in keyed where item.keyEquivalentModifierMask == mods && item.keyEquivalent.lowercased() == chars {
+            // A disabled item does nothing and the key goes on (an unmodified one to the terminal or the field).
             guard let action = item.action, validateMenuItem(item) else { return false }
             NSApp.sendAction(action, to: self, from: item)
             return true
@@ -212,6 +248,8 @@ final class Navigator: NSObject, NSMenuItemValidation {
         case #selector(forward(_:)): return !busy && history.canGoForward
         case #selector(enter): return !busy && window?.firstResponder === rail.table && model.selection != nil
         case #selector(previous(_:)), #selector(next(_:)), #selector(toggleFocus(_:)): return !busy
+        case #selector(railUp(_:)), #selector(railDown(_:)): return !busy && window?.firstResponder === rail.table
+        case #selector(escape(_:)): return escapable
         case #selector(needsYou(_:)):
             let rows = model.groups.first { $0.kind == .needsYou }?.rows ?? []
             if item.tag <= rows.count {
@@ -275,6 +313,9 @@ final class Navigator: NSObject, NSMenuItemValidation {
             // its program's); the bench checks a terminal still gets it.
             item("Open in Terminal", #selector(enter), "\r", [], target: self),
             item("Terminal / Sessions", #selector(toggleFocus(_:)), "`", .control, target: self),
+            item("Up in Sessions", #selector(railUp(_:)), arrowUp, [], target: self),
+            item("Down in Sessions", #selector(railDown(_:)), arrowDown, [], target: self),
+            item("Back to Sessions", #selector(escape(_:)), "\u{1b}", [], target: self),
             .separator(),
         ]
         let head = NSMenuItem(title: "Needs You", action: nil, keyEquivalent: "")
@@ -283,7 +324,7 @@ final class Navigator: NSObject, NSMenuItemValidation {
         for n in 1...9 { go.append(item("Needs You \(n)", #selector(needsYou(_:)), "\(n)", target: self, tag: n)) }
         menu("Go", go)
         keyed = bar.items.compactMap(\.submenu).flatMap(\.items).filter {
-            ($0.target as AnyObject?) === self && !$0.keyEquivalentModifierMask.intersection([.command, .control]).isEmpty
+            ($0.target as AnyObject?) === self && !$0.keyEquivalent.isEmpty
         }
         NSApp.windowsMenu = menu("Window", [
             item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),

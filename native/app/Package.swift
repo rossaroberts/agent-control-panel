@@ -24,5 +24,8 @@ let package = Package(
             dependencies: ["FleetKit", .product(name: "SwiftTerm", package: "SwiftTerm")]
         ),
         .testTarget(name: "FleetKitTests", dependencies: ["FleetKit"]),
+        // The app's own logic that needs AppKit (the pane, the navigator): run in-process with windows that are never
+        // shown on screen.
+        .testTarget(name: "FleetAppTests", dependencies: ["FleetApp"]),
     ]
 )

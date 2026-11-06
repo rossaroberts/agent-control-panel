@@ -140,6 +140,17 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         CATransaction.flush()
     }
 
+    /// M5: `key` folded behind its group's "N older" line is shown: the group opens (and stays open, as a click on
+    /// the line leaves it).
+    func reveal(_ key: SessionKey) {
+        guard !rows.contains(where: { $0.session?.key == key }),
+            let g = model.groups.first(where: { $0.older.contains { $0.key == key } })
+        else { return }
+        openOlder.insert(g.id)
+        UserDefaults.standard.set(openOlder.sorted(), forKey: Self.openKey)
+        apply(cached: nil)
+    }
+
     /// Selects `key`'s row (if it shows) without telling `onUserSelect`: the caller is already showing it.
     func select(_ key: SessionKey) {
         guard let at = rows.firstIndex(where: { $0.session?.key == key }) else {
@@ -208,6 +219,28 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         }
     }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        (tableView.makeView(withIdentifier: RailRowView.id, owner: nil) as? RailRowView) ?? RailRowView()
+    }
+
+    /// A view-drawn capture (`windowPNG`): the rail opaque and its selection a plain fill, as the window shows them;
+    /// FLEET_SHOT_EMPHASIZED=1 draws the selection as the key window does (white on the accent), else as an inactive
+    /// window does (the label colour on grey).
+    func plainForCapture(_ on: Bool) {
+        RailRowView.plain = on
+        scroll.drawsBackground = on
+        scroll.backgroundColor = .windowBackgroundColor
+        table.backgroundColor = on ? .windowBackgroundColor : .clear
+        let emphasized = ProcessInfo.processInfo.environment["FLEET_SHOT_EMPHASIZED"] == "1"
+        table.enumerateAvailableRowViews { rv, row in
+            rv.needsDisplay = true
+            guard let cell = rv.view(atColumn: 0) as? NSTableCellView else { return }
+            if on, rv.isSelected { cell.backgroundStyle = emphasized ? .emphasized : .normal }
+            if !on { cell.backgroundStyle = rv.interiorBackgroundStyle }
+            cell.needsDisplay = true
+        }
+    }
+
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { rows[row].session != nil }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -216,6 +249,32 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         model.selection = r >= 0 && r < rows.count ? rows[r].session?.key : nil
         onSelect?()
         onUserSelect?()
+    }
+}
+
+/// The rail's row view: AppKit's own selection, except in a view-drawn capture, where a material cannot be drawn and the
+/// selection is filled plainly in the colour the window would show.
+final class RailRowView: NSTableRowView {
+    static let id = NSUserInterfaceItemIdentifier("railRow")
+    @MainActor static var plain = false
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.id
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        super.drawBackground(in: dirtyRect)
+        guard Self.plain, isSelected else { return }
+        let emphasized = ProcessInfo.processInfo.environment["FLEET_SHOT_EMPHASIZED"] == "1"
+        (emphasized ? NSColor.selectedContentBackgroundColor : NSColor.unemphasizedSelectedContentBackgroundColor).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 10, dy: 1), xRadius: 5, yRadius: 5).fill()
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        if !Self.plain { super.drawSelection(in: dirtyRect) }
     }
 }
 

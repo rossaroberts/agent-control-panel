@@ -82,12 +82,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// A run that must leave Ross's saved window frame and rail width as they are.
     private var measuring: Bool {
-        uiBench != nil || LiveSwitch.arguments() != nil || CommandLine.arguments.contains("--width")
+        uiBench != nil || LiveSwitch.arguments() != nil || TermCheck.arguments() != nil
+            || CommandLine.arguments.contains("--width")
     }
 
     /// Everything happens here, before AppKit finishes launching (its check-in with LaunchServices costs ~25 ms
     /// that the board need not wait for): the window, its first paint, then the connections.
     private func launch() {
+        // Shots only: the appearance to draw in (FLEET_APPEARANCE=dark|light), to check both without changing the Mac's.
+        switch ProcessInfo.processInfo.environment["FLEET_APPEARANCE"] {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
         let board = Board()
         if uiBench != nil {
             model = BoardModel(board: board)  // synthetic: no cache, no fleetd
@@ -203,6 +210,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.boardView.tick() }
         }
         ticker?.tolerance = 5
+        if let (job, secs, out) = TermCheck.arguments() {
+            Task { await TermCheck.run(job: job, seconds: secs, out: out, model: model, pane: pane) }
+        }
         if let (a, b, out) = LiveSwitch.arguments(), let live = backend as? LiveBackend {
             Task { await LiveSwitch.run((a, b), out: out, window: window, model: model, nav: nav, pane: pane, backend: live) }
         }
@@ -255,13 +265,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     wait = 4
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [self] in
-                    try? windowPNG(window)?.write(to: url)
-                    // The rail on its own as well (a view-drawn capture leaves the sidebar's vibrancy out).
-                    let t = boardView.table
-                    if let rep = t.bitmapImageRepForCachingDisplay(in: t.visibleRect) {
-                        t.cacheDisplay(in: t.visibleRect, to: rep)
-                        try? rep.representation(using: .png, properties: [:])?
-                            .write(to: url.deletingPathExtension().appendingPathExtension("rail.png"))
+                    if let (png, viewDrawn) = windowPNG(window, rail: boardView) {
+                        try? png.write(to: url)
+                        FileHandle.standardError.write(Data("shot: \(viewDrawn ? "view-drawn (screen locked?)" : "window server")\n".utf8))
                     }
                     NSApp.terminate(nil)
                 }
@@ -391,23 +397,39 @@ final class Floor: NSObject, NSApplicationDelegate {
 }
 
 /// The window as a PNG: as the window server composites it, or, when that comes back blank (a locked screen gives
-/// every app a blank capture), as its own views draw it (no Metal layers then: run with FLEET_TERM_RENDERER=cg).
-@MainActor func windowPNG(_ window: NSWindow) -> Data? {
-    if let image = ownWindowImage(window.windowNumber), !blank(image) {
-        return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+/// every app a blank capture), as its own views draw it. A view-drawn capture cannot draw AppKit's materials (the
+/// sidebar's glass comes out empty, the selection black) nor Metal layers, so for it the rail is drawn opaque and the
+/// selection as a plain fill (`RailRowView.plain`), and the terminal should run with FLEET_TERM_RENDERER=cg.
+@MainActor func windowPNG(_ window: NSWindow, rail: BoardController? = nil) -> (png: Data, viewDrawn: Bool)? {
+    if let image = ownWindowImage(window.windowNumber), !blank(image),
+        let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+    {
+        return (png, false)
     }
     guard let frame = window.contentView?.superview, let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds)
     else { return nil }
+    rail?.plainForCapture(true)
     frame.cacheDisplay(in: frame.bounds, to: rep)
-    return rep.representation(using: .png, properties: [:])
+    rail?.plainForCapture(false)
+    return rep.representation(using: .png, properties: [:]).map { ($0, true) }
 }
 
-/// Every sampled pixel the same.
-private func blank(_ image: CGImage) -> Bool {
-    guard let data = image.dataProvider?.data, let p = CFDataGetBytePtr(data) else { return true }
-    let n = CFDataGetLength(data), step = max(4, n / 4096 / 4 * 4)
-    let first = p[0]
-    for i in stride(from: 0, to: n, by: step) where p[i] != first { return false }
+/// Every sampled pixel the same: whole 32-bit pixels compared (one byte of each would be alpha, the same for every
+/// opaque window), across the rows the image's own stride gives.
+func blank(_ image: CGImage) -> Bool {
+    guard image.bitsPerPixel == 32, let data = image.dataProvider?.data, let p = CFDataGetBytePtr(data) else {
+        return false  // not a layout we can read: never call it blank
+    }
+    let row = image.bytesPerRow, w = image.width, h = image.height
+    guard w > 0, h > 0, CFDataGetLength(data) >= row * h else { return false }
+    func pixel(_ x: Int, _ y: Int) -> UInt32 {
+        let o = y * row + x * 4
+        return UInt32(p[o]) | UInt32(p[o + 1]) << 8 | UInt32(p[o + 2]) << 16 | UInt32(p[o + 3]) << 24
+    }
+    let first = pixel(0, 0)
+    for y in stride(from: 0, to: h, by: max(1, h / 64)) {
+        for x in stride(from: 0, to: w, by: max(1, w / 64)) where pixel(x, y) != first { return false }
+    }
     return true
 }
 

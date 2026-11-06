@@ -431,6 +431,116 @@ private func cpuMs() -> Double {
         }
     }
 
+    /// Ruling A-R2: `reconnect()` with two terminals open. Both are opened again on the new connection (each shows its
+    /// banner again) and neither view sees an end.
+    @Test func reconnectReattachesEveryOpenTerminalWithNoEnd() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let terms = TermClient()
+        await terms.start(socket: fx.socket)
+        try await cleaning {
+            let a = Screen(await terms.open(1, target: .claude(profile: "default", job: "e000000a"), cols: 90, rows: 25))
+            let b = Screen(await terms.open(2, target: .claude(profile: "default", job: "e000000b"), cols: 90, rows: 25))
+            #expect(await until(15) { a.has("BANNER e000000a") && b.has("BANNER e000000b") })
+            let (fa, fb) = (a.data.count, b.data.count)
+            let ups = await terms.connections()
+            var seen: [Bool] = []
+            let watch = Task { for await u in ups { seen.append(u) } }
+            await terms.reconnect()
+            // Kept warm by the daemon, each comes back with what it last printed (its banner) on the new connection.
+            #expect(await until(15) {
+                a.data.suffix(from: fa).range(of: Data("BANNER e000000a".utf8)) != nil
+                    && b.data.suffix(from: fb).range(of: Data("BANNER e000000b".utf8)) != nil
+            })
+            #expect(a.ended == nil && b.ended == nil)
+            #expect(await until(2) { seen.contains(false) && seen.last == true })
+            watch.cancel()
+            #expect(await terms.input(1, Data("after".utf8)) == .sent)
+            #expect(await until(5) { a.data.suffix(from: fa).range(of: Data("after".utf8)) != nil })
+        } then: {
+            await terms.stop()
+            fx.stopDaemon()
+        }
+    }
+
+    /// Ruling A-R2 (P2-R4): keys typed while the daemon is away are held and arrive, in order, after the reopen.
+    @Test func keysTypedDuringTheGapArriveInOrderAfterTheReopen() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let terms = TermClient()
+        await terms.start(socket: fx.socket)
+        try await cleaning {
+            let screen = Screen(await terms.open(4, target: .claude(profile: "default", job: rawJob), cols: 90, rows: 25))
+            #expect(await until(15) { screen.has("BANNER \(rawJob)") })
+            fx.stopDaemon()
+            #expect(await until(5) { await !terms.connected })
+            #expect(await terms.input(4, Data("first-".utf8)) == .held)
+            #expect(await terms.input(4, Data("second-".utf8)) == .held)
+            #expect(await terms.input(4, Data("third".utf8)) == .held)
+            let before = screen.data.count
+            try fx.startDaemon()
+            #expect(await until(15) {
+                screen.data.suffix(from: before).range(of: Data("first-second-third".utf8)) != nil
+            })
+            #expect(screen.ended == nil)
+        } then: {
+            await terms.stop()
+            fx.stopDaemon()
+        }
+    }
+
+    /// Ruling A-R2: past 64 KiB held during the gap, input is refused (InputFull), whole; what was held still arrives.
+    @Test func typingPast64KiBDuringTheGapIsInputFull() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let terms = TermClient()
+        await terms.start(socket: fx.socket)
+        try await cleaning {
+            let screen = Screen(await terms.open(5, target: .claude(profile: "default", job: rawJob), cols: 90, rows: 25))
+            #expect(await until(15) { screen.has("BANNER \(rawJob)") })
+            fx.stopDaemon()
+            #expect(await until(5) { await !terms.connected })
+            // In lines: a fresh stand-in is still in cooked mode when the held keys land (before its `stty raw`), and
+            // a canonical line longer than MAX_CANON (1024) never completes.
+            var big = Data()
+            while big.count + 64 <= TermClient.heldMax - 10 { big.append(Data((String(repeating: "x", count: 63) + "\n").utf8)) }
+            big.append(Data(repeating: UInt8(ascii: "x"), count: TermClient.heldMax - 10 - big.count))
+            #expect(big.count == TermClient.heldMax - 10)
+            #expect(await terms.input(5, big) == .held)
+            #expect(await terms.input(5, Data("0123456789".utf8)) == .held)  // exactly at the bound
+            #expect(await terms.input(5, Data("!".utf8)) == .inputFull)
+            #expect(await terms.input(5, Data(repeating: 0x79, count: 4096)) == .inputFull)
+            let before = screen.data.count
+            try fx.startDaemon()
+            #expect(await until(15) { screen.data.suffix(from: before).range(of: Data("x0123456789".utf8)) != nil })
+            let back = screen.data.suffix(from: before)
+            #expect(back.range(of: Data("!".utf8)) == nil && back.range(of: Data("yyyy".utf8)) == nil)
+        } then: {
+            await terms.stop()
+            fx.stopDaemon()
+        }
+    }
+
+    /// Ruling A-R2: the board's `reconnect()` resumes from its run and seq: the board keeps its sessions throughout.
+    @Test func boardReconnectResumes() async throws {
+        let fx = try Fixture()
+        try fx.startDaemon()
+        let board = Board()
+        let client = BoardClient(board: board)
+        await client.start(socket: fx.socket)
+        try await cleaning {
+            #expect(await until(15) { board.sessions.count == 3 })
+            let run = board.run
+            await client.reconnect()
+            #expect(await until(5) { await client.status == .reconnecting || board.seq != nil })
+            #expect(await until(15) { await client.status == .live })
+            #expect(board.run == run && board.sessions.count == 3)
+        } then: {
+            await client.stop()
+            fx.stopDaemon()
+        }
+    }
+
     /// P3-R5: a 50 MB flood into a view that reads slowly. The client holds about 1 MiB of it at most (then stops
     /// reading the socket, so fleetd's backpressure reaches the program), its memory grows < 8 MiB, and every byte
     /// arrives in order.
