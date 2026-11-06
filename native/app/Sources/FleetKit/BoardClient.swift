@@ -14,6 +14,9 @@ public actor BoardClient {
         case reconnecting
         /// No daemon at the socket ("fleetd not running").
         case absent
+        /// The daemon answered with an `Error` and closed (its words: a version mismatch, say). The client keeps
+        /// trying, every 2 s at most, in case a matching daemon takes its place.
+        case refused(String)
     }
 
     /// The first wait before a reconnect, and the longest.
@@ -33,13 +36,25 @@ public actor BoardClient {
         self.board = board
     }
 
+    deinit {
+        for w in watchers.values { w.finish() }
+        socket?.close()
+    }
+
     /// Starts (or restarts, on another socket) the connection loop.
     public func start(socket url: URL) {
-        stop()
+        halt()
         task = Task { await self.run(url) }
     }
 
+    /// Ends the connection, and every `statuses()` stream.
     public func stop() {
+        halt()
+        for w in watchers.values { w.finish() }
+        watchers = [:]
+    }
+
+    private func halt() {
         task?.cancel()
         task = nil
         socket?.close()
@@ -78,8 +93,11 @@ public actor BoardClient {
                 backoff = min(backoff * 2, Self.backoffCeiling)
                 continue
             }
+            if Task.isCancelled {  // stop() ran while connecting
+                sock.close()
+                break
+            }
             socket = sock
-            if Task.isCancelled { break }  // stop() ran while connecting
             let hello: Frame
             if fresh {
                 hello = .hello(proto: Frame.proto, since: nil, run: nil, role: .board)
@@ -87,11 +105,15 @@ public actor BoardClient {
                 hello = await board.hello()
             }
             fresh = false
+            var refusal: String?
+            // Queued, not awaited: a daemon that refuses may close before the Hello is all written, and its Error is
+            // still there to read.
+            sock.enqueue([hello])
             do {
-                try await sock.send(hello)
                 for try await frame in sock.frames {
                     if case let .error(message) = frame {
                         lastError = message
+                        refusal = message
                         break
                     }
                     if await board.apply(frame) == .needsResync {
@@ -108,7 +130,7 @@ public actor BoardClient {
             sock.close()
             if socket === sock { socket = nil }
             if Task.isCancelled { break }
-            set(.reconnecting)
+            set(refusal.map(Status.refused) ?? .reconnecting)
             try? await Task.sleep(for: backoff)
             backoff = min(backoff * 2, Self.backoffCeiling)
         }

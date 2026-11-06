@@ -41,11 +41,40 @@ private final class Descriptor: Sendable {
     var value: Int32? { fd.withLock { $0 } }
 }
 
+/// Holds the reader thread before its next read(2) while the consumer is behind (`FrameSocket.pause`).
+private final class ReadGate: Sendable {
+    private let cond = NSCondition()
+    private nonisolated(unsafe) var paused = false
+    private nonisolated(unsafe) var shut = false
+
+    func set(paused p: Bool) {
+        cond.lock()
+        paused = p
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    func shutDown() {
+        cond.lock()
+        shut = true
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    /// Waits while paused (and not shut down).
+    func pass() {
+        cond.lock()
+        while paused && !shut { cond.wait() }
+        cond.unlock()
+    }
+}
+
 public final class FrameSocket: Sendable {
     /// Every frame the daemon sends, in order. Finishes when the connection ends (cleanly at EOF, else with the error).
     public let frames: AsyncThrowingStream<Frame, Error>
 
     private let fd: Descriptor
+    private let gate = ReadGate()
     private let writes = DispatchQueue(label: "FleetKit.FrameSocket.write", qos: .userInteractive)
 
     private init(fd raw: Int32) {
@@ -54,8 +83,9 @@ public final class FrameSocket: Sendable {
         let (stream, sink) = AsyncThrowingStream<Frame, Error>.makeStream()
         frames = stream
         let writes = self.writes
+        let gate = self.gate
         let reader = Thread {
-            Self.readLoop(raw, sink)
+            Self.readLoop(raw, gate, sink)
             // Closed on the write queue, behind any write still queued (they fail fast once the socket is shut).
             fd.shutdown()
             writes.async { fd.close() }
@@ -65,7 +95,10 @@ public final class FrameSocket: Sendable {
         reader.start()
     }
 
-    deinit { fd.shutdown() }
+    deinit {
+        fd.shutdown()
+        gate.shutDown()
+    }
 
     /// Connects to the socket at `url`. Throws `SocketError.absent` when no daemon is there.
     public static func connect(_ url: URL) throws -> FrameSocket {
@@ -74,6 +107,10 @@ public final class FrameSocket: Sendable {
         guard path.count < MemoryLayout.size(ofValue: addr.sun_path) else { throw SocketError.pathTooLong }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw SocketError.failed(errno: errno) }
+        // macOS has no SOCK_CLOEXEC: until this fcntl a process forked by another thread of the app could inherit the
+        // socket, and keep the connection open after the app closed it (the daemon would not see the hang-up). The app
+        // starts no processes of its own; anything that does fork while a client connects should use posix_spawn with
+        // POSIX_SPAWN_CLOEXEC_DEFAULT.
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         var one: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -131,7 +168,16 @@ public final class FrameSocket: Sendable {
     }
 
     /// Ends the connection: `frames` finishes and later sends throw `SocketError.closed`.
-    public func close() { fd.shutdown() }
+    public func close() {
+        fd.shutdown()
+        gate.shutDown()
+    }
+
+    /// Stops reading the socket (after the read in progress) until `resume`: the daemon's backpressure then reaches
+    /// whatever it is sending. Frames already read are still delivered. Writes are not affected.
+    public func pause() { gate.set(paused: true) }
+
+    public func resume() { gate.set(paused: false) }
 
     private func writeAll(_ bytes: Data) throws {
         guard let f = fd.value else { throw SocketError.closed }
@@ -149,11 +195,18 @@ public final class FrameSocket: Sendable {
     }
 
     /// Reads frames until EOF or an error: each `u32` little-endian length, then its body, decoded and yielded.
-    private static func readLoop(_ fd: Int32, _ sink: AsyncThrowingStream<Frame, Error>.Continuation) {
-        var buf = [UInt8](repeating: 0, count: 256 * 1024)
+    /// The read buffer's size; it grows for a bigger frame and comes back to this once that frame is consumed.
+    private static let readSize = 256 * 1024
+
+    private static func readLoop(
+        _ fd: Int32, _ gate: ReadGate, _ sink: AsyncThrowingStream<Frame, Error>.Continuation
+    ) {
+        var buf = [UInt8](repeating: 0, count: readSize)
         var have = 0  // bytes in buf[0..<have]
         var start = 0  // the first byte not yet parsed
         while true {
+            // The bytes the frame at `start` needs, when it is not all here yet.
+            var need = 0
             // Every whole frame in what has been read.
             while have - start >= 4 {
                 let n = Int(buf[start]) | Int(buf[start + 1]) << 8 | Int(buf[start + 2]) << 16 | Int(buf[start + 3]) << 24
@@ -162,6 +215,7 @@ public final class FrameSocket: Sendable {
                     return
                 }
                 guard have - start >= 4 + n else {
+                    need = 4 + n
                     if 4 + n > buf.count { buf += [UInt8](repeating: 0, count: 4 + n - buf.count) }
                     break
                 }
@@ -181,6 +235,10 @@ public final class FrameSocket: Sendable {
                 have -= start
                 start = 0
             }
+            if buf.count > readSize && need <= readSize && have <= readSize {
+                buf = Array(buf[0..<have]) + [UInt8](repeating: 0, count: readSize - have)
+            }
+            gate.pass()
             let r = buf.withUnsafeMutableBufferPointer { p in Darwin.read(fd, p.baseAddress! + have, p.count - have) }
             if r > 0 {
                 have += r
