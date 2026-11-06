@@ -159,6 +159,57 @@ frame with `ref` 0 is ignored (no answer, as `term.mjs`).
 - When an `Error` closes a Terminals connection, output still queued for it and not yet written (`TermOut`,
   `TermEnd`) is discarded: the `Error` goes out ahead of it, as the last frame.
 
+## Network
+
+The same conversation over TCP, for a phone on the tailnet, another machine's hub, or a local tool. **Off by default**:
+`fleetd serve` listens on TCP only with `--listen loopback|tailscale` or the config's `"listen"`.
+
+- **Config**: `fleetd.json` (`~/Library/Application Support/Fleet/` on macOS; `$XDG_CONFIG_HOME/fleet/`, else
+  `~/.config/fleet/`, on Linux; or `--config FILE`): `{"listen": "off"|"loopback"|"tailscale", "port": 47470, "hub": [...]}`.
+  A missing file is `off`, port 47470; a malformed one stops the daemon. `--listen` and `--port` override the file.
+- **Port 47470**, the same on every address bound.
+- **Two addresses at most**, IPv4 only: `127.0.0.1:47470` (`loopback` and `tailscale`), and this machine's Tailscale IPv4
+  from `tailscale ip -4` (`tailscale`), bound only when it lies in `100.64.0.0/10` and is assigned to a local interface.
+  Never `0.0.0.0`, never another interface, never IPv6. While the Tailscale address cannot be had (Tailscale down, not
+  logged in), it is tried again every 30 s; loopback serves meanwhile.
+- **Who is allowed**, decided before a byte of the peer is read as a frame:
+  - **local**: a peer whose source address is this machine's own (loopback, an interface's, the Tailscale address, or
+    `Self.TailscaleIPs`), on either listener: a process here that dials the Tailscale address is local too (Ruling
+    P5-R9). It sends the key preamble with the right key. On Linux, also a peer whose socket belongs to the daemon's own
+    uid (read from `/proc/net/tcp`), with no key. On macOS there is no cheap per-socket uid, so a local peer always needs
+    the key (Ruling P5-R2).
+  - **Tailscale**: a peer whose node is untagged and whose user is this machine's own Tailscale user (`Self.UserID`),
+    asked of `tailscale whois --json <ip>:<port>` with a 2 s limit (Ruling P5-R3). The nodes `tailscale status --json`
+    lists when the listener starts are allowed at once by the same rule, with no call (Ruling P5-R7); this machine's own
+    node never is. A decision is kept 60 s per peer IP, allow and deny alike; a kept allow older than that is used at
+    once and asked again in the background, and if the answer is now a deny every connection from that IP is closed. No
+    CLI: every Tailscale peer is refused. A Tailscale peer sends no key.
+  - at most 16 connections are being decided or refused at once (a refusal holds its place until its socket is gone);
+    past that a connection is refused (`busy`) at once.
+- **The key preamble** (transport, not a `Frame`): the 4 bytes `FKEY`, then the 32 key bytes, before the `Hello`. Read as a
+  frame length, `FKEY` is ~1.26 GB, over the 64 MiB limit, so it is never mistaken for a frame. The key is
+  `fleetd.key` beside `fleetd.json`: 64 hex characters, made 0600 on first use; a key file of looser mode or other content
+  is an error, never rewritten. A local tool reads it from there.
+- **After auth**, the conversation is exactly the Unix socket's: the same framing, `Hello` first within 10 s, both roles
+  (`Board` and `Terminals`), every rule above.
+- **A refusal** is one `Error { message: "not allowed: <why>" }` (`loopback needs the key`, `wrong key`, `a tagged node`,
+  `another tailnet user`, `whois timed out`, `not a tailnet address`, `no tailscale CLI`, `busy`, ...), then the server
+  closes. Nothing the peer sent is read as a frame. The daemon logs `fleetd: tcp refused <ip>: <why>` at most once per
+  peer per minute, never a key.
+- **Keepalive and latency**: both ends set `TCP_NODELAY` and TCP keepalive (idle 15 s, then a probe every 5 s, 3 probes):
+  a peer gone without a FIN is noticed in about 30 s.
+- **A dropped TCP connection is a lost socket**: the client reconnects with `run`/`since` (Rules a client relies on) and
+  takes what it is sent.
+
+How a client connects:
+
+- **The phone, over Tailscale**: dial `<the Mac's Tailscale IPv4>:47470`, send `Hello { proto: 4, since, run, role: Board }`
+  (no preamble), read the `Snapshot` (or the caught-up `Delta`), the `Meta`, then deltas. A second connection with
+  `role: Terminals` drives terminals. On a drop, reconnect with the last `run` and `seq`.
+- **A local tool with the key**: dial `127.0.0.1:47470`, write `FKEY`, the 32 bytes of `fleetd.key` (decoded from hex), then
+  the `Hello`, in one write; then read as over the Unix socket. `fleetd watch --tcp <host:port>` connects without a key
+  (a Tailscale peer).
+
 ## Versioning
 
 Any change to the bytes of a frame (a field added, removed or moved, a variant added anywhere but the end, a type
