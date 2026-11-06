@@ -101,10 +101,23 @@ pub fn install() -> io::Result<()> {
     std::fs::create_dir_all(log.parent().unwrap())?;
     let path = plist_path();
     std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, plist(&bin, &log))?;
+    let tmp = path.with_extension("plist.new");
+    std::fs::write(&tmp, plist(&bin, &log))?;
+    std::fs::rename(&tmp, &path)?;
     let (domain, target) = (domain(), format!("{}/{LABEL}", domain()));
     let _ = launchctl(&["bootout", &target]); // not loaded is fine
-    if !launchctl(&["bootstrap", &domain, &path.to_string_lossy()])? {
+                                              // Right after a bootout, launchd can still be tearing the old job down and refuse (error 5): try again.
+    let mut loaded = false;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        if launchctl(&["bootstrap", &domain, &path.to_string_lossy()])? {
+            loaded = true;
+            break;
+        }
+    }
+    if !loaded {
         return Err(io::Error::other("launchctl bootstrap failed"));
     }
     println!("installed {} and loaded {LABEL}", path.display());

@@ -51,8 +51,8 @@ fn run_serve() {
     });
     let path = serve::socket_path();
     let rt = runtime();
-    rt.block_on(async {
-        let listener = serve::bind(&path).unwrap_or_else(|e| {
+    let _guard = rt.block_on(async {
+        let (listener, guard) = serve::bind(&path).unwrap_or_else(|e| {
             eprintln!("fleetd: {}: {e}", path.display());
             exit(1)
         });
@@ -65,8 +65,8 @@ fn run_serve() {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
         }
+        guard // kept to the end of `serve`: the socket goes, then the lock
     });
-    let _ = std::fs::remove_file(&path);
     drop(rt);
     drop(handle);
 }

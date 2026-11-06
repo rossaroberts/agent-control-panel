@@ -84,3 +84,37 @@ fn install_is_idempotent_and_uninstall_removes() {
         .unwrap()
         .ends_with(&format!("bootout gui/{uid}/dev.fleet.fleetd\n")));
 }
+
+#[test]
+fn bootstrap_is_retried_while_launchd_tears_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let stub = root.join("stub");
+    fs::create_dir_all(&stub).unwrap();
+    let calls = root.join("calls.log");
+    let sh = stub.join("launchctl");
+    // bootstrap fails (like error 5) the first two times
+    fs::write(
+        &sh,
+        format!(
+            "#!/bin/sh\necho \"$1\" >> '{c}'\nif [ \"$1\" = bootstrap ]; then n=$(grep -c bootstrap '{c}'); [ \"$n\" -le 2 ] && {{ echo 'Bootstrap failed: 5' >&2; exit 5; }}; fi\nexit 0\n",
+            c = calls.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
+    let o = Command::new(env!("CARGO_BIN_EXE_fleetd"))
+        .arg("install-service")
+        .env("FLEETD_HOME", &root)
+        .env("HOME", &root)
+        .env("FLEETD_LAUNCHAGENTS_DIR", root.join("LA"))
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let log = fs::read_to_string(&calls).unwrap();
+    assert_eq!(log.lines().filter(|l| *l == "bootstrap").count(), 3);
+    assert!(!root.join("LA/dev.fleet.fleetd.plist.new").exists());
+}

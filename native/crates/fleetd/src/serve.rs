@@ -8,6 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_model::wire::{read_frame, write_frame, Frame, PROTO};
+
+/// The most a Hello can weigh.
+const HELLO_MAX: u32 = 4096;
 use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
@@ -34,19 +37,73 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
-/// Binds the socket with mode 0600. A socket file left by a dead daemon is replaced; one that answers is not.
-pub fn bind(path: &Path) -> io::Result<UnixListener> {
+/// Holds the socket's lock for the daemon's lifetime; dropping it removes the socket (only ever while the lock is
+/// held: the file closes after `drop` runs).
+pub struct SocketGuard {
+    path: PathBuf,
+    _lock: std::fs::File,
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Binds the socket with mode 0600 under an exclusive lock on `<path>.lock` (`AddrInUse` if another daemon holds it).
+/// A leftover socket is replaced only when it is a socket and nothing answers (refused or gone); any other file at the
+/// path, or any other connect error, is left alone and reported.
+pub fn bind(path: &Path) -> io::Result<(UnixListener, SocketGuard)> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileTypeExt;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    if path.exists() {
-        if std::os::unix::net::UnixStream::connect(path).is_ok() {
-            return Err(io::Error::new(
+    let mut lock_name = path.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_name)?;
+    // SAFETY: flock on an fd we own; the lock lives as long as `lock` stays open.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = io::Error::last_os_error();
+        return Err(if e.kind() == io::ErrorKind::WouldBlock {
+            io::Error::new(
                 io::ErrorKind::AddrInUse,
-                format!("fleetd already listening on {}", path.display()),
-            ));
+                format!("another fleetd holds {}", Path::new(&lock_name).display()),
+            )
+        } else {
+            e
+        });
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if !m.file_type().is_socket() => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a socket; left alone", path.display()),
+            ))
         }
-        std::fs::remove_file(path)?;
+        Ok(_) => match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("fleetd already listening on {}", path.display()),
+                ))
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
+                std::fs::remove_file(path)?
+            }
+            Err(e) => return Err(e),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     // Bound inside a private folder and renamed into place once it is 0600, so the socket is never reachable with a looser
     // mode (a umask would do it, but that is the whole process's).
@@ -62,8 +119,13 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
         Ok(l)
     })();
     let _ = std::fs::remove_dir_all(&tmp);
-    let l = moved?;
-    Ok(l)
+    Ok((
+        moved?,
+        SocketGuard {
+            path: path.to_path_buf(),
+            _lock: lock,
+        },
+    ))
 }
 
 /// Accepts clients until the task is dropped.
@@ -105,7 +167,7 @@ fn snapshot(store: &Store, machine: &str) -> (u64, Frame) {
 
 async fn handle(stream: UnixStream, store: Arc<Store>, machine: String) -> io::Result<()> {
     let (mut r, mut w) = stream.into_split();
-    let hello = timeout(HELLO_WITHIN, read_frame(&mut r))
+    let hello = timeout(HELLO_WITHIN, read_frame(&mut r, HELLO_MAX))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello"))??;
     let since = match hello {
@@ -124,14 +186,11 @@ async fn handle(stream: UnixStream, store: Arc<Store>, machine: String) -> io::R
     // below drops the ones the board already holds.
     let mut rx = store.subscribe();
     let mut last = match since.and_then(|n| store.since(n).map(|d| (n, d))) {
-        Some((n, d)) => {
-            if d.seq > n {
-                let seq = d.seq;
-                send(&mut w, &Frame::Delta(d)).await?;
-                seq
-            } else {
-                n
-            }
+        Some((_, d)) => {
+            // Caught up gets the same empty delta as an acknowledgement (Ruling R18).
+            let seq = d.seq;
+            send(&mut w, &Frame::Delta(d)).await?;
+            seq
         }
         None => {
             let (seq, f) = snapshot(&store, &machine);

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_model::types::{Delta, Engine, Session, SessionKey, State};
-use fleet_model::wire::{read_frame, write_frame, Frame, PROTO};
+use fleet_model::wire::{read_frame, write_frame, Frame, MAX_FRAME, PROTO};
 use fleetd::client::Client;
 use fleetd::serve::{bind, serve};
 use fleetd::store::Store;
@@ -45,6 +45,7 @@ struct Server {
     path: PathBuf,
     store: Arc<Store>,
     task: JoinHandle<()>,
+    _guard: fleetd::serve::SocketGuard,
 }
 
 impl Server {
@@ -55,16 +56,14 @@ impl Server {
         if n > 0 {
             store.upsert((0..n).map(|i| sess(i, "start")).collect());
         }
-        let task = tokio::spawn(serve(
-            bind(&path).unwrap(),
-            store.clone(),
-            "fixture-mac".into(),
-        ));
+        let (listener, _guard) = bind(&path).unwrap();
+        let task = tokio::spawn(serve(listener, store.clone(), "fixture-mac".into()));
         Server {
             _dir: dir,
             path,
             store,
             task,
+            _guard,
         }
     }
 }
@@ -125,8 +124,16 @@ async fn hello_with_since_gets_only_what_came_after() {
         }
         f => panic!("{f:?}"),
     }
-    // Fully current: nothing now, the next change when it comes.
+    // Fully current: an empty delta at once as the acknowledgement (R18), then the next change when it comes.
     let mut cur = Client::connect(&s.path, Some(3)).await.unwrap();
+    assert_eq!(
+        next(&mut cur).await,
+        Frame::Delta(Delta {
+            seq: 3,
+            upsert: vec![],
+            remove: vec![]
+        })
+    );
     nothing(&mut cur).await;
     s.store.upsert(vec![sess(0, "fourth")]);
     match next(&mut cur).await {
@@ -168,7 +175,7 @@ async fn a_first_frame_that_is_not_hello_is_refused() {
     .await
     .unwrap();
     assert!(matches!(
-        read_frame(&mut st).await.unwrap(),
+        read_frame(&mut st, MAX_FRAME).await.unwrap(),
         Frame::Error { .. }
     ));
 }
@@ -192,7 +199,66 @@ async fn a_live_socket_is_not_taken_over_but_a_dead_one_is() {
     let p = dir.path().join("old.sock");
     drop(std::os::unix::net::UnixListener::bind(&p).unwrap()); // leaves the file, nobody listening
     assert!(p.exists());
-    bind(&p).unwrap();
+    let (_l, _g) = bind(&p).unwrap();
+}
+
+#[tokio::test]
+async fn a_regular_file_at_the_path_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("fleetd.sock");
+    std::fs::write(&p, "precious").unwrap();
+    let e = bind(&p).err().unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "precious");
+}
+
+#[tokio::test]
+async fn the_lock_stops_a_second_bind_and_dropping_the_guard_removes_the_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("fleetd.sock");
+    let (_l, g) = bind(&p).unwrap();
+    assert_eq!(
+        bind(&p).err().unwrap().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+    assert!(p.exists());
+    drop(g);
+    assert!(!p.exists());
+}
+
+#[tokio::test]
+async fn an_oversized_length_is_refused_before_it_is_allocated() {
+    let mut huge: &[u8] = &[0xff, 0xff, 0xff, 0x7f];
+    let e = read_frame(&mut huge, MAX_FRAME).await.unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    // Within the global cap but over this reader's: also refused (the server's Hello limit).
+    let mut big: &[u8] = &[0x00, 0x20, 0x00, 0x00];
+    let e = read_frame(&mut big, 4096).await.unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn a_truncated_frame_is_an_eof_not_a_hang_or_a_big_allocation() {
+    // Claims 60 MiB, delivers 3 bytes, then the peer closes.
+    let mut cut: &[u8] = &[0x00, 0x00, 0x00, 0x03, 1, 2, 3];
+    let e = read_frame(&mut cut, MAX_FRAME).await.unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+    let mut cut: &[u8] = &[0x00, 0x00, 0x00, 0x04, 1, 2, 3];
+    let e = read_frame(&mut cut, MAX_FRAME).await.unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[tokio::test]
+async fn an_oversized_hello_is_dropped_by_the_server() {
+    let s = Server::start(0);
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
+    st.write_all(&(1_000_000u32).to_le_bytes()).await.unwrap();
+    let mut b = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(5), st.read(&mut b))
+        .await
+        .unwrap();
+    assert!(matches!(n, Ok(0) | Err(_)));
 }
 
 #[tokio::test]

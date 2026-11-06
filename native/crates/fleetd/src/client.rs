@@ -3,7 +3,7 @@
 use std::io;
 use std::path::Path;
 
-use fleet_model::wire::{read_frame, write_frame, Frame, PROTO};
+use fleet_model::wire::{read_frame, write_frame, Frame, MAX_FRAME, PROTO};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
@@ -27,6 +27,6 @@ impl Client {
 
     /// The next frame; `UnexpectedEof` when the server closed.
     pub async fn next(&mut self) -> io::Result<Frame> {
-        read_frame(&mut self.r).await
+        read_frame(&mut self.r, MAX_FRAME).await
     }
 }
