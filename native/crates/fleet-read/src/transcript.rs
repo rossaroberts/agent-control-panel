@@ -9,21 +9,20 @@
 //! difference: Node reads a fresh 384 KiB window every time, so once a file outgrows it Node forgets what the window
 //! slid past; a `Tail` remembers what it has read since it opened.
 
-mod js;
+pub(crate) mod js;
 mod line;
+pub(crate) mod reader;
 
 use fleet_model::decide::TailFacts;
 use fleet_model::stage::{stage_of, stage_of_tool};
 use js::{one_line, slice16, truthy};
 use memchr::{memchr_iter, memmem};
+use reader::{LineReader, Step};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::io;
+use std::path::Path;
 
 /// `TAIL` in machine.mjs: how much of the end the first read takes.
 pub const TAIL: u64 = 384 * 1024;
@@ -121,76 +120,29 @@ struct Scan {
 /// A transcript being followed.
 #[derive(Debug)]
 pub struct Tail {
-    path: PathBuf,
-    offset: u64,
-    inode: u64,
-    /// The bytes after the last newline, held until theirs arrives.
-    partial: Vec<u8>,
-    /// The first read began mid-file and has not yet passed the end of the line it began in.
-    skip_line: bool,
-    written_at: Option<i64>,
-    bytes_read: u64,
+    reader: LineReader,
     /// `home_dir()`, resolved once per open, for a tool call's `~/` paths.
     home: String,
     scan: Scan,
     summary: TranscriptSummary,
 }
 
-fn ms(t: std::time::SystemTime) -> Option<i64> {
-    t.duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_millis() as i64)
-}
-
-fn read_at(f: &mut File, from: u64, len: u64) -> io::Result<Vec<u8>> {
-    f.seek(SeekFrom::Start(from))?;
-    let mut buf = Vec::with_capacity(len as usize);
-    f.take(len).read_to_end(&mut buf)?;
-    Ok(buf)
-}
-
 impl Tail {
     /// The first read: the last 384 KiB (the line it starts inside dropped, as `tail()` does) and, when that is not the
     /// whole file, the first 256 KiB for the first ask: at most 640 KiB, and never more than the file.
     pub fn open(path: &Path) -> io::Result<Tail> {
-        let mut f = File::open(path)?;
-        let meta = f.metadata()?;
-        let size = meta.len();
-        let start = size.saturating_sub(TAIL);
+        let (reader, first) = LineReader::open(path, TAIL, HEAD)?;
         let mut t = Tail {
-            path: path.to_path_buf(),
-            offset: start,
-            inode: meta.ino(),
-            partial: Vec::new(),
-            skip_line: start > 0,
-            written_at: meta.modified().ok().and_then(ms),
-            bytes_read: 0,
+            reader,
             home: crate::home::home_dir().to_string_lossy().into_owned(),
             scan: Scan {
-                head_open: start == 0,
+                head_open: first.whole,
                 ..Scan::default()
             },
             summary: TranscriptSummary::default(),
         };
-        // The head and the tail overlap in a file under 640 KiB: then one read of it all.
-        let (head, body) = if start > 0 && start < HEAD {
-            let mut all = read_at(&mut f, 0, size)?;
-            t.bytes_read += all.len() as u64;
-            let body = all.get(start as usize..).unwrap_or_default().to_vec();
-            all.truncate(HEAD as usize);
-            (all, body)
-        } else {
-            let head = if start > 0 {
-                read_at(&mut f, 0, HEAD)?
-            } else {
-                Vec::new()
-            };
-            let body = read_at(&mut f, start, size - start)?;
-            t.bytes_read += (head.len() + body.len()) as u64;
-            (head, body)
-        };
-        t.scan.first_ask_of_head(&head);
-        t.feed(&body);
+        t.scan.first_ask_of_head(&first.head);
+        t.feed(&first.body);
         t.summary = t.scan.summary();
         Ok(t)
     }
@@ -198,60 +150,36 @@ impl Tail {
     /// Reads what was appended since the last read, and only that. A file that shrank or was replaced (another inode)
     /// is read again from scratch. Whether the summary or the facts changed.
     pub fn advance(&mut self) -> io::Result<bool> {
-        let meta = fs::metadata(&self.path)?;
-        let written_at = meta.modified().ok().and_then(ms);
-        let before = (self.summary.clone(), self.written_at);
-        if meta.ino() != self.inode || meta.len() < self.offset {
-            let read = self.bytes_read;
-            *self = Tail::open(&self.path)?;
-            self.bytes_read += read;
-        } else if meta.len() > self.offset {
-            let mut f = File::open(&self.path)?;
-            let new = read_at(&mut f, self.offset, meta.len() - self.offset)?;
-            self.bytes_read += new.len() as u64;
-            self.written_at = written_at;
-            if self.feed(&new) {
-                self.summary = self.scan.summary();
+        let before = (self.summary.clone(), self.reader.written_at);
+        match self.reader.advance()? {
+            Step::Reopen => {
+                let read = self.reader.bytes_read;
+                let path = self.reader.path().to_path_buf();
+                *self = Tail::open(&path)?;
+                self.reader.bytes_read += read;
             }
-        } else {
-            self.written_at = written_at;
+            Step::Appended(new) => {
+                if self.feed(&new) {
+                    self.summary = self.scan.summary();
+                }
+            }
+            Step::Unchanged => {}
         }
-        Ok((&self.summary, self.written_at) != (&before.0, before.1))
+        Ok((&self.summary, self.reader.written_at) != (&before.0, before.1))
     }
 
-    /// Takes in bytes read at `offset`: every line they complete. Whether any line was taken in.
+    /// Takes in bytes read at the offset: every line they complete. Whether any line was taken in.
     fn feed(&mut self, bytes: &[u8]) -> bool {
-        let base = self.offset - self.partial.len() as u64; // where `data` starts in the file
-        self.offset += bytes.len() as u64;
-        let held = std::mem::take(&mut self.partial);
-        let data: &[u8] = if held.is_empty() {
-            bytes
-        } else {
-            &[held.as_slice(), bytes].concat()
-        };
-        let mut from = 0;
-        let mut took = false;
-        for nl in memchr_iter(b'\n', data) {
-            let l = &data[from..nl];
-            from = nl + 1;
-            if std::mem::take(&mut self.skip_line) {
-                continue;
-            }
-            if !l.is_empty() {
-                self.scan.line(l, base + from as u64, &self.home);
-                took = true;
-            }
-        }
-        if !self.skip_line {
-            self.partial = data[from..].to_vec();
-        }
-        took
+        let Tail {
+            reader, scan, home, ..
+        } = self;
+        reader.feed(bytes, |l, end| scan.line(l, end, home))
     }
 
     pub fn facts(&self) -> TailFacts {
         TailFacts {
             last_at: self.summary.last_at,
-            written_at: self.written_at,
+            written_at: self.reader.written_at,
             limit_hit_at: self.summary.limit_hit.as_ref().and_then(|l| l.at),
             turn_over: self.summary.turn_over,
         }
@@ -263,7 +191,7 @@ impl Tail {
 
     /// Bytes read from the file since `open`, the first read included.
     pub fn bytes_read(&self) -> u64 {
-        self.bytes_read
+        self.reader.bytes_read
     }
 }
 

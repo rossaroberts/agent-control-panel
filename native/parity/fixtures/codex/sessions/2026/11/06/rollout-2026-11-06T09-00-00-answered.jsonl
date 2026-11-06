@@ -1,0 +1,8 @@
+{"timestamp":"2026-11-06T09:01:18.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000011","timestamp":"2026-11-06T09:01:16.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli"}}
+{"timestamp":"2026-11-06T09:01:20.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:01:22.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:01:24.000Z","type":"event_msg","payload":{"type":"user_message","message":"Pick a branch name for the work"}}
+{"timestamp":"2026-11-06T09:01:26.000Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"question\":\"Which branch?\"}","call_id":"call_12"}}
+{"timestamp":"2026-11-06T09:01:28.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_12","output":"release"}}
+{"timestamp":"2026-11-06T09:01:30.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Using release."}}
+{"timestamp":"2026-11-06T09:01:32.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":6200,"cached_input_tokens":3100,"output_tokens":300},"last_token_usage":{"input_tokens":3100},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}

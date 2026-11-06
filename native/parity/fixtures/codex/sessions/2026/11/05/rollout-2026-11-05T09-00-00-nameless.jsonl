@@ -1,0 +1,9 @@
+{"timestamp":"2026-11-06T09:03:26.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000022","timestamp":"2026-11-06T09:03:24.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli"}}
+{"timestamp":"2026-11-06T09:03:28.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:03:30.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:03:32.000Z","type":"event_msg","payload":{"type":"user_message","message":"Poke around"}}
+{"timestamp":"2026-11-06T09:03:34.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\",\"-la\"]}","call_id":"call_23"}}
+{"timestamp":"2026-11-06T09:03:36.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_23","output":"ok"}}
+{"timestamp":"2026-11-06T09:03:38.000Z","type":"response_item","payload":{"type":"function_call","name":"","arguments":"{}","call_id":"call_24"}}
+{"timestamp":"2026-11-06T09:03:40.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_24","output":"ok"}}
+{"timestamp":"2026-11-06T09:03:42.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2400,"cached_input_tokens":1200,"output_tokens":300},"last_token_usage":{"input_tokens":1200},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}

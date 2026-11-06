@@ -1,0 +1,15 @@
+{"timestamp":"2026-11-06T09:00:02.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-11-06T09:00:00.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli"}}
+{"timestamp":"2026-11-06T09:00:04.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:00:06.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work/fixture-app"}]}}
+{"timestamp":"2026-11-06T09:00:08.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd</environment_context>"}]}}
+{"timestamp":"2026-11-06T09:00:10.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:00:12.000Z","type":"event_msg","payload":{"type":"user_message","message":"Add a retry to the fixture loader and run its tests"}}
+{"timestamp":"2026-11-06T09:00:14.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a retry to the fixture loader and run its tests"}]}}
+{"timestamp":"2026-11-06T09:00:16.000Z","type":"event_msg","payload":{"type":"agent_message","message":"I will read the loader first."}}
+{"timestamp":"2026-11-06T09:00:18.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"cat src/loader.ts\\nwc -l src/loader.ts\"]}","call_id":"call_2"}}
+{"timestamp":"2026-11-06T09:00:20.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_2","output":"ok"}}
+{"timestamp":"2026-11-06T09:00:22.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":8400,"cached_input_tokens":4200,"output_tokens":300},"last_token_usage":{"input_tokens":4200},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}
+{"timestamp":"2026-11-06T09:00:24.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Now patching it."}}
+{"timestamp":"2026-11-06T09:00:26.000Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{}","call_id":"call_3"}}
+{"timestamp":"2026-11-06T09:00:28.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_3","output":"ok"}}
+{"timestamp":"2026-11-06T09:00:30.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12200,"cached_input_tokens":6100,"output_tokens":300},"last_token_usage":{"input_tokens":6100},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}

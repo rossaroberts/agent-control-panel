@@ -764,7 +764,7 @@ function codexHomes() {
 }
 
 /** Who a Codex home is signed in as: the email and plan claims of its id token, and nothing else from that file. */
-function codexAccount(home) {
+export function codexAccount(home) {
   const a = readJson(path.join(home, 'auth.json'), 1 << 20);
   if (!a) return { email: null, plan: null, loggedIn: false };
   if (a.OPENAI_API_KEY && !a.tokens) return { email: null, plan: 'api key', loggedIn: true };
@@ -788,7 +788,7 @@ function codexText(d, role) {
 }
 
 /** Rollouts written to in the last RECENT_CODEX_MS: sessions/YYYY/MM/DD/rollout-*.jsonl, newest days first. */
-function recentRollouts(home, ms = RECENT_CODEX_MS) {
+export function recentRollouts(home, ms = RECENT_CODEX_MS) {
   const out = [], since = Date.now() - ms;
   for (let back = 0; back <= Math.ceil(ms / DAY) + 1; back++) {
     const d = new Date(Date.now() - back * DAY);
@@ -800,9 +800,9 @@ function recentRollouts(home, ms = RECENT_CODEX_MS) {
   return out.sort((a, b) => b.m - a.m).slice(0, 200);
 }
 /** A thread you started: Codex also logs the agents it starts and its reviewer's passes, each as a thread of its own. */
-const yours = (f) => { const t = parse(head(f))?.payload?.thread_source; return t == null || t === 'user'; };
+export const yours = (f) => { const t = parse(head(f))?.payload?.thread_source; return t == null || t === 'user'; };
 
-function readRollout(f, m, open) {
+export function readRollout(f, m, open) {
   const meta = parse(head(f))?.payload ?? {};
   const userText = (d) => oneLine(codexText(d, 'user'), 500);
   let firstAsk = null, lastAsk = null;

@@ -1,0 +1,6 @@
+{"timestamp":"2026-11-06T09:02:02.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000016","timestamp":"2026-11-06T09:02:00.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli","thread_source":"subagent"}}
+{"timestamp":"2026-11-06T09:02:04.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:02:06.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:02:08.000Z","type":"event_msg","payload":{"type":"user_message","message":"Look into the build"}}
+{"timestamp":"2026-11-06T09:02:10.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Looking."}}
+{"timestamp":"2026-11-06T09:02:12.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1600,"cached_input_tokens":800,"output_tokens":300},"last_token_usage":{"input_tokens":800},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}

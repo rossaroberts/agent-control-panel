@@ -1,0 +1,6 @@
+{"timestamp":"2026-11-06T09:04:00.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:04:02.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:04:04.000Z","type":"event_msg","payload":{"type":"user_message","message":"No meta line"}}
+{"timestamp":"2026-11-06T09:04:06.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Fine."}}
+{"timestamp":"2026-11-06T09:04:08.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":600,"output_tokens":300},"last_token_usage":{"input_tokens":600},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}
+{"timestamp":"2026-11-06T09:04:10.000Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Fine."}}
