@@ -1,0 +1,249 @@
+//! The board: one truthful `Session` per session, and the numbered deltas that take a reader from any recent `seq` to now.
+//! Writers hand in what they re-read; only sessions whose serialized form changed make a delta, and a write that changes
+//! nothing makes none. Every call holds one short lock and never waits on I/O, so readers never hold up the watcher.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Mutex;
+
+pub use fleet_model::types::Delta;
+use fleet_model::types::{Meta, Session, SessionKey};
+use tokio::sync::{broadcast, watch};
+
+/// How many deltas `since` can replay; older readers get a snapshot.
+pub const RING: usize = 4096;
+
+type Key = (String, String, String);
+
+fn key_of(k: &SessionKey) -> Key {
+    (k.machine.clone(), k.profile.clone(), k.session_id.clone())
+}
+
+struct Inner {
+    seq: u64,
+    /// Each session, with the bytes it serializes to (what "changed" is decided on).
+    sessions: BTreeMap<Key, (Session, Vec<u8>)>,
+    /// The last `RING` deltas, oldest first, `seq`s consecutive.
+    ring: VecDeque<Delta>,
+}
+
+/// A reader that wants the board and then every change: call `subscribe()` first, then `snapshot()`, and skip every
+/// delta whose `seq` is at or below the snapshot's (it is already in it). The other order can lose a delta written
+/// between the two calls. A reader coming back with a `seq` asks `since(seq)` (after subscribing, likewise) and falls
+/// back to a snapshot on `None`.
+pub struct Store {
+    /// This run of the board: random at each start, so a `seq` from another run is never taken for one of this (R24).
+    run: u64,
+    inner: Mutex<Inner>,
+    tx: broadcast::Sender<Delta>,
+    /// The board's groups, accounts and health: not per session, so not in the deltas. A connection sends the current
+    /// one right after its first frame and again whenever it changes.
+    meta: watch::Sender<Meta>,
+    /// How many Board connections are open: the health probe samples only while there is one.
+    clients: watch::Sender<usize>,
+}
+
+/// One open Board connection, counted in `Store::subscribe_clients` until this is dropped.
+pub struct BoardClient {
+    store: std::sync::Arc<Store>,
+}
+
+impl Drop for BoardClient {
+    fn drop(&mut self) {
+        self.store.clients.send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn bytes(s: &Session) -> Vec<u8> {
+    serde_json::to_vec(s).expect("a Session serializes")
+}
+
+/// A random, non-zero run id. `RandomState` is seeded from the OS's randomness once per process, and differently each run.
+fn new_run() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    h.write_u32(std::process::id());
+    h.finish().max(1)
+}
+
+impl Store {
+    pub fn new() -> Store {
+        Store {
+            run: new_run(),
+            inner: Mutex::new(Inner {
+                seq: 0,
+                sessions: BTreeMap::new(),
+                ring: VecDeque::with_capacity(RING),
+            }),
+            tx: broadcast::channel(RING).0,
+            meta: watch::channel(Meta::default()).0,
+            clients: watch::channel(0).0,
+        }
+    }
+
+    /// Counts a Board connection until the returned guard is dropped.
+    pub fn board_client(self: &std::sync::Arc<Self>) -> BoardClient {
+        self.clients.send_modify(|n| *n += 1);
+        BoardClient {
+            store: self.clone(),
+        }
+    }
+
+    /// The number of open Board connections, and when it changes.
+    pub fn subscribe_clients(&self) -> watch::Receiver<usize> {
+        self.clients.subscribe()
+    }
+
+    /// The board's meta now.
+    pub fn meta(&self) -> Meta {
+        self.meta.borrow().clone()
+    }
+
+    /// A receiver of the meta: subscribe before sending the first frame, then send `borrow_and_update()` and wait on
+    /// `changed()`, so that no change falls between.
+    pub fn subscribe_meta(&self) -> watch::Receiver<Meta> {
+        self.meta.subscribe()
+    }
+
+    /// Changes the meta in place; `f` says whether it changed anything. Readers are woken only when it did.
+    pub fn modify_meta(&self, f: impl FnOnce(&mut Meta) -> bool) -> bool {
+        self.meta.send_if_modified(f)
+    }
+
+    /// The board's groups and accounts as read (the health, which the probe owns, is kept). Whether they changed.
+    pub fn set_board_meta(&self, m: Meta) -> bool {
+        self.modify_meta(|cur| {
+            let m = Meta {
+                health: cur.health,
+                ..m
+            };
+            let changed = *cur != m;
+            *cur = m;
+            changed
+        })
+    }
+
+    /// This board's run id.
+    pub fn run(&self) -> u64 {
+        self.run
+    }
+
+    /// Every session, ordered by key, and the `seq` of the last delta they include.
+    pub fn snapshot(&self) -> (u64, Vec<Session>) {
+        let i = self.inner.lock().unwrap();
+        (i.seq, i.sessions.values().map(|(s, _)| s.clone()).collect())
+    }
+
+    /// One delta from `seq` to now: each session changed since, as it is now, and each one gone since. `None` when the
+    /// ring no longer reaches back to `seq` (or `seq` is ahead of this board, from another run): send a snapshot.
+    pub fn since(&self, seq: u64) -> Option<Delta> {
+        let i = self.inner.lock().unwrap();
+        if seq > i.seq {
+            return None;
+        }
+        let first = i.ring.front().map_or(i.seq + 1, |d| d.seq);
+        if seq + 1 < first {
+            return None;
+        }
+        // Newest word per session: an upsert or a removal.
+        let mut last: BTreeMap<Key, Option<&Session>> = BTreeMap::new();
+        for d in i.ring.iter().filter(|d| d.seq > seq) {
+            for s in &d.upsert {
+                last.insert(key_of(&s.key), Some(s));
+            }
+            for k in &d.remove {
+                last.insert(key_of(k), None);
+            }
+        }
+        let mut out = Delta {
+            seq: i.seq,
+            ..Delta::default()
+        };
+        for (k, s) in last {
+            match s {
+                Some(s) => out.upsert.push(s.clone()),
+                None => out.remove.push(SessionKey {
+                    machine: k.0,
+                    profile: k.1,
+                    session_id: k.2,
+                }),
+            }
+        }
+        Some(out)
+    }
+
+    /// Every delta from now on, in `seq` order. A reader that falls more than `RING` behind gets `Lagged` and should
+    /// resync with `since` or a snapshot.
+    pub fn subscribe(&self) -> broadcast::Receiver<Delta> {
+        self.tx.subscribe()
+    }
+
+    /// The current `seq`.
+    pub fn seq(&self) -> u64 {
+        self.inner.lock().unwrap().seq
+    }
+
+    /// Sessions as re-read: the ones that changed make one delta. Its `seq`, or `None` when nothing changed.
+    pub fn upsert(&self, sessions: Vec<Session>) -> Option<u64> {
+        self.write(sessions, |_: &Session| false)
+    }
+
+    /// Everything within a scope, as re-read: `sessions` is now the whole of it, so a session in scope and not among them
+    /// is removed. One delta, or `None` when nothing changed.
+    pub fn replace(
+        &self,
+        in_scope: impl Fn(&Session) -> bool,
+        sessions: Vec<Session>,
+    ) -> Option<u64> {
+        self.write(sessions, in_scope)
+    }
+
+    fn write(&self, sessions: Vec<Session>, in_scope: impl Fn(&Session) -> bool) -> Option<u64> {
+        let mut i = self.inner.lock().unwrap();
+        let mut delta = Delta::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for s in sessions {
+            let k = key_of(&s.key);
+            let b = bytes(&s);
+            seen.insert(k.clone());
+            if i.sessions.get(&k).is_some_and(|(_, old)| *old == b) {
+                continue;
+            }
+            delta.upsert.push(s.clone());
+            i.sessions.insert(k, (s, b));
+        }
+        let gone: Vec<Key> = i
+            .sessions
+            .iter()
+            .filter(|(k, (s, _))| !seen.contains(*k) && in_scope(s))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in gone {
+            if let Some((s, _)) = i.sessions.remove(&k) {
+                delta.remove.push(s.key);
+            }
+        }
+        if delta.upsert.is_empty() && delta.remove.is_empty() {
+            return None;
+        }
+        i.seq += 1;
+        delta.seq = i.seq;
+        if i.ring.len() == RING {
+            i.ring.pop_front();
+        }
+        i.ring.push_back(delta.clone());
+        // No receiver is not an error: the board stays current for the next one.
+        let _ = self.tx.send(delta);
+        Some(i.seq)
+    }
+}

@@ -1,0 +1,6 @@
+{"timestamp":"2026-11-06T09:01:06.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000009","timestamp":"2026-11-06T09:01:04.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli"}}
+{"timestamp":"2026-11-06T09:01:08.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:01:10.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:01:12.000Z","type":"event_msg","payload":{"type":"user_message","message":"Pick a branch name"}}
+{"timestamp":"2026-11-06T09:01:14.000Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"question\":\"Which branch?\"}]}","call_id":"call_10"}}
+{"timestamp":"2026-11-06T09:01:16.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4000,"cached_input_tokens":2000,"output_tokens":300},"last_token_usage":{"input_tokens":2000},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}

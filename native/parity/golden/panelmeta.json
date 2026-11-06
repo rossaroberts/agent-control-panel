@@ -1,0 +1,1551 @@
+{
+ "naming": [
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0001-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "My title one",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "padded name",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "x",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0002-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "Written title two",
+   "epic": "Fixtures"
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0003-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "Only my title",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "  ",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "padded name",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "x",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "  ",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "  padded name  ",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0004-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "x",
+   "epic": "Third"
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "padded name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "x",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "  padded name  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0005-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "x",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "padded name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "x",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "  padded name  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0006-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "x",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "  ",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "padded name",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "x",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "  ",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "  padded name  ",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0007-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "x",
+   "epic": "Experiments"
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "",
+   "title": "",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "  ",
+   "title": "  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "  padded name  ",
+   "title": "padded name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "claude",
+   "name": "x",
+   "title": "x",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": null,
+   "title": null,
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "",
+   "title": "",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "  ",
+   "title": "  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "Claude own name",
+   "title": "Claude own name",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "  padded name  ",
+   "title": "  padded name  ",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "chai-expense-tracker-54",
+   "title": "chai-expense-tracker-54",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "tracker-5g",
+   "title": "tracker-5g",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "a-b-0f",
+   "title": "a-b-0f",
+   "epic": null
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "engine": "codex",
+   "name": "x",
+   "title": "x",
+   "epic": null
+  }
+ ],
+ "hiding": [
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0010-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0011-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": true
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0012-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0013-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": false,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": false,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": false,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": true,
+   "startedAt": null,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": true,
+   "startedAt": 1793899999999,
+   "needsYou": true,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": false,
+   "archived": false
+  },
+  {
+   "key": "fixture-mac:sess-0020-fixture",
+   "live": true,
+   "startedAt": 1793900000001,
+   "needsYou": true,
+   "archived": false
+  }
+ ],
+ "groups": [
+  "Aardvark",
+  "Experiments",
+  "Zebra"
+ ]
+}

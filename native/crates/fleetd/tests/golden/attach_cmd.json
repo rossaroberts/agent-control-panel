@@ -1,0 +1,168 @@
+[
+  {
+    "name": "claude default",
+    "target": {
+      "Claude": {
+        "profile": "default",
+        "job": "abcd1234"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/claude",
+      "attach",
+      "abcd1234"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0"
+    },
+    "cwd": "{HOME}"
+  },
+  {
+    "name": "claude work",
+    "target": {
+      "Claude": {
+        "profile": "work",
+        "job": "0a1b2c3d"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/claude",
+      "attach",
+      "0a1b2c3d"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0",
+      "CLAUDE_CONFIG_DIR": "{HOME}/.claude-work"
+    },
+    "cwd": "{HOME}"
+  },
+  {
+    "name": "codex default",
+    "target": {
+      "Codex": {
+        "profile": "codex",
+        "session_id": "0123abcd-4567-89ab-cdef-0123456789ab",
+        "cwd": "{HOME}/work"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/codex",
+      "resume",
+      "--no-daemon",
+      "0123abcd-4567-89ab-cdef-0123456789ab",
+      "--dangerously-bypass-approvals-and-sandbox"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0"
+    },
+    "cwd": "{HOME}/work"
+  },
+  {
+    "name": "codex other profile",
+    "target": {
+      "Codex": {
+        "profile": "codex2",
+        "session_id": "0123abcd-4567-89ab-cdef-0123456789ab",
+        "cwd": "~/work/x"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/codex",
+      "resume",
+      "--no-daemon",
+      "0123abcd-4567-89ab-cdef-0123456789ab",
+      "--dangerously-bypass-approvals-and-sandbox"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0",
+      "CODEX_HOME": "{HOME}/.codex2"
+    },
+    "cwd": "{HOME}/work/x"
+  },
+  {
+    "name": "codex home cwd",
+    "target": {
+      "Codex": {
+        "profile": "codex",
+        "session_id": "0123abcd-4567-89ab-cdef-0123456789ab",
+        "cwd": "~"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/codex",
+      "resume",
+      "--no-daemon",
+      "0123abcd-4567-89ab-cdef-0123456789ab",
+      "--dangerously-bypass-approvals-and-sandbox"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0"
+    },
+    "cwd": "{HOME}"
+  },
+  {
+    "name": "trust tilde",
+    "target": {
+      "Trust": {
+        "profile": "default",
+        "dir": "~"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/claude"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0"
+    },
+    "cwd": "{HOME}"
+  },
+  {
+    "name": "trust under home, dotdot",
+    "target": {
+      "Trust": {
+        "profile": "work",
+        "dir": "~/work/../work//x/"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/claude"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0",
+      "CLAUDE_CONFIG_DIR": "{HOME}/.claude-work"
+    },
+    "cwd": "{HOME}/work/x/"
+  },
+  {
+    "name": "trust absolute",
+    "target": {
+      "Trust": {
+        "profile": "default",
+        "dir": "{HOME}/work"
+      }
+    },
+    "argv": [
+      "{HOME}/.local/bin/claude"
+    ],
+    "env": {
+      "TERM": "xterm-256color",
+      "COLORTERM": "truecolor",
+      "COLORFGBG": "15;0"
+    },
+    "cwd": "{HOME}/work"
+  }
+]

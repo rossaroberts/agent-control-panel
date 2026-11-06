@@ -1,0 +1,675 @@
+//! The terminal manager: cold and warm opens, shared attach, end-while-warm, eviction, Codex's one writer, the limits,
+//! resize coalescing and backpressure. The programs are stand-ins in a temp home's `~/.local/bin` (where
+//! `attach_cmd::command` looks first): `claude` and `codex` both run `stand-in.py`, which logs each start, prints a
+//! banner, answers lines with `GOT <line>`, and prints `REDRAW <cols>x<rows>` on SIGWINCH.
+
+mod terms_home;
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use fleet_model::types::AttachTarget;
+use fleetd::terms::{self, InputFull, Options, Rescan, Terms};
+use terms_home::*;
+
+// (a)
+#[test]
+fn a_cold_terminal_shows_the_banner_and_echoes() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("0000000a")).unwrap();
+    assert!(
+        c.until_has(1, "BANNER attach 0000000a", BOOT),
+        "{:?}",
+        String::from_utf8_lossy(c.output(1))
+    );
+    t.input(1, 1, b"hello\n").unwrap();
+    assert!(c.until_has(1, "GOT hello", 5.0));
+    assert_eq!(h.starts_of("0000000a").len(), 1);
+}
+
+// (b)
+#[test]
+fn a_warm_reopen_replays_the_ring_then_redraws_without_a_new_process() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("0000000b")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    t.input(1, 1, b"before\n").unwrap();
+    assert!(c.until_has(1, "GOT before", 5.0));
+    t.close(1, 1);
+    assert!(c.until(2.0, |c| c.ended(1)), "a close gets its TermEnd");
+    assert_eq!(t.warm_count(), 1);
+    assert!(
+        t.timer_armed(),
+        "the expiry is timed while something is warm"
+    );
+
+    // Same size as before: the size kick goes through cols-1.
+    c.open(&t, 2, claude("0000000b")).unwrap();
+    assert!(
+        c.until_has(2, "REDRAW 100x30", 5.0),
+        "{:?}",
+        String::from_utf8_lossy(c.output(2))
+    );
+    let out = c.output(2).to_vec();
+    let (banner, got, redraw) = (
+        pos(&out, "BANNER").unwrap(),
+        pos(&out, "GOT before").unwrap(),
+        pos(&out, "REDRAW 100x30").unwrap(),
+    );
+    assert!(banner < got && got < redraw, "ring first, then the redraw");
+    assert_eq!(h.starts_of("0000000b").len(), 1, "the stand-in ran once");
+    assert_eq!(t.warm_count(), 0);
+
+    // A new size is applied as it is.
+    t.close(1, 2);
+    c.open_sized(&t, 3, claude("0000000b"), 120, 40);
+    assert!(c.until_has(3, "REDRAW 120x40", 5.0));
+    assert_eq!(h.starts_of("0000000b").len(), 1);
+}
+
+// (c)
+#[test]
+fn two_connections_on_one_job_share_one_process() {
+    let h = Home::new();
+    let t = h.terms();
+    let (mut a, mut b) = (Conn::new(1), Conn::new(2));
+    a.open(&t, 7, claude("0000000c")).unwrap();
+    assert!(a.until_has(7, "BANNER", BOOT));
+    b.open(&t, 9, claude("0000000c")).unwrap();
+    assert!(b.until_has(9, "BANNER", BOOT), "the newcomer gets the ring");
+    assert_eq!(h.starts_of("0000000c").len(), 1, "one process");
+    assert_eq!(t.live_count(), 1);
+    t.input(1, 7, b"from-a\n").unwrap();
+    t.input(2, 9, b"from-b\n").unwrap();
+    assert!(a.until_has(7, "GOT from-a", 5.0) && a.until_has(7, "GOT from-b", 5.0));
+    assert!(b.until_has(9, "GOT from-a", 5.0) && b.until_has(9, "GOT from-b", 5.0));
+    // One letting go leaves the other attached, not warm.
+    t.close(1, 7);
+    assert_eq!(t.warm_count(), 0);
+    t.input(2, 9, b"still\n").unwrap();
+    assert!(b.until_has(9, "GOT still", 5.0));
+    t.drop_conn(2);
+    assert_eq!(
+        t.warm_count(),
+        1,
+        "the last one released sends it to the pool"
+    );
+}
+
+// (d)
+#[test]
+fn a_program_that_exits_while_warm_tells_the_next_opener_then_starts_fresh() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("0000000d")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    t.input(1, 1, b"exit-soon\n").unwrap();
+    assert!(
+        c.until_has(1, "exit-soon", 5.0),
+        "echoed before release: {:?}",
+        String::from_utf8_lossy(c.output(1))
+    );
+    t.close(1, 1);
+    let pid = h.starts_of("0000000d")[0];
+    assert!(
+        gone_within(pid, Duration::from_secs(5)),
+        "the stand-in exits by itself"
+    );
+    assert!(wait_for(Duration::from_secs(2), || t.live_count() == 0));
+
+    c.open(&t, 2, claude("0000000d")).unwrap();
+    assert!(c.until(5.0, |c| c.ended(2)));
+    let out = c.output(2).to_vec();
+    assert!(
+        has(&out, "LAST WORDS"),
+        "{:?}",
+        String::from_utf8_lossy(&out)
+    );
+    let end_at = c
+        .got
+        .iter()
+        .position(|(r, d)| *r == 2 && d.is_none())
+        .unwrap();
+    assert!(
+        c.got[end_at + 1..].iter().all(|(r, _)| *r != 2),
+        "TermEnd is last"
+    );
+    assert_eq!(h.starts_of("0000000d").len(), 1, "not re-spawned silently");
+    assert_eq!(t.warm_count(), 0);
+
+    c.open(&t, 3, claude("0000000d")).unwrap();
+    assert!(c.until_has(3, "BANNER", BOOT));
+    assert_eq!(
+        h.starts_of("0000000d").len(),
+        2,
+        "the open after that starts fresh"
+    );
+}
+
+// (e)
+#[test]
+fn a_seventh_released_terminal_evicts_and_stops_the_oldest() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    for i in 1..=7 {
+        c.open(&t, i as u32, claude(&job(0x100 + i))).unwrap();
+        assert!(c.until_has(i as u32, "BANNER", BOOT));
+        t.close(1, i as u32);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(t.warm_count(), terms::WARM_MAX);
+    let first = h.starts_of(&job(0x101))[0];
+    assert!(
+        gone_within(first, Duration::from_secs(5)),
+        "the oldest is stopped"
+    );
+    for i in 2..=7 {
+        assert!(
+            alive(h.starts_of(&job(0x100 + i))[0]),
+            "warm {i} still runs"
+        );
+    }
+    c.open(&t, 20, claude(&job(0x101))).unwrap();
+    assert!(c.until_has(20, "BANNER", BOOT));
+    assert_eq!(h.starts_of(&job(0x101)).len(), 2, "evicted: a fresh start");
+}
+
+#[test]
+fn a_warm_terminal_expires_and_the_timer_then_leaves() {
+    let h = Home::new();
+    let t = Terms::with_options(
+        h.path(),
+        |_| false,
+        Options {
+            warm_ttl: Duration::from_millis(300),
+        },
+    )
+    .unwrap();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("0000000e")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    assert!(!t.timer_armed(), "nothing to time while attached");
+    t.close(1, 1);
+    assert!(t.timer_armed());
+    let pid = h.starts_of("0000000e")[0];
+    assert!(
+        gone_within(pid, Duration::from_secs(5)),
+        "stopped at expiry"
+    );
+    assert_eq!(t.warm_count(), 0);
+    assert!(
+        wait_for(Duration::from_secs(1), || !t.timer_armed()),
+        "idle stays idle"
+    );
+}
+
+// (f)
+#[test]
+fn codex_has_one_writer_and_is_never_pooled() {
+    let h = Home::new();
+    let busy: Arc<Mutex<HashSet<String>>> = Arc::default();
+    let b2 = busy.clone();
+    let t = Terms::new(h.path(), move |sid| b2.lock().unwrap().contains(sid)).unwrap();
+    let (mut a, b) = (Conn::new(1), Conn::new(2));
+    a.open(&t, 1, codex(SID)).unwrap();
+    assert!(a.until_has(1, &format!("BANNER resume --no-daemon {SID}"), BOOT));
+    assert_eq!(
+        b.open(&t, 1, codex(SID)),
+        Err("It is open in another Fleet terminal already.".into())
+    );
+    let other = "0199aaaa-bbbb-4ccc-8ddd-ffffffffffff";
+    busy.lock().unwrap().insert(other.into());
+    assert_eq!(
+        b.open(&t, 2, codex(other)),
+        Err(
+            "It is open in Codex (the app or a terminal): finish there, or close it there first."
+                .into()
+        )
+    );
+    assert_eq!(h.starts_of(other).len(), 0);
+
+    t.close(1, 1);
+    let pid = h.starts_of(SID)[0];
+    assert!(
+        gone_within(pid, Duration::from_secs(5)),
+        "released Codex is stopped"
+    );
+    assert_eq!(t.warm_count(), 0);
+    a.open(&t, 3, codex(SID)).unwrap();
+    assert!(a.until_has(3, "BANNER", BOOT));
+    assert_eq!(h.starts_of(SID).len(), 2);
+}
+
+#[test]
+fn a_trust_terminal_is_stopped_when_released_and_bad_targets_are_refused() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(
+        &t,
+        1,
+        AttachTarget::Trust {
+            profile: "default".into(),
+            dir: "~/work".into(),
+        },
+    )
+    .unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    let pid = *h
+        .starts()
+        .iter()
+        .map(|l| l.rsplit(' ').next().unwrap().parse::<i32>().unwrap())
+        .collect::<Vec<_>>()
+        .last()
+        .unwrap();
+    t.close(1, 1);
+    assert!(gone_within(pid, Duration::from_secs(5)));
+    assert_eq!(t.warm_count(), 0);
+    let pick = "Pick a background session, or a folder that exists.";
+    assert_eq!(c.open(&t, 2, claude("NOTAJOB!")), Err(pick.into()));
+    assert_eq!(
+        c.open(
+            &t,
+            3,
+            AttachTarget::Trust {
+                profile: "default".into(),
+                dir: "~/missing".into()
+            }
+        ),
+        Err(pick.into())
+    );
+}
+
+// (g)
+#[test]
+fn the_limits_use_term_mjs_words_and_a_full_house_evicts_warm_first() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut conns: Vec<Conn> = (1..=4).map(Conn::new).collect();
+    let mut n = 0;
+    for c in conns.iter_mut().take(3) {
+        for r in 1..=8u32 {
+            n += 1;
+            c.open(&t, r, claude(&job(0x200 + n))).unwrap();
+        }
+    }
+    assert_eq!(
+        conns[0].open(&t, 9, claude(&job(0x300))),
+        Err("Too many terminals open in this tab.".into())
+    );
+    assert_eq!(t.live_count(), terms::MAX);
+    assert_eq!(
+        conns[3].open(&t, 1, claude(&job(0x301))),
+        Err("Too many terminals open.".into())
+    );
+    // A shared open needs no slot.
+    conns[3].open(&t, 2, claude(&job(0x201))).unwrap();
+    // With one released (warm), a cold open evicts it rather than refusing.
+    assert!(conns[2].until_has(8, "BANNER", BOOT));
+    t.close(conns[2].id, 8);
+    assert_eq!(t.warm_count(), 1);
+    conns[3].open(&t, 3, claude(&job(0x302))).unwrap();
+    assert_eq!(t.warm_count(), 0);
+    assert_eq!(t.live_count(), terms::MAX);
+    let evicted = h.starts_of(&job(0x200 + 24));
+    assert_eq!(evicted.len(), 1);
+    assert!(
+        gone_within(evicted[0], Duration::from_secs(5)),
+        "the warm one was stopped"
+    );
+}
+
+// (h)
+#[test]
+fn a_resize_storm_coalesces_and_ends_at_the_last_size() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("000000f0")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    // 600 sizes in 10 s, in bursts of 30 (a window drag), every one different.
+    let mut last = (0, 0);
+    for burst in 0..20u16 {
+        for i in 0..30u16 {
+            last = (40 + burst * 5 + i % 5, 10 + i);
+            t.size(1, 1, last.0, last.1);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let want = format!("REDRAW {}x{}", last.0, last.1);
+    assert!(c.until(5.0, |c| {
+        let s = String::from_utf8_lossy(c.output(1)).into_owned();
+        s.lines()
+            .rfind(|l| l.contains("REDRAW"))
+            .is_some_and(|l| l.contains(&want))
+    }));
+    let w = h.winches();
+    assert_eq!(
+        (w.last().unwrap().1, w.last().unwrap().2),
+        last,
+        "the pty ends at the last size"
+    );
+    assert!(w.len() <= 2 * 20, "{} redraws for 20 bursts", w.len());
+    let min_gap = w
+        .windows(2)
+        .map(|p| p[1].0 - p[0].0)
+        .fold(f64::MAX, f64::min);
+    // Applied 16 ms apart; the stand-in's handler may run a few ms late, never 16 ms early.
+    assert!(
+        min_gap >= 0.012,
+        "two redraws {:.1} ms apart",
+        min_gap * 1000.0
+    );
+    assert!(
+        wait_for(Duration::from_secs(1), || !t.timer_armed()),
+        "no timer once the sizes are applied"
+    );
+}
+
+#[test]
+fn a_full_sink_stops_the_reading_and_loses_nothing() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("000000f1")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    t.input(1, 1, b"flood\n").unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    let held = c.src.pending_bytes();
+    assert!(
+        held > terms::SINK_LOW,
+        "the flood reached the sink ({held})"
+    );
+    assert!(
+        held <= terms::SINK_HIGH + 64 * 1024,
+        "bounded: {held} queued"
+    );
+    // Another terminal of another connection is unaffected meanwhile.
+    let mut d = Conn::new(2);
+    d.open(&t, 1, claude("000000f2")).unwrap();
+    assert!(d.until_has(1, "BANNER", BOOT));
+    assert!(c.until_has(1, "FLOODED", 20.0));
+    let xs = c.output(1).iter().filter(|b| **b == b'X').count();
+    assert_eq!(xs, 5_000_000, "every byte arrived");
+}
+
+#[test]
+fn input_to_a_program_that_does_not_read_is_refused_past_1_mib_and_never_dropped() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("000000f3")).unwrap();
+    c.open(&t, 2, claude("000000f4")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT) && c.until_has(2, "BANNER", BOOT));
+    let pid = h.starts_of("000000f3")[0];
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    // 2 MiB of numbered 512-byte lines (a tty line holds at most 1024), in 64 KiB calls.
+    let lines: Vec<Vec<u8>> = (0..4096)
+        .map(|i| {
+            let mut l = format!("L{i:06}").into_bytes();
+            l.resize(511, b'.');
+            l.push(b'\n');
+            l
+        })
+        .collect();
+    let calls: Vec<Vec<u8>> = lines.chunks(128).map(|c| c.concat()).collect();
+    let s = Instant::now();
+    let mut taken = 0;
+    let mut next = 0;
+    while next < calls.len() {
+        match t.input(1, 1, &calls[next]) {
+            Ok(()) => {
+                taken += calls[next].len();
+                next += 1;
+            }
+            Err(InputFull) => break,
+        }
+    }
+    assert!(
+        s.elapsed() < Duration::from_millis(500),
+        "input never blocks the caller"
+    );
+    assert!(next < calls.len(), "refused before 2 MiB");
+    let pending = t.input_pending(1);
+    assert!(pending <= terms::INPUT_MAX, "{pending} queued");
+    assert!(
+        pending + 64 * 1024 > terms::INPUT_MAX,
+        "refused only at the 1 MiB mark ({pending} queued)"
+    );
+    assert!(
+        taken >= pending,
+        "what the tty holds is the rest of what was taken"
+    );
+    t.input(1, 2, b"other\n").unwrap();
+    assert!(
+        c.until_has(2, "GOT other", 5.0),
+        "the other terminal still gets its keys"
+    );
+
+    // The program reads again; the refused calls are sent again as the queue goes down, as the socket layer will.
+    unsafe { libc::kill(pid, libc::SIGCONT) };
+    let end = Instant::now() + Duration::from_secs(30);
+    while next < calls.len() && Instant::now() < end {
+        match t.input(1, 1, &calls[next]) {
+            Ok(()) => next += 1,
+            Err(InputFull) => {
+                let _ = c.until(0.01, |_| false);
+            }
+        }
+    }
+    assert_eq!(next, calls.len());
+    let last = format!("GOT L{:06}", lines.len() - 1);
+    assert!(c.until_has(1, &last, 30.0));
+    // Echoes interleave with the answers, so each `GOT L` is looked for anywhere.
+    let got: Vec<usize> = String::from_utf8_lossy(c.output(1))
+        .split("GOT L")
+        .skip(1)
+        .map(|l| l[..6].parse().unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        (0..lines.len()).collect::<Vec<_>>(),
+        "every line, in order"
+    );
+}
+
+#[test]
+fn a_client_that_never_reads_cannot_grow_its_queue_by_reopening() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut a = Conn::new(1);
+    a.open(&t, 1, claude("000000f7")).unwrap();
+    assert!(a.until_has(1, "BANNER", BOOT));
+    t.input(1, 1, b"flood\n").unwrap();
+    assert!(a.until_has(1, "FLOODED", 30.0));
+    t.close(1, 1); // warm, with a full 1 MiB ring
+    let b = Conn::new(2);
+    for r in 1..=50 {
+        b.open(&t, r, claude("000000f7")).unwrap();
+        t.close(2, r);
+        let held = b.src.pending_bytes();
+        assert!(
+            held <= terms::SINK_HIGH + 64 * 1024,
+            "reopen {r}: {held} queued"
+        );
+    }
+    assert_eq!(h.starts_of("000000f7").len(), 1);
+}
+
+#[test]
+fn dropping_terms_stops_every_program() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("000000f5")).unwrap();
+    c.open(&t, 2, claude("000000f6")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT) && c.until_has(2, "BANNER", BOOT));
+    t.close(1, 2);
+    drop(t);
+    for j in ["000000f5", "000000f6"] {
+        assert!(
+            gone_within(h.starts_of(j)[0], Duration::from_secs(5)),
+            "{j}"
+        );
+    }
+}
+
+/// A board whose process scan sees the Codex a Fleet terminal runs (`held`, set by the test while it runs) and stops
+/// seeing it at the next scan, which takes 100 ms. `works: false`: scans are asked for and never done.
+struct Board {
+    held: Arc<AtomicBool>,
+    works: Arc<AtomicBool>,
+    /// (scans asked for, highest done)
+    scans: Arc<(Mutex<(u64, u64)>, Condvar)>,
+}
+
+impl Board {
+    fn new() -> Board {
+        Board {
+            held: Arc::default(),
+            works: Arc::new(AtomicBool::new(true)),
+            scans: Arc::default(),
+        }
+    }
+
+    fn terms(&self, h: &Home) -> Terms {
+        let (s1, s2, held, works) = (
+            self.scans.clone(),
+            self.scans.clone(),
+            self.held.clone(),
+            self.works.clone(),
+        );
+        let rescan = Rescan {
+            request: Box::new(move || {
+                let ticket = {
+                    let mut g = s1.0.lock().unwrap();
+                    g.0 += 1;
+                    g.0
+                };
+                if works.load(Ordering::SeqCst) {
+                    let (s, held) = (s1.clone(), held.clone());
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(100));
+                        held.store(false, Ordering::SeqCst);
+                        s.0.lock().unwrap().1 = ticket;
+                        s.1.notify_all();
+                    });
+                }
+                ticket
+            }),
+            wait: Box::new(move |ticket, d| {
+                let g = s2.0.lock().unwrap();
+                let (g, _) = s2.1.wait_timeout_while(g, d, |g| g.1 < ticket).unwrap();
+                g.1 >= ticket
+            }),
+        };
+        let held = self.held.clone();
+        Terms::with_rescan(
+            h.path(),
+            move |_| held.load(Ordering::SeqCst),
+            Options::default(),
+            Some(rescan),
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn a_closed_codex_reopens_at_once_without_the_stale_busy_refusal() {
+    let h = Home::new();
+    let board = Board::new();
+    let t = board.terms(&h);
+    let mut c = Conn::new(1);
+    c.open(&t, 1, codex(SID)).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    let first = h.starts_of(SID)[0];
+
+    // Closed, then reopened at once: the open waits for the program to go and the scan to see it, then starts.
+    board.held.store(true, Ordering::SeqCst); // the last scan saw the Codex this terminal runs
+    t.close(1, 1);
+    let at = Instant::now();
+    assert_eq!(c.open(&t, 2, codex(SID)), Ok(()));
+    assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+    assert!(
+        !alive(first),
+        "the old Codex was gone before the new one started"
+    );
+    assert!(c.until_has(2, "BANNER", BOOT));
+    assert_eq!(h.starts_of(SID).len(), 2);
+
+    // The program leaving by itself: its end is the prompt to reopen, and that reopen is not refused either.
+    board.held.store(true, Ordering::SeqCst);
+    t.input(1, 2, b"exit-soon\n").unwrap();
+    assert!(c.until(5.0, |c| c.ended(2)));
+    let at = Instant::now();
+    assert_eq!(c.open(&t, 3, codex(SID)), Ok(()));
+    assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+    assert!(c.until_has(3, "BANNER", BOOT));
+    assert_eq!(h.starts_of(SID).len(), 3);
+    assert_eq!(
+        board.scans.0.lock().unwrap().0,
+        2,
+        "one scan asked for per terminal gone"
+    );
+
+    // A scan that does not come: the reopen waits REOPEN_WAIT at most, then the board's word stands.
+    board.works.store(false, Ordering::SeqCst);
+    board.held.store(true, Ordering::SeqCst);
+    t.close(1, 3);
+    let at = Instant::now();
+    assert_eq!(c.open(&t, 4, codex(SID)), Err(terms::ERR_CODEX_BUSY.into()));
+    let waited = at.elapsed();
+    assert!(
+        waited >= terms::REOPEN_WAIT && waited < terms::REOPEN_WAIT + Duration::from_millis(400),
+        "{waited:?}"
+    );
+}
+
+#[test]
+fn a_reopen_of_an_ended_warm_terminal_says_the_session_has_ended() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("0000000c")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    t.input(1, 1, b"exit-soon\n").unwrap();
+    assert!(c.until_has(1, "exit-soon", 5.0));
+    t.close(1, 1);
+    assert!(c.until(5.0, |c| c.ended(1)));
+    assert_eq!(c.ends[&1], vec![None], "a close ends with no error");
+    assert!(gone_within(
+        h.starts_of("0000000c")[0],
+        Duration::from_secs(5)
+    ));
+    assert!(wait_for(Duration::from_secs(2), || t.live_count() == 0));
+    c.open(&t, 2, claude("0000000c")).unwrap();
+    assert!(c.until(5.0, |c| c.ended(2)));
+    assert!(has(c.output(2), "LAST WORDS"), "the ring first");
+    assert_eq!(c.ends[&2], vec![Some("The session has ended.".to_string())]);
+}
+
+#[test]
+fn ref_0_is_ignored() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    assert_eq!(c.open(&t, 0, claude("0000000b")), Ok(()), "no answer");
+    assert_eq!(t.input(1, 0, b"x\n"), Ok(()));
+    t.size(1, 0, 90, 20);
+    t.close(1, 0);
+    assert!(
+        !c.until(0.5, |c| !c.got.is_empty()),
+        "nothing sent: {:?}",
+        c.got
+    );
+    assert!(h.starts().is_empty(), "nothing started");
+    assert_eq!(t.live_count(), 0);
+}

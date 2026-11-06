@@ -1,0 +1,18 @@
+{
+  "measuredAt": "2026-11-06T02:42:55.484Z",
+  "machine": "Mac",
+  "node": {
+    "hookToSnapshotMs": {
+      "p50": 137,
+      "p95": 175.05,
+      "max": 194.9
+    },
+    "snapshotMs": {
+      "p50": 1.87,
+      "p95": 3.43
+    },
+    "idleCpuMsPer60s": 110,
+    "idleCpuPct": 0.18,
+    "rssMb": 29.61
+  }
+}

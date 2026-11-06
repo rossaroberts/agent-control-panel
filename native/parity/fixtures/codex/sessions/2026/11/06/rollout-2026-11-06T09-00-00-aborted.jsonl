@@ -1,0 +1,7 @@
+{"timestamp":"2026-11-06T09:01:34.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000013","timestamp":"2026-11-06T09:01:32.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli"}}
+{"timestamp":"2026-11-06T09:01:36.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:01:38.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:01:40.000Z","type":"event_msg","payload":{"type":"user_message","message":"Run the slow suite"}}
+{"timestamp":"2026-11-06T09:01:42.000Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"prompt\":\"Continue?\"}","call_id":"call_14"}}
+{"timestamp":"2026-11-06T09:01:44.000Z","type":"event_msg","payload":{"type":"turn_aborted"}}
+{"timestamp":"2026-11-06T09:01:46.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4000,"cached_input_tokens":2000,"output_tokens":300},"last_token_usage":{"input_tokens":2000},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}

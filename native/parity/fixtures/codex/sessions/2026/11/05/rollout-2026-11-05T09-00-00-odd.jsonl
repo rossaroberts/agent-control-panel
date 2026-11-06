@@ -1,0 +1,12 @@
+{"timestamp":"2026-11-06T09:03:44.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000025","timestamp":"2026-11-06T09:03:42.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli"}}
+{"timestamp":"2026-11-06T09:03:46.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"","effort":"minimal"}}
+{"timestamp":"2026-11-06T09:03:48.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:03:50.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:03:52.000Z","type":"event_msg","payload":{"type":"user_message","message":"Odd lines"}}
+{"timestamp": "2026-11-06T
+42
+not json
+{"type":"event_msg","payload":{"type":"agent_message","message":"No timestamp here."}}
+{"timestamp":"2026-11-06T09:03:54.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"not json at all","call_id":"call_26"}}
+{"timestamp":"2026-11-06T09:03:56.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_26","output":"ok"}}
+{"timestamp":"2026-11-06T09:03:58.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":2500,"output_tokens":300},"last_token_usage":{"input_tokens":2500},"model_context_window":0},"rate_limits":{"primary":{"used_percent":12}}}}

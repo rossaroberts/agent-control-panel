@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/fleet-model", "crates/fleet-read", "crates/fleetd"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+publish = false
+
+# A panic anywhere ends the daemon (launchd restarts it) rather than poisoning a Mutex and serving a frozen board.
+[profile.release]
+panic = "abort"

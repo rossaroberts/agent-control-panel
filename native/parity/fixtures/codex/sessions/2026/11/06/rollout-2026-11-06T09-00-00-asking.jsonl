@@ -1,0 +1,8 @@
+{"timestamp":"2026-11-06T09:00:50.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000006","timestamp":"2026-11-06T09:00:48.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli"}}
+{"timestamp":"2026-11-06T09:00:52.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-2","effort":"low"}}
+{"timestamp":"2026-11-06T09:00:54.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:00:56.000Z","type":"event_msg","payload":{"type":"user_message","message":"Pick a branch name for the work"}}
+{"timestamp":"2026-11-06T09:00:58.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"git branch\"}","call_id":"call_7"}}
+{"timestamp":"2026-11-06T09:01:00.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_7","output":"main"}}
+{"timestamp":"2026-11-06T09:01:02.000Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"question\":\"Which branch should I use?\"}]}","call_id":"call_8"}}
+{"timestamp":"2026-11-06T09:01:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":6000,"cached_input_tokens":3000,"output_tokens":300},"last_token_usage":{"input_tokens":3000},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}

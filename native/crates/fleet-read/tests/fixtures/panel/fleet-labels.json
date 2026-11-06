@@ -1,0 +1,21 @@
+{
+ "fixture-mac:sess-0001-fixture": {
+  "title": "My title one",
+  "group": "Experiments"
+ },
+ "fixture-mac:sess-0002-fixture": {
+  "group": "Fixtures"
+ },
+ "fixture-mac:sess-0003-fixture": {
+  "title": "Only my title"
+ },
+ "fixture-mac:sess-0007-fixture": {
+  "group": "Experiments"
+ },
+ "fixture-mac:sess-0008-fixture": {
+  "group": "Zebra"
+ },
+ "fixture-mac:sess-0009-fixture": {
+  "group": "Aardvark"
+ }
+}

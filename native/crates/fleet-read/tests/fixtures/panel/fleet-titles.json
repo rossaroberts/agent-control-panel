@@ -1,0 +1,25 @@
+{
+ "fixture-mac:sess-0001-fixture": {
+  "h": "aaaaaaaaaaaa",
+  "title": "Written title one",
+  "stage": "building",
+  "epic": "Fixtures",
+  "at": 1793900000000
+ },
+ "fixture-mac:sess-0002-fixture": {
+  "title": "Written title two",
+  "stage": "testing",
+  "epic": "Other work"
+ },
+ "fixture-mac:sess-0003-fixture": {
+  "title": "Written only title"
+ },
+ "fixture-mac:sess-0004-fixture": {
+  "epic": "Third"
+ },
+ "fixture-mac:sess-0005-fixture": "not an object",
+ "fixture-mac:sess-0006-fixture": {
+  "title": null,
+  "epic": null
+ }
+}

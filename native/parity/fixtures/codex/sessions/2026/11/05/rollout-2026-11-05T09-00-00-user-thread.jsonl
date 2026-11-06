@@ -1,0 +1,7 @@
+{"timestamp":"2026-11-06T09:02:26.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000018","timestamp":"2026-11-06T09:02:24.000Z","cwd":"/work/fixture-app","originator":"codex_cli_rs","cli_version":"0.0.0-fixture","source":"cli","thread_source":"user"}}
+{"timestamp":"2026-11-06T09:02:28.000Z","type":"turn_context","payload":{"cwd":"/work/fixture-app","model":"fixture-codex-1","effort":"high"}}
+{"timestamp":"2026-11-06T09:02:30.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-06T09:02:32.000Z","type":"event_msg","payload":{"type":"user_message","message":"Explain the retry logic"}}
+{"timestamp":"2026-11-06T09:02:34.000Z","type":"event_msg","payload":{"type":"agent_message","message":"It backs off twice."}}
+{"timestamp":"2026-11-06T09:02:36.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3400,"cached_input_tokens":1700,"output_tokens":300},"last_token_usage":{"input_tokens":1700},"model_context_window":200000},"rate_limits":{"primary":{"used_percent":12}}}}
+{"timestamp":"2026-11-06T09:02:38.000Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Explained."}}
