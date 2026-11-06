@@ -5,3 +5,4 @@ pub mod hook;
 pub mod js;
 pub mod stage;
 pub mod types;
+pub mod wire;

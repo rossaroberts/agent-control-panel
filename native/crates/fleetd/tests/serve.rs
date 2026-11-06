@@ -1,0 +1,270 @@
+//! The socket over a bare `Store` (no watcher): what a client is sent on Hello, and after.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use fleet_model::types::{Delta, Engine, Session, SessionKey, State};
+use fleet_model::wire::{read_frame, write_frame, Frame, PROTO};
+use fleetd::client::Client;
+use fleetd::serve::{bind, serve};
+use fleetd::store::Store;
+use tokio::task::JoinHandle;
+
+fn sess(n: usize, doing: &str) -> Session {
+    Session {
+        key: SessionKey {
+            machine: "fixture-mac".into(),
+            profile: "default".into(),
+            session_id: format!("sess-{n:04}"),
+        },
+        engine: Engine::Claude,
+        name: Some(format!("fixture {n}")),
+        cwd: Some("/tmp/fleetd-fixture".into()),
+        state: State::Working,
+        reason: "working".into(),
+        live: true,
+        pid: Some(4242),
+        stage: None,
+        model: None,
+        effort: None,
+        context_tokens: None,
+        last_at: None,
+        said: None,
+        doing: Some(doing.into()),
+        last_ask: None,
+        first_ask: None,
+        started_at: None,
+        hook_at: None,
+        written_at: None,
+    }
+}
+
+struct Server {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    store: Arc<Store>,
+    task: JoinHandle<()>,
+}
+
+impl Server {
+    fn start(n: usize) -> Server {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleetd.sock");
+        let store = Arc::new(Store::new());
+        if n > 0 {
+            store.upsert((0..n).map(|i| sess(i, "start")).collect());
+        }
+        let task = tokio::spawn(serve(
+            bind(&path).unwrap(),
+            store.clone(),
+            "fixture-mac".into(),
+        ));
+        Server {
+            _dir: dir,
+            path,
+            store,
+            task,
+        }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn next(c: &mut Client) -> Frame {
+    tokio::time::timeout(Duration::from_secs(5), c.next())
+        .await
+        .expect("a frame in time")
+        .unwrap()
+}
+
+async fn nothing(c: &mut Client) {
+    assert!(tokio::time::timeout(Duration::from_millis(200), c.next())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn hello_without_since_gets_a_snapshot() {
+    let s = Server::start(3);
+    let mut c = Client::connect(&s.path, None).await.unwrap();
+    match next(&mut c).await {
+        Frame::Snapshot {
+            seq,
+            machine,
+            sessions,
+        } => {
+            assert_eq!(seq, 1);
+            assert_eq!(machine, "fixture-mac");
+            assert_eq!(sessions.len(), 3);
+        }
+        f => panic!("{f:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hello_with_since_gets_only_what_came_after() {
+    let s = Server::start(2);
+    s.store.upsert(vec![sess(0, "second")]); // seq 2
+    s.store.upsert(vec![sess(1, "third")]); // seq 3
+    let mut c = Client::connect(&s.path, Some(2)).await.unwrap();
+    match next(&mut c).await {
+        Frame::Delta(Delta {
+            seq,
+            upsert,
+            remove,
+        }) => {
+            assert_eq!(seq, 3);
+            assert_eq!(upsert.len(), 1);
+            assert_eq!(upsert[0].key.session_id, "sess-0001");
+            assert!(remove.is_empty());
+        }
+        f => panic!("{f:?}"),
+    }
+    // Fully current: nothing now, the next change when it comes.
+    let mut cur = Client::connect(&s.path, Some(3)).await.unwrap();
+    nothing(&mut cur).await;
+    s.store.upsert(vec![sess(0, "fourth")]);
+    match next(&mut cur).await {
+        Frame::Delta(d) => assert_eq!(d.seq, 4),
+        f => panic!("{f:?}"),
+    }
+    // A since this board never reached (another run) gets a snapshot.
+    let mut ahead = Client::connect(&s.path, Some(99)).await.unwrap();
+    assert!(matches!(
+        next(&mut ahead).await,
+        Frame::Snapshot { seq: 4, .. }
+    ));
+}
+
+#[tokio::test]
+async fn wrong_proto_gets_error_and_a_closed_connection() {
+    let s = Server::start(1);
+    let mut c = Client::connect_proto(&s.path, PROTO + 1, None)
+        .await
+        .unwrap();
+    assert!(matches!(next(&mut c).await, Frame::Error { .. }));
+    let e = tokio::time::timeout(Duration::from_secs(5), c.next())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[tokio::test]
+async fn a_first_frame_that_is_not_hello_is_refused() {
+    let s = Server::start(1);
+    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
+    write_frame(
+        &mut st,
+        &Frame::Error {
+            message: "x".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read_frame(&mut st).await.unwrap(),
+        Frame::Error { .. }
+    ));
+}
+
+#[tokio::test]
+async fn socket_mode_is_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Server::start(0);
+    let mode = std::fs::metadata(&s.path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn a_live_socket_is_not_taken_over_but_a_dead_one_is() {
+    let s = Server::start(0);
+    assert_eq!(
+        bind(&s.path).err().unwrap().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("old.sock");
+    drop(std::os::unix::net::UnixListener::bind(&p).unwrap()); // leaves the file, nobody listening
+    assert!(p.exists());
+    bind(&p).unwrap();
+}
+
+#[tokio::test]
+async fn two_clients_get_the_same_delta() {
+    let s = Server::start(1);
+    let mut a = Client::connect(&s.path, None).await.unwrap();
+    let mut b = Client::connect(&s.path, None).await.unwrap();
+    assert!(matches!(next(&mut a).await, Frame::Snapshot { .. }));
+    assert!(matches!(next(&mut b).await, Frame::Snapshot { .. }));
+    s.store.upsert(vec![sess(0, "changed"), sess(5, "new")]);
+    let (da, db) = (next(&mut a).await, next(&mut b).await);
+    assert_eq!(da, db);
+    match da {
+        Frame::Delta(d) => {
+            assert_eq!(d.seq, 2);
+            assert_eq!(d.upsert.len(), 2);
+        }
+        f => panic!("{f:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_falls_behind_is_sent_a_fresh_snapshot() {
+    let s = Server::start(1);
+    // Connects, then reads nothing while the store runs far past the ring and the socket buffers.
+    let mut slow = Client::connect(&s.path, None).await.unwrap();
+    let mut fast = Client::connect(&s.path, None).await.unwrap();
+    assert!(matches!(next(&mut fast).await, Frame::Snapshot { .. }));
+    let big = "x".repeat(4000);
+    let writes = fleetd::store::RING + 200;
+    let t = std::time::Instant::now();
+    let reader = tokio::spawn(async move {
+        // The fast client keeps up the whole time.
+        let mut seq = 1;
+        while seq < (writes as u64 + 1) {
+            match fast.next().await.unwrap() {
+                Frame::Delta(d) => seq = d.seq,
+                Frame::Snapshot { seq: s, .. } => seq = s,
+                f => panic!("{f:?}"),
+            }
+        }
+    });
+    for i in 0..writes {
+        s.store.upsert(vec![sess(0, &format!("{i}{big}"))]);
+        if i % 64 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(20), reader)
+        .await
+        .expect("the fast client is not held up by the slow one")
+        .unwrap();
+    assert!(t.elapsed() < Duration::from_secs(20));
+    // The slow one now reads: whatever it is sent ends at the board's seq, and a snapshot is among it or it caught up.
+    let mut last = 0;
+    let mut saw_snapshot = false;
+    while last < s.store.seq() {
+        match next(&mut slow).await {
+            Frame::Snapshot { seq, sessions, .. } => {
+                saw_snapshot = true;
+                last = seq;
+                assert_eq!(sessions.len(), 1);
+            }
+            Frame::Delta(d) => {
+                assert!(d.seq > last);
+                last = d.seq;
+            }
+            f => panic!("{f:?}"),
+        }
+    }
+    assert!(
+        saw_snapshot,
+        "a client {writes} deltas behind gets a snapshot"
+    );
+}

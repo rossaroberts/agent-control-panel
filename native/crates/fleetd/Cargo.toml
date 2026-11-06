@@ -13,7 +13,9 @@ fleet-read = { path = "../fleet-read" }
 libc = "0.2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync", "net", "io-util", "rt-multi-thread", "macros", "signal", "time"] }
 
 [dev-dependencies]
 tempfile = "3"
