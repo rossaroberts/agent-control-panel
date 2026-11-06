@@ -16,4 +16,5 @@ pub mod serve;
 pub mod service;
 pub mod sessions;
 pub mod store;
+pub mod terms;
 pub mod watch;

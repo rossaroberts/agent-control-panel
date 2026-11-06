@@ -620,6 +620,18 @@ impl Fleet {
         }
     }
 
+    /// A running Codex holds thread `session_id` open, by the last scan that worked: one of the open logs is its rollout
+    /// (`rollout-<time>-<session_id>.jsonl`). In memory only, so it is safe to ask under the board lock.
+    pub fn codex_held(&self, session_id: &str) -> bool {
+        let tail = format!("-{session_id}");
+        self.codex.open.iter().any(|f| {
+            f.extension().is_some_and(|e| e == "jsonl")
+                && f.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.ends_with(&tail))
+        })
+    }
+
     /// The logs a running Codex holds open, under `sessions/`, that are not followed yet.
     pub fn held_untracked(&self, open: &HashSet<PathBuf>) -> Vec<PathBuf> {
         open.iter()
@@ -921,4 +933,21 @@ fn job_id(row: &RosterRow) -> Option<String> {
     let id = row.id.as_deref()?;
     let hex8 = id.len() == 8 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     (hex8 && row.kind.as_deref() == Some("background")).then(|| id.to_string())
+}
+
+#[cfg(test)]
+mod codex_held_tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_is_held_when_its_rollout_is_in_the_open_set() {
+        let mut f = Fleet::new("m".into(), PathBuf::from("/h/.codex"));
+        let sid = "0199aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        assert!(!f.codex_held(sid));
+        f.codex.open.insert(PathBuf::from(format!(
+            "/h/.codex/sessions/2026/11/06/rollout-2026-11-06T10-00-00-{sid}.jsonl"
+        )));
+        assert!(f.codex_held(sid));
+        assert!(!f.codex_held("0199aaaa-bbbb-4ccc-8ddd-ffffffffffff"));
+    }
 }
