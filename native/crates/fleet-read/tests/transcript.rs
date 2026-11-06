@@ -7,10 +7,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, UNIX_EPOCH};
 
-const WORK: &str = "/tmp/fleet-transcript-fixture";
+/// The checkout the workdir fixtures point into, as the golden names it (gen-transcript-golden.mjs makes it there).
+const GOLDEN_WORK: &str = "/tmp/fleet-transcript-fixture";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,25 +38,42 @@ fn root() -> PathBuf {
 fn golden() -> Golden {
     let s =
         fs::read_to_string(root().join("golden/transcript.json")).expect("golden/transcript.json");
-    serde_json::from_str(&s).expect("parse golden")
+    serde_json::from_str(&s.replace(GOLDEN_WORK, work())).expect("parse golden")
 }
 
+/// A fixture, its checkout path swapped for this run's (the same length, so the golden's cut offsets still hold).
 fn fixture(name: &str) -> Vec<u8> {
-    fs::read(root().join("fixtures/transcripts").join(name)).expect("fixture")
+    let s = fs::read_to_string(root().join("fixtures/transcripts").join(name)).expect("fixture");
+    s.replace(GOLDEN_WORK, work()).into_bytes()
 }
 
-/// The checkout the workdir fixtures point into, as gen-transcript-golden.mjs makes it.
+/// This run's copy of the checkout: one per user (no clash with another user's run), built once per process, each file
+/// written whole by a rename (a parallel test or a concurrent run never sees a half-written HEAD). Its path has the
+/// golden one's length.
+fn work() -> &'static str {
+    static WORK: OnceLock<String> = OnceLock::new();
+    WORK.get_or_init(|| {
+        let uid = fs::metadata(env!("CARGO_MANIFEST_DIR")).unwrap().uid();
+        let w = format!("/tmp/fleet-tf-u{uid:014}");
+        assert_eq!(w.len(), GOLDEN_WORK.len());
+        let put = |f: &str, s: &str| {
+            let f = Path::new(&w).join(f);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            let tmp = f.with_extension(format!("tmp{}", std::process::id()));
+            fs::write(&tmp, s).unwrap();
+            fs::rename(&tmp, &f).unwrap();
+        };
+        put(".git/HEAD", "ref: refs/heads/fixture-main\n");
+        put("wt2/.git", "gitdir: ../gitdirs/wt2\n");
+        put("gitdirs/wt2/HEAD", "ref: refs/heads/fixture-wt2\n");
+        fs::create_dir_all(Path::new(&w).join(".claude/worktrees/wt1")).unwrap();
+        fs::create_dir_all(Path::new(&w).join("src")).unwrap();
+        w
+    })
+}
+
 fn make_work() {
-    let put = |f: &str, s: &str| {
-        let f = Path::new(WORK).join(f);
-        fs::create_dir_all(f.parent().unwrap()).unwrap();
-        fs::write(f, s).unwrap();
-    };
-    put(".git/HEAD", "ref: refs/heads/fixture-main\n");
-    put("wt2/.git", "gitdir: ../gitdirs/wt2\n");
-    put("gitdirs/wt2/HEAD", "ref: refs/heads/fixture-wt2\n");
-    fs::create_dir_all(Path::new(WORK).join(".claude/worktrees/wt1")).unwrap();
-    fs::create_dir_all(Path::new(WORK).join("src")).unwrap();
+    work();
 }
 
 fn set_mtime(f: &Path, secs: u64) {

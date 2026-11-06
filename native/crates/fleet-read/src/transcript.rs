@@ -130,6 +130,7 @@ pub struct Tail {
     skip_line: bool,
     written_at: Option<i64>,
     bytes_read: u64,
+    /// `home_dir()`, resolved once per open, for a tool call's `~/` paths.
     home: String,
     scan: Scan,
     summary: TranscriptSummary,
@@ -164,7 +165,7 @@ impl Tail {
             skip_line: start > 0,
             written_at: meta.modified().ok().and_then(ms),
             bytes_read: 0,
-            home: std::env::var("HOME").unwrap_or_default(),
+            home: crate::home::home_dir().to_string_lossy().into_owned(),
             scan: Scan {
                 head_open: start == 0,
                 ..Scan::default()

@@ -67,36 +67,7 @@ pub fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-/// `v ?? fallback` over JSON: absent and `null` fall through.
-pub fn present(v: Option<&Value>) -> Option<&Value> {
-    v.filter(|v| !v.is_null())
-}
-
-/// `String(v)` (and template interpolation) for JSON values.
-pub fn string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Array(xs) => join(xs, ","),
-        Value::Object(_) => "[object Object]".into(),
-    }
-}
-
-/// `xs.join(sep)`: `null` elements are empty.
-pub fn join(xs: &[Value], sep: &str) -> String {
-    xs.iter()
-        .map(|x| {
-            if x.is_null() {
-                String::new()
-            } else {
-                string(x)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(sep)
-}
+pub use fleet_model::js::{join, present, string};
 
 /// `${v ?? fallback}`.
 pub fn tmpl(v: Option<&Value>, fallback: &str) -> String {

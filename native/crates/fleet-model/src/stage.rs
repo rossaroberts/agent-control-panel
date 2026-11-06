@@ -2,6 +2,7 @@
 //! promotes, tests or builds says so; reading and looking around alone is planning. No model's guess.
 //! A port of `stageOfTool` / `stageOf` in fleet/machine.mjs (golden: native/parity/golden/stage.json).
 
+use crate::js::{join, present, string};
 use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
@@ -27,33 +28,6 @@ static STAGE_OF_RUN: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
 static REVIEW_SKILL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("verify-gate|code-review|review").expect("skill"));
 
-/// JS `String(v)` for the values a tool input holds; `null`/absent are handled by the caller's `??`.
-fn js_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Array(xs) => xs
-            .iter()
-            .map(|x| {
-                if x.is_null() {
-                    String::new()
-                } else {
-                    js_string(x)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        Value::Object(_) => "[object Object]".into(),
-    }
-}
-
-/// `x ?? y` over JSON: absent and `null` fall through.
-fn present(v: Option<&Value>) -> Option<&Value> {
-    v.filter(|v| !v.is_null())
-}
-
 /// The stage one tool use says, or `None` for agents, tasks and questions, which say nothing about where the work is.
 /// `name` is `None` when the transcript's name is not a string.
 pub fn stage_of_tool(name: Option<&str>, input: &Value) -> Option<&'static str> {
@@ -67,27 +41,15 @@ pub fn stage_of_tool(name: Option<&str>, input: &Value) -> Option<&'static str> 
         _ => {}
     }
     if name == "Skill" {
-        let skill = present(input.get("skill"))
-            .map(js_string)
-            .unwrap_or_default();
+        let skill = present(input.get("skill")).map(string).unwrap_or_default();
         return REVIEW_SKILL.is_match(&skill).then_some("testing");
     }
     if matches!(name, "Bash" | "shell" | "exec_command") {
         let cmd = match input.get("command") {
-            Some(Value::Array(xs)) => xs
-                .iter()
-                .map(|x| {
-                    if x.is_null() {
-                        String::new()
-                    } else {
-                        js_string(x)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
+            Some(Value::Array(xs)) => join(xs, " "),
             c => present(c)
                 .or_else(|| present(input.get("cmd")))
-                .map(js_string)
+                .map(string)
                 .unwrap_or_default(),
         };
         return Some(
