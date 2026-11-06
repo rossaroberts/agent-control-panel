@@ -189,21 +189,73 @@ impl AltScreen {
     }
 }
 
-/// Puts the tty back as it was, once. Safe to call from a panic hook and from `Drop`.
+/// Puts the tty back as it was, once. Safe to call from a panic hook, from `Drop` and from the signal watchdog, and it
+/// never waits on the tty: the reset is written only if fd 1 takes it at once (a frozen window does not), and the mode is
+/// set at once (`TCSAFLUSH` would wait for queued output to drain, for as long as nobody reads it), then typed-ahead input
+/// is discarded as `TCSAFLUSH` would (in that order: the flush also clears the `PENDIN` that the switch back to canonical
+/// mode sets, so the tty reads back exactly as it was).
 fn restore_tty() {
     let saved = SAVED.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(t) = saved {
         // SAFETY: plain syscalls on fds 0 and 1 with a termios we obtained from tcgetattr.
         unsafe {
             if libc::isatty(1) == 1 {
-                libc::write(1, RESET.as_ptr().cast(), RESET.len());
+                write_if_ready(RESET);
                 if ALT.load(Ordering::SeqCst) {
-                    libc::write(1, ALT_OFF.as_ptr().cast(), ALT_OFF.len());
+                    write_if_ready(ALT_OFF);
                 }
             }
-            libc::tcsetattr(0, libc::TCSAFLUSH, &t);
+            libc::tcsetattr(0, libc::TCSANOW, &t);
+            libc::tcflush(0, libc::TCIFLUSH);
         }
     }
+}
+
+/// Writes `b` to fd 1 if it can take bytes now; a few bytes into a writable tty do not block.
+fn write_if_ready(b: &[u8]) {
+    let mut p = libc::pollfd {
+        fd: 1,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: poll on fd 1 with no wait, then a write from our slice.
+    unsafe {
+        if libc::poll(&mut p, 1, 0) == 1 && p.revents & libc::POLLOUT != 0 {
+            libc::write(1, b.as_ptr().cast(), b.len());
+        }
+    }
+}
+
+/// How long the orderly way out of a signal gets before the process ends anyway.
+const SIGNAL_GRACE: Duration = Duration::from_millis(500);
+
+/// Ends the process on SIGTERM, SIGHUP or SIGINT within `SIGNAL_GRACE`, whatever the session loop is doing. The loop
+/// handles the same signals in order (a `TermClose`, the tty back), but it cannot while it is stuck in a write to a tty
+/// nobody reads (a frozen window), and tokio's handlers mean the default action never ends the process for it. Runs on a
+/// runtime worker, not the thread of the loop.
+fn signal_watchdog() {
+    tokio::spawn(async {
+        let (Ok(mut term), Ok(mut hup), Ok(mut int)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            return;
+        };
+        let code = tokio::select! {
+            _ = term.recv() => 143,
+            _ = hup.recv() => 129,
+            _ = int.recv() => 130,
+        };
+        tokio::time::sleep(SIGNAL_GRACE).await;
+        // SAFETY: tcflush on fd 1, then _exit: no Rust exit path, which would flush stdout behind the stuck writer's
+        // lock. The output nobody took is discarded, so the tty's last close does not wait for it to drain.
+        unsafe {
+            libc::tcflush(1, libc::TCOFLUSH);
+        }
+        restore_tty();
+        unsafe { libc::_exit(code) }
+    });
 }
 
 /// Raw mode for as long as it lives.
@@ -333,6 +385,7 @@ async fn attach(path: &Path, target: AttachTarget) -> Outcome {
     ) else {
         return fail(1, "cannot install signal handlers");
     };
+    signal_watchdog();
     let (ftx, mut frx) = mpsc::channel::<Frame>(16);
     let writer = tokio::spawn(async move {
         while let Some(f) = frx.recv().await {
