@@ -6,11 +6,12 @@
 mod terms_home;
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use fleet_model::types::AttachTarget;
-use fleetd::terms::{self, InputFull, Options, Terms};
+use fleetd::terms::{self, InputFull, Options, Rescan, Terms};
 use terms_home::*;
 
 // (a)
@@ -519,4 +520,156 @@ fn dropping_terms_stops_every_program() {
             "{j}"
         );
     }
+}
+
+/// A board whose process scan sees the Codex a Fleet terminal runs (`held`, set by the test while it runs) and stops
+/// seeing it at the next scan, which takes 100 ms. `works: false`: scans are asked for and never done.
+struct Board {
+    held: Arc<AtomicBool>,
+    works: Arc<AtomicBool>,
+    /// (scans asked for, highest done)
+    scans: Arc<(Mutex<(u64, u64)>, Condvar)>,
+}
+
+impl Board {
+    fn new() -> Board {
+        Board {
+            held: Arc::default(),
+            works: Arc::new(AtomicBool::new(true)),
+            scans: Arc::default(),
+        }
+    }
+
+    fn terms(&self, h: &Home) -> Terms {
+        let (s1, s2, held, works) = (
+            self.scans.clone(),
+            self.scans.clone(),
+            self.held.clone(),
+            self.works.clone(),
+        );
+        let rescan = Rescan {
+            request: Box::new(move || {
+                let ticket = {
+                    let mut g = s1.0.lock().unwrap();
+                    g.0 += 1;
+                    g.0
+                };
+                if works.load(Ordering::SeqCst) {
+                    let (s, held) = (s1.clone(), held.clone());
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(100));
+                        held.store(false, Ordering::SeqCst);
+                        s.0.lock().unwrap().1 = ticket;
+                        s.1.notify_all();
+                    });
+                }
+                ticket
+            }),
+            wait: Box::new(move |ticket, d| {
+                let g = s2.0.lock().unwrap();
+                let (g, _) = s2.1.wait_timeout_while(g, d, |g| g.1 < ticket).unwrap();
+                g.1 >= ticket
+            }),
+        };
+        let held = self.held.clone();
+        Terms::with_rescan(
+            h.path(),
+            move |_| held.load(Ordering::SeqCst),
+            Options::default(),
+            Some(rescan),
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn a_closed_codex_reopens_at_once_without_the_stale_busy_refusal() {
+    let h = Home::new();
+    let board = Board::new();
+    let t = board.terms(&h);
+    let mut c = Conn::new(1);
+    c.open(&t, 1, codex(SID)).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    let first = h.starts_of(SID)[0];
+
+    // Closed, then reopened at once: the open waits for the program to go and the scan to see it, then starts.
+    board.held.store(true, Ordering::SeqCst); // the last scan saw the Codex this terminal runs
+    t.close(1, 1);
+    let at = Instant::now();
+    assert_eq!(c.open(&t, 2, codex(SID)), Ok(()));
+    assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+    assert!(
+        !alive(first),
+        "the old Codex was gone before the new one started"
+    );
+    assert!(c.until_has(2, "BANNER", BOOT));
+    assert_eq!(h.starts_of(SID).len(), 2);
+
+    // The program leaving by itself: its end is the prompt to reopen, and that reopen is not refused either.
+    board.held.store(true, Ordering::SeqCst);
+    t.input(1, 2, b"exit-soon\n").unwrap();
+    assert!(c.until(5.0, |c| c.ended(2)));
+    let at = Instant::now();
+    assert_eq!(c.open(&t, 3, codex(SID)), Ok(()));
+    assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+    assert!(c.until_has(3, "BANNER", BOOT));
+    assert_eq!(h.starts_of(SID).len(), 3);
+    assert_eq!(
+        board.scans.0.lock().unwrap().0,
+        2,
+        "one scan asked for per terminal gone"
+    );
+
+    // A scan that does not come: the reopen waits REOPEN_WAIT at most, then the board's word stands.
+    board.works.store(false, Ordering::SeqCst);
+    board.held.store(true, Ordering::SeqCst);
+    t.close(1, 3);
+    let at = Instant::now();
+    assert_eq!(c.open(&t, 4, codex(SID)), Err(terms::ERR_CODEX_BUSY.into()));
+    let waited = at.elapsed();
+    assert!(
+        waited >= terms::REOPEN_WAIT && waited < terms::REOPEN_WAIT + Duration::from_millis(400),
+        "{waited:?}"
+    );
+}
+
+#[test]
+fn a_reopen_of_an_ended_warm_terminal_says_the_session_has_ended() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    c.open(&t, 1, claude("0000000c")).unwrap();
+    assert!(c.until_has(1, "BANNER", BOOT));
+    t.input(1, 1, b"exit-soon\n").unwrap();
+    assert!(c.until_has(1, "exit-soon", 5.0));
+    t.close(1, 1);
+    assert!(c.until(5.0, |c| c.ended(1)));
+    assert_eq!(c.ends[&1], vec![None], "a close ends with no error");
+    assert!(gone_within(
+        h.starts_of("0000000c")[0],
+        Duration::from_secs(5)
+    ));
+    assert!(wait_for(Duration::from_secs(2), || t.live_count() == 0));
+    c.open(&t, 2, claude("0000000c")).unwrap();
+    assert!(c.until(5.0, |c| c.ended(2)));
+    assert!(has(c.output(2), "LAST WORDS"), "the ring first");
+    assert_eq!(c.ends[&2], vec![Some("The session has ended.".to_string())]);
+}
+
+#[test]
+fn ref_0_is_ignored() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut c = Conn::new(1);
+    assert_eq!(c.open(&t, 0, claude("0000000b")), Ok(()), "no answer");
+    assert_eq!(t.input(1, 0, b"x\n"), Ok(()));
+    t.size(1, 0, 90, 20);
+    t.close(1, 0);
+    assert!(
+        !c.until(0.5, |c| !c.got.is_empty()),
+        "nothing sent: {:?}",
+        c.got
+    );
+    assert!(h.starts().is_empty(), "nothing started");
+    assert_eq!(t.live_count(), 0);
 }

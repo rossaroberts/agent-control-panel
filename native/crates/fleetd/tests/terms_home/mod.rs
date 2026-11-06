@@ -132,6 +132,8 @@ pub struct Conn {
     /// Each frame received, in order: (ref, Some(payload length)) for output, (ref, None) for an end.
     pub got: Vec<(u32, Option<usize>)>,
     pub outs: HashMap<u32, Vec<u8>>,
+    /// Each `TermEnd`'s error, per ref, in order.
+    pub ends: HashMap<u32, Vec<Option<String>>>,
 }
 
 impl Conn {
@@ -143,6 +145,7 @@ impl Conn {
             src,
             got: vec![],
             outs: HashMap::new(),
+            ends: HashMap::new(),
         }
     }
 
@@ -169,7 +172,10 @@ impl Conn {
                 self.got.push((r#ref, Some(data.len())));
                 self.outs.entry(r#ref).or_default().extend(data);
             }
-            Some(Frame::TermEnd { r#ref, .. }) => self.got.push((r#ref, None)),
+            Some(Frame::TermEnd { r#ref, error }) => {
+                self.got.push((r#ref, None));
+                self.ends.entry(r#ref).or_default().push(error);
+            }
             Some(f) => panic!("unexpected {f:?}"),
             None => {}
         }

@@ -73,10 +73,21 @@ fn run_serve() {
         eprintln!("fleetd: watch: {e}");
         exit(1)
     }));
-    // The terminals ask the board whether a running Codex holds a thread (lock order: terminals, then board).
-    let held = handle.clone();
+    // The terminals ask the board whether a running Codex holds a thread (lock order: terminals, then board), and for a
+    // process scan once a Codex terminal has gone (asked with no terminals' lock held).
+    let (held, req, wait) = (handle.clone(), handle.clone(), handle.clone());
+    let rescan = terms::Rescan {
+        request: Box::new(move || req.request_scan()),
+        wait: Box::new(move |ticket, d| wait.wait_scan(ticket, d)),
+    };
     let terms = Arc::new(
-        terms::Terms::new(home.clone(), move |sid| held.codex_held(sid)).unwrap_or_else(|e| {
+        terms::Terms::with_rescan(
+            home.clone(),
+            move |sid| held.codex_held(sid),
+            terms_options(),
+            Some(rescan),
+        )
+        .unwrap_or_else(|e| {
             eprintln!("fleetd: terminals: {e}");
             exit(1)
         }),
@@ -99,6 +110,21 @@ fn run_serve() {
     });
     drop(rt);
     drop(handle);
+}
+
+/// The terminals' tunables: the defaults, but debug builds take `FLEETD_TEST_WARM_TTL_MS` for the warm TTL (a live
+/// check of what a warm expiry does to a real session, without waiting 10 minutes).
+fn terms_options() -> terms::Options {
+    #[allow(unused_mut)]
+    let mut o = terms::Options::default();
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("FLEETD_TEST_WARM_TTL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        o.warm_ttl = std::time::Duration::from_millis(ms);
+    }
+    o
 }
 
 /// One read, in this process, with no daemon: the watcher's startup read, then print.

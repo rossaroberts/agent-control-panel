@@ -114,6 +114,10 @@ struct Shared {
     runners: Mutex<HashMap<Job, Runner>>,
     roster_runs: AtomicU64,
     scan_runs: AtomicU64,
+    /// Process scans begun (`run_scan`), and the highest of them done: what `WatchHandle::wait_scan` waits on.
+    scan_begun: AtomicU64,
+    scan_done: Mutex<u64>,
+    scan_cv: Condvar,
     watcher: Mutex<Option<RecommendedWatcher>>,
     watched: Mutex<HashSet<PathBuf>>,
     #[cfg(target_os = "macos")]
@@ -150,6 +154,30 @@ impl WatchHandle {
     /// Process scans run by events (not the reconcile's or the first one).
     pub fn scan_runs(&self) -> u64 {
         self.shared.scan_runs.load(Ordering::SeqCst)
+    }
+
+    /// Asks for a process scan now (one under way is followed by one more). A ticket for `wait_scan`: only a scan begun
+    /// after this call answers it, so it sees whatever had gone before the call.
+    pub fn request_scan(&self) -> u64 {
+        let ticket = self.shared.scan_begun.load(Ordering::SeqCst) + 1;
+        request(&self.shared, Job::Scan);
+        ticket
+    }
+
+    /// Waits at most `d` for the scan `ticket` names (or a later one) to be done, failed scans included (R14 keeps the
+    /// last good open set then). Whether it was.
+    pub fn wait_scan(&self, ticket: u64, d: Duration) -> bool {
+        let done = self
+            .shared
+            .scan_done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (done, _) = self
+            .shared
+            .scan_cv
+            .wait_timeout_while(done, d, |done| *done < ticket)
+            .unwrap_or_else(|e| e.into_inner());
+        *done >= ticket
     }
 
     /// Test seam: holds the lock of a session's tail for `d` on a thread of its own, as a slow read would. Whether the
@@ -301,6 +329,9 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         runners: Mutex::new(HashMap::new()),
         roster_runs: AtomicU64::new(0),
         scan_runs: AtomicU64::new(0),
+        scan_begun: AtomicU64::new(0),
+        scan_done: Mutex::new(0),
+        scan_cv: Condvar::new(),
         watcher: Mutex::new(Some(watcher)),
         watched: Mutex::new(HashSet::new()),
         #[cfg(target_os = "macos")]
@@ -991,6 +1022,17 @@ fn run_roster(sh: &Arc<Shared>, pi: usize) {
 /// board, then Codex and Muse re-decided.
 fn run_scan(sh: &Arc<Shared>) {
     sh.scan_runs.fetch_add(1, Ordering::SeqCst);
+    /// Marks scan `.1` done on every way out.
+    struct Done<'a>(&'a Shared, u64);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            let mut d = self.0.scan_done.lock().unwrap_or_else(|e| e.into_inner());
+            *d = (*d).max(self.1);
+            drop(d);
+            self.0.scan_cv.notify_all();
+        }
+    }
+    let _done = Done(sh, sh.scan_begun.fetch_add(1, Ordering::SeqCst) + 1);
     let Some(found) = scan() else {
         return; // R14: keep the last good result
     };

@@ -15,8 +15,10 @@ use crate::attach_cmd::Cmd;
 /// How long a program gets to leave after SIGHUP before the group is killed.
 const HANGUP_GRACE: Duration = Duration::from_millis(1500);
 
-/// `openpty` hands out descriptors that are inheritable until `set_cloexec` runs; spawns are serialised so no other
-/// thread's fork can see them in between.
+/// `openpty` hands out descriptors that are inheritable until `set_cloexec` runs. Spawns are serialised by this lock, so
+/// no other pty's child inherits them; any other fork in the daemon in that window (a process scan's `ps`, a roster
+/// read) still can, and keeps them (across its exec) until it exits. The only effect is a late hang-up: the reader sees EIO a
+/// moment later, once that child has let them go.
 static SPAWN: Mutex<()> = Mutex::new(());
 
 /// What outlives the `Pty` handle: the pid and what is known of its exit. Shared with the detached thread `Drop` may start.

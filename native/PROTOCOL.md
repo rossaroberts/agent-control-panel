@@ -61,13 +61,17 @@ and its first field is `proto`; `Error` is variant 3 with one `message` string.
 
 A separate connection from the board, opened by a client that wants ptys; board and terminal connections are fully
 independent (a terminal flood never delays a board's deltas). The server sends nothing after the `Hello` until the client
-asks. Frames carry a client-chosen `ref` naming one terminal of this connection.
+asks. Frames carry a client-chosen `ref` naming one terminal of this connection: a `ref` is greater than 0, and a
+frame with `ref` 0 is ignored (no answer, as `term.mjs`).
 
 - **`TermOpen { ref, target, cols, rows }`** opens a terminal: the server answers with `TermOut` frames (the program's
   output, in order, never dropped) and, when it is over, one `TermEnd { ref, error: None }`. An open that cannot be
   served is answered with `TermEnd { ref, error }`, `error` being `term.mjs`'s words (`Pick a background session, or a
   folder that exists.`, `Too many terminals open.`, `Too many terminals open in this tab.`, `It is open in another
-  Fleet terminal already.`, or the busy reason). That `TermEnd` comes in order with the connection's output: after
+  Fleet terminal already.`, or the busy reason). A reopen of a kept-warm terminal whose program ended while it was warm
+  is sent what that program last printed and then `TermEnd { ref, error: "The session has ended." }`; the open after
+  that starts it afresh. A reopen of a Codex thread right after its terminal was closed waits up to 500 ms for that
+  program to be gone, rather than be refused as open in Codex. That `TermEnd` comes in order with the connection's output: after
   everything already sent for an earlier terminal of the same `ref` (its output, then its own `TermEnd`). A `ref` already open on this connection is left as it is (no answer).
   The server handles the open before it reads the next frame, so a `TermIn` sent right behind it finds it open. At most
   8 terminals per connection and 24 in all; cols are clamped to 20-400 and rows to 5-200.
@@ -114,6 +118,14 @@ asks. Frames carry a client-chosen `ref` naming one terminal of this connection.
   machine it cannot reach (another Mac's daemon, a lost connection); a local board never holds it.
 - A write the client takes nothing of for 30 s ends the connection (on a Terminals connection, only while its output
   is over 1 MiB).
+- **On a Terminals connection, read and write on independent paths** (two tasks, two threads, or one non-blocking
+  loop). A write may block for as long as a program does not read its input (backpressure, above), and output keeps
+  coming meanwhile: a client that writes and reads on one serial path deadlocks, and once its unread output is over
+  1 MiB for 30 s it is closed.
+- **A `TermIn` of more than 64 KiB closes the connection and every terminal on it.** Split input (a paste) into pieces
+  of at most 65,536 bytes.
+- When an `Error` closes a Terminals connection, output still queued for it and not yet written (`TermOut`,
+  `TermEnd`) is discarded: the `Error` goes out ahead of it, as the last frame.
 
 ## Versioning
 

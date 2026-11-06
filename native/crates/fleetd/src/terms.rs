@@ -5,7 +5,9 @@
 //!   evicted first). Opening the same key takes it back: its last 1 MiB of output is replayed, then a size kick makes the
 //!   program redraw. Several refs on one key share the pty: output goes to all, input from any goes in.
 //! - Codex and trust-folder terminals end when released. One Fleet terminal per Codex thread, and none on a thread a
-//!   running Codex holds open.
+//!   running Codex holds open. The process scan sees the Codex a Fleet terminal runs too, so once one has gone a scan is
+//!   asked for (`Rescan`), and a reopen of its thread meanwhile waits for it (at most `REOPEN_WAIT`) rather than be
+//!   refused on the scan from before.
 //! - Each pty has one reader thread (into its ring and every attached sink) and one writer thread (input, so a program
 //!   that stops reading wedges only itself). A sink holding more than 1 MiB unsent stops the reading of every pty writing
 //!   to it until it is down to half, so the programs block on output: nothing is dropped, nothing grows without bound.
@@ -19,6 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -54,6 +57,10 @@ pub const RESIZE_EVERY: Duration = Duration::from_millis(16);
 pub const INPUT_MAX: usize = 1 << 20;
 /// The most one `TermOut` carries (ring replays are cut to this).
 const CHUNK: usize = 64 * 1024;
+/// How long a Codex reopen waits for the terminal before it on that thread to be gone and scanned.
+pub const REOPEN_WAIT: Duration = Duration::from_millis(500);
+/// How long a stopped Codex's thread waits for the process scan it asked for.
+const SCAN_WAIT: Duration = Duration::from_secs(2);
 
 // `term.mjs`'s words.
 pub const ERR_PICK: &str = "Pick a background session, or a folder that exists.";
@@ -63,6 +70,8 @@ pub const ERR_CODEX_OPEN: &str = "It is open in another Fleet terminal already."
 /// `fleet.mjs` `codexBusy`'s reason for a thread a running Codex holds.
 pub const ERR_CODEX_BUSY: &str =
     "It is open in Codex (the app or a terminal): finish there, or close it there first.";
+/// The `TermEnd` of a reopen that finds the program of a warm terminal ended (after its last output).
+pub const ERR_ENDED: &str = "The session has ended.";
 
 /// `Terms::input` refused: the terminal holds `INPUT_MAX` of input its program has not read yet. None of the refused
 /// call's bytes were taken; send them again once `Terms::input_pending` has gone down.
@@ -279,6 +288,8 @@ struct Term {
     id: u64,
     key: Key,
     pty: Pty,
+    /// A Codex terminal's going has been announced (`Shared::codex_going`), by its release or by its program's end.
+    going: AtomicBool,
     st: Mutex<TermSt>,
     size: Mutex<SizeSt>,
     input: Mutex<InputQ>,
@@ -402,6 +413,14 @@ impl Default for Options {
 
 type CodexHeld = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// The board's process scan, for after a Codex terminal has gone (`WatchHandle::request_scan` / `wait_scan`).
+pub struct Rescan {
+    /// Asks for a scan; a ticket for `wait`.
+    pub request: Box<dyn Fn() -> u64 + Send + Sync>,
+    /// Waits at most the duration for the ticket's scan to be done; whether it was.
+    pub wait: Box<dyn Fn(u64, Duration) -> bool + Send + Sync>,
+}
+
 struct State {
     terms: HashMap<u64, Arc<Term>>,
     by_key: HashMap<Key, u64>,
@@ -451,9 +470,82 @@ impl State {
 struct Shared {
     home: PathBuf,
     codex_held: CodexHeld,
+    rescan: Option<Rescan>,
     opts: Options,
     st: Mutex<State>,
     alarm: Alarm,
+    /// Codex threads whose terminal is going: how many, until each is gone and a scan has been done since.
+    codex_going: Mutex<HashMap<String, u32>>,
+    codex_cv: Condvar,
+}
+
+impl Shared {
+    /// Codex terminal `t` is going (its release, or its program's end): until `codex_gone`, a reopen of its thread waits.
+    /// False when it is not a Codex one, or was announced already.
+    fn codex_going(&self, t: &Term) -> bool {
+        let Key::Codex(sid) = &t.key else {
+            return false;
+        };
+        if t.going.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        *lock(&self.codex_going).entry(sid.clone()).or_default() += 1;
+        true
+    }
+
+    /// Its program is gone (the group is): a scan that sees that, then reopens of the thread go ahead.
+    fn codex_gone(&self, sid: &str) {
+        if let Some(r) = &self.rescan {
+            let ticket = (r.request)();
+            (r.wait)(ticket, SCAN_WAIT);
+        }
+        self.codex_settled(sid);
+    }
+
+    fn codex_settled(&self, sid: &str) {
+        let mut m = lock(&self.codex_going);
+        if let Some(n) = m.get_mut(sid) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(sid);
+            }
+        }
+        drop(m);
+        self.codex_cv.notify_all();
+    }
+
+    fn codex_is_going(&self, sid: &str) -> bool {
+        lock(&self.codex_going).contains_key(sid)
+    }
+
+    /// Waits at most `d` for no terminal of thread `sid` to be going.
+    fn wait_codex(&self, sid: &str, d: Duration) {
+        let m = lock(&self.codex_going);
+        let _ = self
+            .codex_cv
+            .wait_timeout_while(m, d, |m| m.contains_key(sid));
+    }
+}
+
+/// Stops Codex terminal `t` off the caller's thread, as `stop_detached`, then lets its thread's reopens go (after a scan).
+fn stop_codex(sh: &Arc<Shared>, t: Arc<Term>) {
+    t.close_input();
+    let Key::Codex(sid) = t.key.clone() else {
+        return stop_detached(t);
+    };
+    let (weak, s) = (Arc::downgrade(sh), sid.clone());
+    let spawned = thread::Builder::new()
+        .name("term-stop".into())
+        .spawn(move || {
+            t.pty.stop();
+            if let Some(sh) = weak.upgrade() {
+                sh.codex_gone(&s);
+            }
+        });
+    if spawned.is_err() {
+        // Nothing will announce it gone: reopens fall back to the board's word.
+        sh.codex_settled(&sid);
+    }
 }
 
 /// The terminals of this daemon.
@@ -476,10 +568,24 @@ impl Terms {
         codex_held: impl Fn(&str) -> bool + Send + Sync + 'static,
         opts: Options,
     ) -> io::Result<Terms> {
+        Terms::with_rescan(home, codex_held, opts, None)
+    }
+
+    /// As `with_options`, with the board's process scan to ask for once a Codex terminal has gone (without one, a reopen
+    /// waits only for the program to be gone).
+    pub fn with_rescan(
+        home: PathBuf,
+        codex_held: impl Fn(&str) -> bool + Send + Sync + 'static,
+        opts: Options,
+        rescan: Option<Rescan>,
+    ) -> io::Result<Terms> {
         Ok(Terms {
             sh: Arc::new(Shared {
                 home,
                 codex_held: Box::new(codex_held),
+                rescan,
+                codex_going: Mutex::new(HashMap::new()),
+                codex_cv: Condvar::new(),
                 opts,
                 st: Mutex::new(State {
                     terms: HashMap::new(),
@@ -507,15 +613,32 @@ impl Terms {
         rows: u16,
         out: TermSink,
     ) -> Result<(), String> {
+        if r#ref == 0 {
+            return Ok(()); // `term.mjs` takes refs > 0 only
+        }
         let size = clamp_size(cols, rows);
-        let mut st = lock(&self.sh.st);
+        // Its filesystem checks, before the lock (used only past the checks that come first under it).
+        let cmd = command(&target, &self.sh.home);
+        let mut waited = false;
+        let mut st = loop {
+            let st = lock(&self.sh.st);
+            if let AttachTarget::Codex { session_id, .. } = &target {
+                if !waited && self.sh.codex_is_going(session_id) {
+                    drop(st);
+                    self.sh.wait_codex(session_id, REOPEN_WAIT);
+                    waited = true;
+                    continue;
+                }
+            }
+            break st;
+        };
         if st.conns.contains_key(&(conn, r#ref)) {
             return Ok(());
         }
         if st.conns.keys().filter(|(c, _)| *c == conn).count() >= PER_PAGE {
             return Err(ERR_PER_PAGE.into());
         }
-        let cmd = command(&target, &self.sh.home).ok_or(ERR_PICK)?;
+        let cmd = cmd.ok_or(ERR_PICK)?;
         let key = match &target {
             AttachTarget::Claude { profile, job } => Key::Claude(profile.clone(), job.clone()),
             AttachTarget::Codex { session_id, .. } => Key::Codex(session_id.clone()),
@@ -555,6 +678,7 @@ impl Terms {
             id,
             key: key.clone(),
             pty,
+            going: AtomicBool::new(false),
             st: Mutex::new(TermSt {
                 refs: vec![Attached {
                     conn,
@@ -610,7 +734,10 @@ impl Terms {
         let mut ts = lock(&t.st);
         Term::replay(&ts, r#ref, &out);
         if ts.ended {
-            out.push(Frame::TermEnd { r#ref, error: None });
+            out.push(Frame::TermEnd {
+                r#ref,
+                error: Some(ERR_ENDED.into()),
+            });
             drop(ts);
             st.remove(t.id);
             return;
@@ -734,7 +861,11 @@ impl Terms {
             }
             _ => {
                 if let Some(t) = st.remove(id) {
-                    stop_detached(t);
+                    if self.sh.codex_going(&t) {
+                        stop_codex(&self.sh, t);
+                    } else {
+                        stop_detached(t);
+                    }
                 }
             }
         }
@@ -886,6 +1017,11 @@ fn read_loop(t: Arc<Term>, mut f: File, sh: Weak<Shared>) {
             });
         }
     }
+    // A Codex that left by itself: the scan must see it gone too (unless its release already said so). Marked before
+    // the ends go out, so a reopen they prompt waits for that scan.
+    let rescan = sh
+        .upgrade()
+        .filter(|sh| !lock(&sh.st).closed && sh.codex_going(&t));
     // The program has gone: every attached ref has had its last bytes, now its end.
     let had_refs = {
         let mut ts = lock(&t.st);
@@ -909,6 +1045,9 @@ fn read_loop(t: Arc<Term>, mut f: File, sh: Weak<Shared>) {
         }
     }
     t.pty.stop(); // reaps it, and hangs up on whatever of its group is left
+    if let (Some(sh), Key::Codex(sid)) = (rescan, &t.key) {
+        sh.codex_gone(sid);
+    }
 }
 
 /// Input to the program, from its queue. A program that does not read blocks only this thread.

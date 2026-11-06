@@ -696,6 +696,27 @@ async fn an_unknown_running_set_keeps_the_last_good_one() {
 }
 
 /// Ruling R14: a failed process scan keeps the last good open set and Muse list; a good one replaces them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requested_scan_answers_its_ticket_and_only_a_later_scan_does() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    let (_store, h, _rx) = home.start();
+    let runs = h.scan_runs();
+    let ticket = h.request_scan();
+    assert!(
+        h.wait_scan(ticket, Duration::from_secs(10)),
+        "the scan it asked for is done"
+    );
+    assert!(h.scan_runs() > runs);
+    assert!(
+        !h.wait_scan(ticket + 1, Duration::from_millis(100)),
+        "a ticket no scan has begun for is not answered"
+    );
+    let next = h.request_scan();
+    assert!(next > ticket);
+    assert!(h.wait_scan(next, Duration::from_secs(10)));
+}
+
 #[test]
 fn a_failed_open_scan_keeps_the_last_good_set() {
     use fleetd::procscan::{MuseProc, Scan};

@@ -58,7 +58,7 @@ pub fn parse(args: &[String]) -> Result<Req, String> {
             }
             Ok(Req::Trust {
                 profile: (*profile).into(),
-                dir: (*dir).into(),
+                dir: absolute_dir(dir),
             })
         }
         [target] if !target.starts_with('-') => {
@@ -86,6 +86,23 @@ pub fn parse(args: &[String]) -> Result<Req, String> {
         }
         _ => Err(USAGE.into()),
     }
+}
+
+/// A `--trust` folder as the daemon needs it: one relative to this shell's folder is made absolute against it (the
+/// daemon has a folder of its own, and takes only `/` or `~` paths), resolved when it exists. `~` and absolute ones are
+/// sent as they are.
+fn absolute_dir(dir: &str) -> String {
+    if dir.starts_with('/') || dir.starts_with('~') {
+        return dir.into();
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return dir.into();
+    };
+    let joined = cwd.join(dir);
+    std::fs::canonicalize(&joined)
+        .unwrap_or(joined)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// The attachable sessions as `<profile>/<id>  <state>  <name>` lines: Claude background jobs (they have a `job_id`)
@@ -579,6 +596,21 @@ mod tests {
         ] {
             assert!(parse(&a(&bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_relative_trust_folder_is_made_absolute_against_the_cwd() {
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let dir = |d: &str| match parse(&a(&["--trust", "work", d])) {
+            Ok(Req::Trust { dir, .. }) => dir,
+            r => panic!("{r:?}"),
+        };
+        assert_eq!(dir("."), cwd.to_string_lossy());
+        assert_eq!(dir("src/../src"), cwd.join("src").to_string_lossy());
+        // Not there: still absolute (the daemon then refuses it with its own words).
+        assert_eq!(dir("no-such"), cwd.join("no-such").to_string_lossy());
+        assert_eq!(dir("/abs/x"), "/abs/x");
+        assert_eq!(dir("~"), "~");
     }
 
     #[test]
