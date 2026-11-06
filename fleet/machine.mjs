@@ -282,7 +282,7 @@ export function queuedIn(lines) {
   return q.filter((x) => !x.text.trimStart().startsWith('<'));
 }
 
-function readTranscript(file) {
+export function readTranscript(file) {
   const out = { model: null, contextTokens: null, lastAt: null, doing: null, said: null, limitHit: undefined, turnOver: null, writtenAt: mtime(file),
                 firstAsk: null, lastAsk: null, steps: [], stage: null };
   const uses = []; // its last tool uses, newest first, for the stage

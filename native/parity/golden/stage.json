@@ -1,0 +1,678 @@
+{
+ "tools": [
+  {
+   "name": "Edit",
+   "input": {},
+   "stage": "building"
+  },
+  {
+   "name": "MultiEdit",
+   "input": {},
+   "stage": "building"
+  },
+  {
+   "name": "Write",
+   "input": {},
+   "stage": "building"
+  },
+  {
+   "name": "NotebookEdit",
+   "input": {},
+   "stage": "building"
+  },
+  {
+   "name": "apply_patch",
+   "input": {},
+   "stage": "building"
+  },
+  {
+   "name": "Read",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "Grep",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "Glob",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "WebFetch",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "WebSearch",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "ExitPlanMode",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "LSP",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "mcp__fixture__tool",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "Skill",
+   "input": {
+    "skill": "verify-gate"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Skill",
+   "input": {
+    "skill": "code-review"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Skill",
+   "input": {
+    "skill": "pre-review-x"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Skill",
+   "input": {
+    "skill": "brainstorm"
+   },
+   "stage": null
+  },
+  {
+   "name": "Skill",
+   "input": {},
+   "stage": null
+  },
+  {
+   "name": "Agent",
+   "input": {
+    "prompt": "x"
+   },
+   "stage": null
+  },
+  {
+   "name": "Task",
+   "input": {},
+   "stage": null
+  },
+  {
+   "name": "AskUserQuestion",
+   "input": {},
+   "stage": null
+  },
+  {
+   "name": "TodoWrite",
+   "input": {},
+   "stage": null
+  },
+  {
+   "name": "Bash",
+   "input": {},
+   "stage": "planning"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "ls -la"
+   },
+   "stage": "planning"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh workflow run ci.yml"
+   },
+   "stage": "deploying"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "./deploy.sh prod"
+   },
+   "stage": "deploying"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "bash deploy/web.sh"
+   },
+   "stage": "deploying"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh release.yml"
+   },
+   "stage": "deploying"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "ship.yml"
+   },
+   "stage": "deploying"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "kubectl apply -f x"
+   },
+   "stage": "deploying"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "docker compose -f a.yml up -d"
+   },
+   "stage": "deploying"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "docker compose down"
+   },
+   "stage": "planning"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh pr create --fill"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh pr merge 3"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh pr ready"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh pr edit 3"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh pr update-branch"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh pr checks 3"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "git push origin x"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh run watch 1"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "gh run view 1"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "merge-queue status"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "merge queue"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm test"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run test"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm t"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run test:unit"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm testing"
+   },
+   "stage": "planning"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "vitest run"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npx jest"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npx playwright test"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "pytest -q"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run smoke"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "smoke:api"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run typecheck"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "tsc --noEmit"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run lint"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "knip"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "verify-gate"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run check:types"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run docs:check"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "node --test"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "NPM TEST"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm i"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm install x"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm ci"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run db:reset"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "db:rebuild"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "new:migration add"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm run build"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "git commit -m x"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "git add ."
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "git rebase main"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "git merge main"
+   },
+   "stage": "building"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "git status"
+   },
+   "stage": "planning"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "echo pytest"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "npm installer"
+   },
+   "stage": "planning"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "cat lint.txt"
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "shell",
+   "input": {
+    "command": [
+     "npm",
+     "test"
+    ]
+   },
+   "stage": "testing"
+  },
+  {
+   "name": "exec_command",
+   "input": {
+    "cmd": "git push"
+   },
+   "stage": "promoting"
+  },
+  {
+   "name": "shell",
+   "input": {
+    "cmd": "ls"
+   },
+   "stage": "planning"
+  },
+  {
+   "name": "Bash",
+   "input": {
+    "command": "git status",
+    "cmd": "git push"
+   },
+   "stage": "planning"
+  }
+ ],
+ "seqs": [
+  {
+   "uses": [],
+   "stage": null
+  },
+  {
+   "uses": [
+    [
+     "Agent",
+     {}
+    ]
+   ],
+   "stage": null
+  },
+  {
+   "uses": [
+    [
+     "Read",
+     {}
+    ],
+    [
+     "Agent",
+     {}
+    ]
+   ],
+   "stage": "planning"
+  },
+  {
+   "uses": [
+    [
+     "Agent",
+     {}
+    ],
+    [
+     "Read",
+     {}
+    ]
+   ],
+   "stage": "planning"
+  },
+  {
+   "uses": [
+    [
+     "Read",
+     {}
+    ],
+    [
+     "Bash",
+     {
+      "command": "npm test"
+     }
+    ],
+    [
+     "Edit",
+     {}
+    ]
+   ],
+   "stage": "testing"
+  },
+  {
+   "uses": [
+    [
+     "Edit",
+     {}
+    ],
+    [
+     "Bash",
+     {
+      "command": "npm test"
+     }
+    ]
+   ],
+   "stage": "building"
+  },
+  {
+   "uses": [
+    [
+     "Grep",
+     {}
+    ],
+    [
+     "Glob",
+     {}
+    ],
+    [
+     "Bash",
+     {
+      "command": "git push"
+     }
+    ]
+   ],
+   "stage": "promoting"
+  },
+  {
+   "uses": [
+    [
+     "TodoWrite",
+     {}
+    ],
+    [
+     "Skill",
+     {
+      "skill": "x"
+     }
+    ]
+   ],
+   "stage": null
+  },
+  {
+   "uses": [
+    [
+     "Bash",
+     {
+      "command": "ls"
+     }
+    ],
+    [
+     "Bash",
+     {
+      "command": "./deploy.sh"
+     }
+    ],
+    [
+     "Bash",
+     {
+      "command": "git push"
+     }
+    ]
+   ],
+   "stage": "deploying"
+  }
+ ]
+}

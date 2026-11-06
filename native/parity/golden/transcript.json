@@ -1,0 +1,1079 @@
+{
+ "mtimeS": 1793932000,
+ "fixtures": [
+  {
+   "name": "big.jsonl",
+   "size": 494138,
+   "cuts": [
+    6691,
+    439016
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 153100,
+    "lastAt": 1793955939000,
+    "said": "Index rebuilt; testing.",
+    "doing": "Deploy the fixture",
+    "lastAsk": "Rebuild the fixture index from scratch",
+    "firstAsk": "Rebuild the fixture index from scratch",
+    "turnOver": false,
+    "running": {
+     "step": "Deploy the fixture",
+     "since": 1793955939000,
+     "tool": "Bash",
+     "cmd": "./deploy.sh fixture"
+    },
+    "limitHit": null,
+    "stage": "deploying",
+    "steps": [
+     "Run npx vitest run index",
+     "Deploy the fixture"
+    ],
+    "workdir": null,
+    "queued": [
+     {
+      "text": "then deploy it",
+      "at": 1793955937500
+     }
+    ],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": null,
+     "effort": null,
+     "contextTokens": null,
+     "lastAt": 1793955841500,
+     "said": null,
+     "doing": null,
+     "lastAsk": null,
+     "firstAsk": null,
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": null,
+     "effort": null,
+     "contextTokens": null,
+     "lastAt": 1793955922500,
+     "said": null,
+     "doing": null,
+     "lastAsk": "Rebuild the fixture index from scratch",
+     "firstAsk": "Rebuild the fixture index from scratch",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 153100,
+     "lastAt": 1793955939000,
+     "said": "Index rebuilt; testing.",
+     "doing": "Deploy the fixture",
+     "lastAsk": "Rebuild the fixture index from scratch",
+     "firstAsk": "Rebuild the fixture index from scratch",
+     "turnOver": false,
+     "running": {
+      "step": "Deploy the fixture",
+      "since": 1793955939000,
+      "tool": "Bash",
+      "cmd": "./deploy.sh fixture"
+     },
+     "limitHit": null,
+     "stage": "deploying",
+     "steps": [
+      "Run npx vitest run index",
+      "Deploy the fixture"
+     ],
+     "workdir": null,
+     "queued": [
+      {
+       "text": "then deploy it",
+       "at": 1793955937500
+      }
+     ],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "break-ask.jsonl",
+   "size": 10120,
+   "cuts": [
+    1874,
+    7191
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 8114,
+    "lastAt": null,
+    "said": null,
+    "doing": "Read g14.ts",
+    "lastAsk": "Now read the remaining fixtures",
+    "firstAsk": "Now read the remaining fixtures",
+    "turnOver": false,
+    "running": null,
+    "limitHit": null,
+    "stage": "planning",
+    "steps": [
+     "Read g7.ts",
+     "Read g8.ts",
+     "Read g9.ts",
+     "Read g10.ts",
+     "Read g11.ts",
+     "Read g12.ts",
+     "Read g13.ts",
+     "Read g14.ts"
+    ],
+    "workdir": "/tmp/fleet-transcript-fixture/src",
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 8100,
+     "lastAt": 1793955709500,
+     "said": "Old words nobody sees.",
+     "doing": "Read g0.ts",
+     "lastAsk": "Now read the remaining fixtures",
+     "firstAsk": "Now read the remaining fixtures",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read seen.ts",
+      "Search for x",
+      "Read g0.ts"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/src",
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 8109,
+     "lastAt": null,
+     "said": null,
+     "doing": "Read g9.ts",
+     "lastAsk": "Now read the remaining fixtures",
+     "firstAsk": "Now read the remaining fixtures",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read g2.ts",
+      "Read g3.ts",
+      "Read g4.ts",
+      "Read g5.ts",
+      "Read g6.ts",
+      "Read g7.ts",
+      "Read g8.ts",
+      "Read g9.ts"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/src",
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 8114,
+     "lastAt": null,
+     "said": null,
+     "doing": "Read g14.ts",
+     "lastAsk": "Now read the remaining fixtures",
+     "firstAsk": "Now read the remaining fixtures",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read g7.ts",
+      "Read g8.ts",
+      "Read g9.ts",
+      "Read g10.ts",
+      "Read g11.ts",
+      "Read g12.ts",
+      "Read g13.ts",
+      "Read g14.ts"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/src",
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "break-uses.jsonl",
+   "size": 10824,
+   "cuts": [
+    3494,
+    9471
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 8109,
+    "lastAt": 1793955708000,
+    "said": null,
+    "doing": "Read f9.ts",
+    "lastAsk": "keep going",
+    "firstAsk": "Read the whole fixture tree",
+    "turnOver": false,
+    "running": null,
+    "limitHit": null,
+    "stage": "planning",
+    "steps": [
+     "Read f2.ts",
+     "Read f3.ts",
+     "Read f4.ts",
+     "Read f5.ts",
+     "Read f6.ts",
+     "Read f7.ts",
+     "Read f8.ts",
+     "Read f9.ts"
+    ],
+    "workdir": null,
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 8102,
+     "lastAt": 1793955673500,
+     "said": "You have reached your session limit.",
+     "doing": "Read e2.ts",
+     "lastAsk": "Read the whole fixture tree",
+     "firstAsk": "Read the whole fixture tree",
+     "turnOver": false,
+     "running": null,
+     "limitHit": {
+      "text": "You have reached your session limit.",
+      "at": 1793955664500
+     },
+     "stage": "planning",
+     "steps": [
+      "Read early.ts",
+      "Read e0.ts",
+      "Read e1.ts",
+      "Read e2.ts"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/src",
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 8107,
+     "lastAt": 1793955702000,
+     "said": null,
+     "doing": "Read f7.ts",
+     "lastAsk": "keep going",
+     "firstAsk": "Read the whole fixture tree",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read f0.ts",
+      "Read f1.ts",
+      "Read f2.ts",
+      "Read f3.ts",
+      "Read f4.ts",
+      "Read f5.ts",
+      "Read f6.ts",
+      "Read f7.ts"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 8109,
+     "lastAt": 1793955708000,
+     "said": null,
+     "doing": "Read f9.ts",
+     "lastAsk": "keep going",
+     "firstAsk": "Read the whole fixture tree",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read f2.ts",
+      "Read f3.ts",
+      "Read f4.ts",
+      "Read f5.ts",
+      "Read f6.ts",
+      "Read f7.ts",
+      "Read f8.ts",
+      "Read f9.ts"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "empty-ask.jsonl",
+   "size": 1287,
+   "cuts": [
+    111,
+    567
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 7100,
+    "lastAt": 1793955763500,
+    "said": "Tidying.",
+    "doing": "Write notes.md",
+    "lastAsk": "",
+    "firstAsk": "Tidy the fixture notes",
+    "turnOver": false,
+    "running": {
+     "step": "Write notes.md",
+     "since": 1793955763500,
+     "tool": "Write",
+     "cmd": null
+    },
+    "limitHit": null,
+    "stage": "building",
+    "steps": [
+     "Write notes.md"
+    ],
+    "workdir": null,
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": null,
+     "effort": null,
+     "contextTokens": null,
+     "lastAt": null,
+     "said": null,
+     "doing": null,
+     "lastAsk": null,
+     "firstAsk": null,
+     "turnOver": null,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": null,
+     "effort": null,
+     "contextTokens": null,
+     "lastAt": 1793955759000,
+     "said": null,
+     "doing": null,
+     "lastAsk": "Tidy the fixture notes",
+     "firstAsk": "Tidy the fixture notes",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955763500,
+     "said": "Tidying.",
+     "doing": "Write notes.md",
+     "lastAsk": "",
+     "firstAsk": "Tidy the fixture notes",
+     "turnOver": false,
+     "running": {
+      "step": "Write notes.md",
+      "since": 1793955763500,
+      "tool": "Write",
+      "cmd": null
+     },
+     "limitHit": null,
+     "stage": "building",
+     "steps": [
+      "Write notes.md"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "head-cut.jsonl",
+   "size": 279775,
+   "cuts": [
+    106019,
+    160586
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 7100,
+    "lastAt": 1793955840000,
+    "said": "Seen from the tail.",
+    "doing": null,
+    "lastAsk": "The ask past the head",
+    "firstAsk": null,
+    "turnOver": true,
+    "running": null,
+    "limitHit": null,
+    "stage": null,
+    "steps": [],
+    "workdir": null,
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": null,
+     "effort": null,
+     "contextTokens": null,
+     "lastAt": 1793955804000,
+     "said": null,
+     "doing": null,
+     "lastAsk": null,
+     "firstAsk": null,
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": null,
+     "effort": null,
+     "contextTokens": null,
+     "lastAt": 1793955814500,
+     "said": null,
+     "doing": null,
+     "lastAsk": null,
+     "firstAsk": null,
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955840000,
+     "said": "Seen from the tail.",
+     "doing": null,
+     "lastAsk": "The ask past the head",
+     "firstAsk": null,
+     "turnOver": true,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "limit.jsonl",
+   "size": 2053,
+   "cuts": [
+    222,
+    1903
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 6200,
+    "lastAt": 1793955658500,
+    "said": "You've hit your weekly limit · resets 3pm",
+    "doing": "Run a command",
+    "lastAsk": "Ship the fixture release",
+    "firstAsk": "Ship the fixture release",
+    "turnOver": true,
+    "running": null,
+    "limitHit": {
+     "text": "You've hit your weekly limit · resets 3pm",
+     "at": 1793955658500
+    },
+    "stage": "promoting",
+    "steps": [
+     "Commit the fixture",
+     "Run gh pr create --fill"
+    ],
+    "workdir": null,
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": null,
+     "effort": null,
+     "contextTokens": null,
+     "lastAt": 1793955649500,
+     "said": null,
+     "doing": null,
+     "lastAsk": "Ship the fixture release",
+     "firstAsk": "Ship the fixture release",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": null,
+     "steps": [],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 6200,
+     "lastAt": 1793955657000,
+     "said": "No response requested.",
+     "doing": "Run a command",
+     "lastAsk": "Ship the fixture release",
+     "firstAsk": "Ship the fixture release",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "promoting",
+     "steps": [
+      "Commit the fixture",
+      "Run gh pr create --fill"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 6200,
+     "lastAt": 1793955658500,
+     "said": "You've hit your weekly limit · resets 3pm",
+     "doing": "Run a command",
+     "lastAsk": "Ship the fixture release",
+     "firstAsk": "Ship the fixture release",
+     "turnOver": true,
+     "running": null,
+     "limitHit": {
+      "text": "You've hit your weekly limit · resets 3pm",
+      "at": 1793955658500
+     },
+     "stage": "promoting",
+     "steps": [
+      "Commit the fixture",
+      "Run gh pr create --fill"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "running.jsonl",
+   "size": 4579,
+   "cuts": [
+    1356,
+    3811
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 5200,
+    "lastAt": 1793955625500,
+    "said": "Now the tests.",
+    "doing": "Run a command",
+    "lastAsk": "Add a retry to the fixture loader and run its tests",
+    "firstAsk": "Add a retry to the fixture loader and run its tests",
+    "turnOver": false,
+    "running": {
+     "step": "Run a command",
+     "since": 1793955625500,
+     "tool": "Bash",
+     "cmd": "npm test -- loader\necho done"
+    },
+    "limitHit": null,
+    "stage": "testing",
+    "steps": [
+     "Read loader.ts",
+     "Search for retry",
+     "Find **/*.test.ts",
+     "Edit loader.ts",
+     "Run npm test -- loader"
+    ],
+    "workdir": null,
+    "queued": [
+     {
+      "text": "one more thing",
+      "at": 1793955622500
+     }
+    ],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 3300,
+     "lastAt": 1793955607500,
+     "said": "I will look at the loader first.",
+     "doing": "Read loader.ts",
+     "lastAsk": "Add a retry to the fixture loader and run its tests",
+     "firstAsk": "Add a retry to the fixture loader and run its tests",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read loader.ts"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 4500,
+     "lastAt": 1793955621000,
+     "said": "I will look at the loader first.",
+     "doing": "Edit loader.ts",
+     "lastAsk": "Add a retry to the fixture loader and run its tests",
+     "firstAsk": "Add a retry to the fixture loader and run its tests",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "building",
+     "steps": [
+      "Read loader.ts",
+      "Search for retry",
+      "Find **/*.test.ts",
+      "Edit loader.ts"
+     ],
+     "workdir": null,
+     "queued": [
+      {
+       "text": "and the changelog",
+       "at": 1793955616500
+      }
+     ],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 5200,
+     "lastAt": 1793955625500,
+     "said": "Now the tests.",
+     "doing": "Run a command",
+     "lastAsk": "Add a retry to the fixture loader and run its tests",
+     "firstAsk": "Add a retry to the fixture loader and run its tests",
+     "turnOver": false,
+     "running": {
+      "step": "Run a command",
+      "since": 1793955625500,
+      "tool": "Bash",
+      "cmd": "npm test -- loader\necho done"
+     },
+     "limitHit": null,
+     "stage": "testing",
+     "steps": [
+      "Read loader.ts",
+      "Search for retry",
+      "Find **/*.test.ts",
+      "Edit loader.ts",
+      "Run npm test -- loader"
+     ],
+     "workdir": null,
+     "queued": [
+      {
+       "text": "one more thing",
+       "at": 1793955622500
+      }
+     ],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "turn-over.jsonl",
+   "size": 5623,
+   "cuts": [
+    2944,
+    4616
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 4700,
+    "lastAt": 1793955648000,
+    "said": "Done. 看板の移植は終わりました 🎉 Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, ",
+    "doing": "Asks: Keep the old lanes?",
+    "lastAsk": "Please re-run the fixture build",
+    "firstAsk": "(continued) Port the fixture board to the new layout.",
+    "turnOver": true,
+    "running": null,
+    "limitHit": null,
+    "stage": "testing",
+    "steps": [
+     "list cards (fixture board)",
+     "read page (Fixture Docs)",
+     "Read docs.example.test:8443",
+     "Read a web page",
+     "Use fixture-review",
+     "Add task: Check the 看板 layout",
+     "Asks: Keep the old lanes?"
+    ],
+    "workdir": null,
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 3600,
+     "lastAt": 1793955637500,
+     "said": "Picking up the port.",
+     "doing": "Read a web page",
+     "lastAsk": "Please re-run the fixture build",
+     "firstAsk": "(continued) Port the fixture board to the new layout.",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "list cards (fixture board)",
+      "read page (Fixture Docs)",
+      "Read docs.example.test:8443",
+      "Read a web page"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 4200,
+     "lastAt": 1793955645000,
+     "said": "Picking up the port.",
+     "doing": "Asks: Keep the old lanes?",
+     "lastAsk": "Please re-run the fixture build",
+     "firstAsk": "(continued) Port the fixture board to the new layout.",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "testing",
+     "steps": [
+      "list cards (fixture board)",
+      "read page (Fixture Docs)",
+      "Read docs.example.test:8443",
+      "Read a web page",
+      "Use fixture-review",
+      "Add task: Check the 看板 layout",
+      "Asks: Keep the old lanes?"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 4700,
+     "lastAt": 1793955648000,
+     "said": "Done. 看板の移植は終わりました 🎉 Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, Every lane now renders in the new layout, ",
+     "doing": "Asks: Keep the old lanes?",
+     "lastAsk": "Please re-run the fixture build",
+     "firstAsk": "(continued) Port the fixture board to the new layout.",
+     "turnOver": true,
+     "running": null,
+     "limitHit": null,
+     "stage": "testing",
+     "steps": [
+      "list cards (fixture board)",
+      "read page (Fixture Docs)",
+      "Read docs.example.test:8443",
+      "Read a web page",
+      "Use fixture-review",
+      "Add task: Check the 看板 layout",
+      "Asks: Keep the old lanes?"
+     ],
+     "workdir": null,
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "workdir-a.jsonl",
+   "size": 3067,
+   "cuts": [
+    737,
+    1252
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 7100,
+    "lastAt": 1793955775500,
+    "said": null,
+    "doing": "Run a command",
+    "lastAsk": "Fix the fixture worktree",
+    "firstAsk": "Fix the fixture worktree",
+    "turnOver": false,
+    "running": {
+     "step": "Run a command",
+     "since": 1793955775500,
+     "tool": "Bash",
+     "cmd": "cd relative/dir && ls"
+    },
+    "limitHit": null,
+    "stage": "building",
+    "steps": [
+     "Read a.ts",
+     "Build the worktree",
+     "Read settings.json",
+     "Read settings.json",
+     "Run ls -la",
+     "Search for x",
+     "Run cd relative/dir && ls"
+    ],
+    "workdir": "/tmp/fleet-transcript-fixture/wt2",
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955766500,
+     "said": null,
+     "doing": "Read a.ts",
+     "lastAsk": "Fix the fixture worktree",
+     "firstAsk": "Fix the fixture worktree",
+     "turnOver": false,
+     "running": {
+      "step": "Read a.ts",
+      "since": 1793955766500,
+      "tool": "Read",
+      "cmd": null
+     },
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read a.ts"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/src",
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955768000,
+     "said": null,
+     "doing": "Read a.ts",
+     "lastAsk": "Fix the fixture worktree",
+     "firstAsk": "Fix the fixture worktree",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Read a.ts"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/src",
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955775500,
+     "said": null,
+     "doing": "Run a command",
+     "lastAsk": "Fix the fixture worktree",
+     "firstAsk": "Fix the fixture worktree",
+     "turnOver": false,
+     "running": {
+      "step": "Run a command",
+      "since": 1793955775500,
+      "tool": "Bash",
+      "cmd": "cd relative/dir && ls"
+     },
+     "limitHit": null,
+     "stage": "building",
+     "steps": [
+      "Read a.ts",
+      "Build the worktree",
+      "Read settings.json",
+      "Read settings.json",
+      "Run ls -la",
+      "Search for x",
+      "Run cd relative/dir && ls"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/wt2",
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  },
+  {
+   "name": "workdir-b.jsonl",
+   "size": 2154,
+   "cuts": [
+    1139,
+    1771
+   ],
+   "whole": {
+    "model": "claude-fixture-1[1m]",
+    "effort": "high",
+    "contextTokens": 7100,
+    "lastAt": 1793955784500,
+    "said": null,
+    "doing": "Find *",
+    "lastAsk": "Check the fixture checkout",
+    "firstAsk": "Check the fixture checkout",
+    "turnOver": false,
+    "running": {
+     "step": "Find *",
+     "since": 1793955784500,
+     "tool": "Glob",
+     "cmd": null
+    },
+    "limitHit": null,
+    "stage": "building",
+    "steps": [
+     "Run cd /tmp/fleet-transcript-fixture && git status",
+     "Run git -C '/tmp/fleet-transcript-fixture/.claude/worktrees/wt1' log -1",
+     "Edit nb.ipynb",
+     "Find *"
+    ],
+    "workdir": "/tmp/fleet-transcript-fixture/.claude/worktrees/wt1",
+    "queued": [],
+    "writtenAt": 1793932000000
+   },
+   "chunks": [
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955780000,
+     "said": null,
+     "doing": "Run a command",
+     "lastAsk": "Check the fixture checkout",
+     "firstAsk": "Check the fixture checkout",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Run cd /tmp/fleet-transcript-fixture && git status"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture",
+     "queued": [],
+     "writtenAt": 1793932001000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955783000,
+     "said": null,
+     "doing": "Run a command",
+     "lastAsk": "Check the fixture checkout",
+     "firstAsk": "Check the fixture checkout",
+     "turnOver": false,
+     "running": null,
+     "limitHit": null,
+     "stage": "planning",
+     "steps": [
+      "Run cd /tmp/fleet-transcript-fixture && git status",
+      "Run git -C '/tmp/fleet-transcript-fixture/.claude/worktrees/wt1' log -1"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/.claude/worktrees/wt1",
+     "queued": [],
+     "writtenAt": 1793932002000
+    },
+    {
+     "model": "claude-fixture-1[1m]",
+     "effort": "high",
+     "contextTokens": 7100,
+     "lastAt": 1793955784500,
+     "said": null,
+     "doing": "Find *",
+     "lastAsk": "Check the fixture checkout",
+     "firstAsk": "Check the fixture checkout",
+     "turnOver": false,
+     "running": {
+      "step": "Find *",
+      "since": 1793955784500,
+      "tool": "Glob",
+      "cmd": null
+     },
+     "limitHit": null,
+     "stage": "building",
+     "steps": [
+      "Run cd /tmp/fleet-transcript-fixture && git status",
+      "Run git -C '/tmp/fleet-transcript-fixture/.claude/worktrees/wt1' log -1",
+      "Edit nb.ipynb",
+      "Find *"
+     ],
+     "workdir": "/tmp/fleet-transcript-fixture/.claude/worktrees/wt1",
+     "queued": [],
+     "writtenAt": 1793932003000
+    }
+   ]
+  }
+ ]
+}
