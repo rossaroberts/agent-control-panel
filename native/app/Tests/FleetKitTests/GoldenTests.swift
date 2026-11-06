@@ -123,10 +123,22 @@ private let goldenDir = URL(fileURLWithPath: #filePath)
     .appendingPathComponent("../../../crates/fleet-model/tests/golden")
     .standardizedFileURL
 
-private func golden(_ name: String) throws -> Data {
-    let text = try String(contentsOf: goldenDir.appendingPathComponent("\(name).hex"), encoding: .utf8)
-    let digits = text.filter { !$0.isWhitespace }.map { UInt8(String($0), radix: 16)! }
+private struct BadHex: Error, CustomStringConvertible {
+    let description: String
+}
+
+/// Hex, whitespace ignored. Malformed hex fails the case (throws) rather than crashing the run.
+func unhex(_ text: String) throws -> Data {
+    let digits = try text.filter { !$0.isWhitespace }.map { c -> UInt8 in
+        guard let d = UInt8(String(c), radix: 16) else { throw BadHex(description: "not a hex digit: \(c)") }
+        return d
+    }
+    guard digits.count % 2 == 0 else { throw BadHex(description: "an odd number of hex digits") }
     return Data(stride(from: 0, to: digits.count, by: 2).map { digits[$0] << 4 | digits[$0 + 1] })
+}
+
+private func golden(_ name: String) throws -> Data {
+    try unhex(try String(contentsOf: goldenDir.appendingPathComponent("\(name).hex"), encoding: .utf8))
 }
 
 private func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
@@ -153,7 +165,7 @@ private func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joi
     @Test(arguments: frames.map(\.name))
     func valueEncodesToItsGolden(name: String) throws {
         let (_, frame, client) = frames.first { $0.name == name }!
-        #expect(hex(frame.encode()) == hex(try golden(name)), "\(name)\(client ? " (client frame)" : ""): encoding moved")
+        #expect(hex(try frame.encode()) == hex(try golden(name)), "\(name)\(client ? " (client frame)" : ""): encoding moved")
     }
 
     @Test func clientFramesAreTheOnesTheBriefNames() {
@@ -167,7 +179,7 @@ private func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joi
     /// Error is variant 3 with one string.
     @Test func oldHelloDoesNotDecodeAndErrorKeepsItsShape() throws {
         #expect(throws: PostcardError.self) { try Frame.decode(Data([0x00, 0x01, 0x01, 0x05])) }
-        #expect(Frame.error(message: "ab").encode().dropFirst(4) == Data([0x03, 0x02, 0x61, 0x62]))
+        #expect(try Frame.error(message: "ab").encode().dropFirst(4) == Data([0x03, 0x02, 0x61, 0x62]))
     }
 
     @Test func malformedBodiesThrow() throws {
@@ -179,6 +191,38 @@ private func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joi
         #expect(throws: PostcardError.self) { try Frame.decode(Data([0x03, 0x02, 0xff, 0xfe])) }  // not UTF-8
         #expect(throws: PostcardError.self) { try Frame.decode(Data([0x07, 0xff, 0xff, 0xff, 0xff, 0x7f])) }  // u32 overflow
         #expect(throws: PostcardError.self) { try Frame.decode(Data([0x03, 0xff, 0xff, 0xff, 0xff, 0x0f])) }  // huge length
+        // A u16 past 65535: TermSize cols ff ff 04 (= 0x13fff).
+        #expect(throws: PostcardError.badVarint) { try Frame.decode(Data([0x06, 0x07, 0xff, 0xff, 0x04, 0x2b])) }
+        // A bool tag of 2: Session.live, read off a Delta built from the golden with that byte changed.
+        var delta = [UInt8](try golden("delta").dropFirst(4))
+        // variant 1, seq 2, upsert len 1; key 12 + 8 + 18; engine 1; name 1+1+11; cwd 1+1+14; state 1; reason 1+33.
+        let live = 4 + 38 + 1 + 13 + 16 + 1 + 34
+        #expect(delta[live] == 1, "the offset of `live` in delta.hex")
+        delta[live] = 2
+        #expect(throws: PostcardError.badBool(2)) { try Frame.decode(Data(delta)) }
+    }
+
+    /// A u64 varint is at most 10 bytes, and the 10th carries one bit (Snapshot.run here).
+    @Test func overlongU64Throws() {
+        let tenBytes: [UInt8] = Array(repeating: 0xff, count: 9)
+        #expect(throws: Never.self) { try Frame.decode(Data([0x01] + tenBytes + [0x01, 0x00, 0x00, 0x00])) }
+        #expect(throws: PostcardError.badVarint) { try Frame.decode(Data([0x01] + tenBytes + [0x02, 0x00, 0x00, 0x00])) }
+        #expect(throws: PostcardError.badVarint) { try Frame.decode(Data([0x01] + tenBytes + [0x81, 0x00, 0x00, 0x00, 0x00])) }
+    }
+
+    @Test func malformedHexFailsTheCaseNotTheRun() throws {
+        #expect(throws: (any Error).self) { try unhex("0g") }
+        #expect(throws: (any Error).self) { try unhex("abc") }
+        #expect(try unhex("0a 0B\n") == Data([0x0a, 0x0b]))
+    }
+
+    /// `wire.rs` `encode` refuses a body over MAX_FRAME; so does this.
+    @Test func aFrameOverMaxFrameDoesNotEncode() throws {
+        let past = Int(Frame.maxFrame) - 1 - 1 - 4 + 1  // variant, ref 0, a 4-byte length (2^26 needs 28 bits), one over
+        #expect(throws: PostcardError.frameTooLarge(Int(Frame.maxFrame) + 1)) {
+            try Frame.termOut(ref: 0, data: Data(count: past)).encode()
+        }
+        #expect(try Frame.termOut(ref: 0, data: Data(count: past - 1)).encode().count == Int(Frame.maxFrame) + 4)
     }
 
     @Test func varintsAndZigzagRoundTrip() throws {

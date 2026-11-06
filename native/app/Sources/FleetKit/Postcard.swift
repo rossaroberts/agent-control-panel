@@ -20,6 +20,8 @@ public enum PostcardError: Error, Equatable, Sendable {
     case badVariant(type: String, index: UInt32)
     /// Bytes left over after the frame.
     case trailingBytes(Int)
+    /// A frame body over `Frame.maxFrame` bytes, which no reader accepts (`wire.rs` `encode` refuses it too).
+    case frameTooLarge(Int)
 }
 
 /// Reads postcard values off the front of a byte buffer.
@@ -103,7 +105,8 @@ public struct PostcardReader {
     public mutating func vec<T>(_ read: (inout PostcardReader) throws -> T) throws -> [T] {
         let n = try length()
         var out: [T] = []
-        out.reserveCapacity(n)
+        // A length is checked against the bytes left, not against what its items take: reserve a little only.
+        out.reserveCapacity(min(n, 1024))
         for _ in 0..<n { out.append(try read(&self)) }
         return out
     }

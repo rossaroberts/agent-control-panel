@@ -11,7 +11,7 @@ private let now = Date(timeIntervalSince1970: 1_793_966_400)  // a fixed "now"
 private let nowMs = Int64(now.timeIntervalSince1970 * 1000)
 
 private func row(
-    _ sid: String, _ state: State, live: Bool = true, epic: String? = nil, lastAt: Int64? = nil,
+    _ sid: String, _ state: SessionState, live: Bool = true, epic: String? = nil, lastAt: Int64? = nil,
     startedAt: Int64? = nil, archived: Bool = false, machine: String = "fixture-mac"
 ) -> Session {
     Session(
@@ -133,7 +133,7 @@ private func ids(_ s: [Session]) -> [String] { s.map(\.key.sessionId) }
         row("n2", .needsYou, lastAt: minsAgo(60)),
         row("c1", .capped, epic: "Alpha", lastAt: minsAgo(120)),
         row("c2", .capped, epic: "Alpha", lastAt: nil, startedAt: minsAgo(5)),  // waits since its start (`since`)
-        // Not live, so not in Needs you: it stays in its epic, first by ORDER.
+        // Not live, so not in Needs you: it stays in its epic, under the live rows (fleet.html:2111), first by ORDER.
         row("nl", .needsYou, live: false, epic: "Alpha", lastAt: minsAgo(3)),
         row("a1", .working, epic: "Alpha", lastAt: minsAgo(5)),
         row("a2", .waiting, epic: "Alpha", lastAt: minsAgo(1)),
@@ -152,6 +152,9 @@ private func ids(_ s: [Session]) -> [String] { s.map(\.key.sessionId) }
         row("o2", .working, lastAt: minsAgo(40)),
         row("o3", .ended, live: false),  // no time known: not provably older than 48 h, so shown
         row("o4", .working, lastAt: minsAgo(40), machine: "fixture-mac-2"),  // ties with o2: by key
+        // Times off the wire at the edges of Int64: folding and sorting must not overflow.
+        row("o5", .ended, live: false, lastAt: .min),  // folded
+        row("o6", .done, live: false, lastAt: .max),  // "in the future": shown, newest first
     ]
 
     static func board() -> Board {
@@ -177,17 +180,18 @@ private func ids(_ s: [Session]) -> [String] { s.map(\.key.sessionId) }
         #expect(top.older.isEmpty)
     }
 
-    /// fleet.html:2098: by ORDER (:619 needs-you 0, working 1, capped 2, ready 3, closed 4: here done and ended), then
-    /// the most recent first (`lastAt ?? startedAt`). Plan 3 (Global Constraints) replaces :2113-2117's fold of every
+    /// fleet.html:2111 draws a group's live rows, and :2113-2117 its closed (not live) ones under them; within each,
+    /// :2098 orders by ORDER (:619 needs-you 0, working 1, capped 2, ready 3, closed 4: here done and ended), then the
+    /// most recent first (`lastAt ?? startedAt`). Plan 3 (Global Constraints) replaces :2113-2117's fold of every
     /// closed row: only done/ended rows older than 48 h are folded, behind the group's always-visible count.
     @Test func rowsFollowOrderThenMostRecentAndOldDoneEndedFold() {
         let groups = Self.board().groups(now: now)
         let alpha = groups[1], mine = groups[2], other = groups[3]
-        #expect(ids(alpha.rows) == ["nl", "a3", "a1", "a2", "a7", "a4"])
+        #expect(ids(alpha.rows) == ["a3", "a1", "a2", "a7", "nl", "a4"])
         #expect(ids(alpha.older) == ["a5", "a6"])
         #expect(mine.rows.isEmpty && ids(mine.older) == ["m1"])
-        #expect(ids(other.rows) == ["o2", "o4", "o1", "o3"])
-        #expect(other.older.isEmpty)
+        #expect(ids(other.rows) == ["o2", "o4", "o1", "o6", "o3"])
+        #expect(ids(other.older) == ["o5"])
     }
 
     @Test func archivedRowsAreNotShownAnywhere() {
@@ -217,7 +221,7 @@ private func ids(_ s: [Session]) -> [String] { s.map(\.key.sessionId) }
 
     /// fleet.html:620 `WORD`, with "closed" as done or ended (Global Constraints).
     @Test func stateWords() {
-        #expect([State.needsYou, .working, .capped, .waiting, .done, .ended, .unreachable].map(\.word) == [
+        #expect([SessionState.needsYou, .working, .capped, .waiting, .done, .ended, .unreachable].map(\.word) == [
             "needs you", "working", "at limit", "waiting", "done", "ended", "unreachable",
         ])
     }

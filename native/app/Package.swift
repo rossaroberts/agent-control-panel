@@ -13,8 +13,9 @@ let package = Package(
         .executable(name: "FleetApp", targets: ["FleetApp"]),
     ],
     dependencies: [
-        // v1.99.1, released 2026-10-21.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.99.1"),
+        // v1.19.0, released 2026-08-18: the newest release without swift-png in its graph (Ruling P3-R4; 1.99.x adds it,
+        // 1.20.0 is a prerelease).
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.19.0"),
     ],
     targets: [
         .target(name: "FleetKit"),

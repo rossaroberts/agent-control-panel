@@ -14,7 +14,7 @@ public enum BoardChange: Equatable, Sendable {
 }
 
 /// One section of the board.
-public struct Group: Equatable, Sendable, Identifiable {
+public struct BoardGroup: Equatable, Sendable, Identifiable {
     public enum Kind: Equatable, Sendable {
         /// Live sessions that need you or stopped at a limit, above every other group.
         case needsYou
@@ -36,7 +36,7 @@ public struct Group: Equatable, Sendable, Identifiable {
     public var id: String { "\(kind):\(name)" }
 }
 
-extension State {
+extension SessionState {
     /// The state as a word on the board: `fleet.html` `WORD` (line 620), "closed" being done or ended.
     public var word: String {
         switch self {
@@ -67,9 +67,10 @@ extension State {
 public final class Board: ObservableObject {
     @Published public private(set) var sessions: [SessionKey: Session] = [:]
     @Published public private(set) var meta = Meta()
-    /// The run of the last Snapshot, and the `seq` of the last frame applied: what `hello()` resumes from.
-    @Published public private(set) var run: UInt64?
-    @Published public private(set) var seq: UInt64?
+    /// The run of the last Snapshot, and the `seq` of the last frame applied: what `hello()` resumes from. Not
+    /// published: no view shows them, and a delta that changes no row then fires no `objectWillChange`.
+    public private(set) var run: UInt64?
+    public private(set) var seq: UInt64?
     /// The daemon's machine name, from the last Snapshot.
     @Published public private(set) var machine: String?
 
@@ -97,7 +98,7 @@ public final class Board: ObservableObject {
             sessions = Dictionary(list.map { ($0.key, $0) }, uniquingKeysWith: { _, last in last })
             self.run = run
             self.seq = seq
-            self.machine = machine
+            if self.machine != machine { self.machine = machine }
             return .applied
 
         case let .delta(d):
@@ -125,9 +126,9 @@ public final class Board: ObservableObject {
 
     /// The board as it is shown: Needs you, then the epics in `fleet.json` order, then the groups you made, then Other;
     /// a group with nothing in it is left out.
-    public func groups(now: Date) -> [Group] {
+    public func groups(now: Date) -> [BoardGroup] {
         let nowMs = Int64((now.timeIntervalSince1970 * 1000).rounded())
-        let foldMs = Int64(Self.foldAfter * 1000)
+        let cutoff = nowMs - Int64(Self.foldAfter * 1000)
         let list = sessions.values.filter { !$0.archived }
 
         // fleet.html:2087-2088: live and needing you or at a limit; needs-you first, then the longest wait
@@ -141,9 +142,9 @@ public final class Board: ObservableObject {
         let urgentKeys = Set(urgent.map(\.key))
 
         // fleet.html:2094: the epics, then the groups you made, then Other (each once).
-        var names: [(String, Group.Kind)] = []
+        var names: [(String, BoardGroup.Kind)] = []
         var seen: Set<String> = []
-        for (n, k) in meta.epics.map({ ($0, Group.Kind.epic) }) + meta.groups.map({ ($0, .user) }) + [("Other", .other)]
+        for (n, k) in meta.epics.map({ ($0, BoardGroup.Kind.epic) }) + meta.groups.map({ ($0, .user) }) + [("Other", .other)]
         where seen.insert(n).inserted {
             names.append((n, k))
         }
@@ -153,12 +154,14 @@ public final class Board: ObservableObject {
         var byGroup: [String: [Session]] = [:]
         for s in list where !urgentKeys.contains(s.key) { byGroup[groupOf(s), default: []].append(s) }
 
-        var out: [Group] = []
-        if !urgent.isEmpty { out.append(Group(name: "Needs you", kind: .needsYou, rows: urgent, older: [])) }
+        var out: [BoardGroup] = []
+        if !urgent.isEmpty { out.append(BoardGroup(name: "Needs you", kind: .needsYou, rows: urgent, older: [])) }
         for (name, kind) in names {
             guard let members = byGroup[name], !members.isEmpty else { continue }  // fleet.html:2099
-            // fleet.html:2098: by ORDER, then the most recent first (`lastAt ?? startedAt ?? since`).
+            // fleet.html:2098: by ORDER, then the most recent first (`lastAt ?? startedAt ?? since`); and the live
+            // rows above the rest (:2111 draws `shown.filter(x => x.live)`, :2113-2117 the closed ones under them).
             let sorted = members.sorted { a, b in
+                if a.live != b.live { return a.live }
                 if a.state.order != b.state.order { return a.state.order < b.state.order }
                 let (ta, tb) = (a.lastAt ?? a.startedAt ?? 0, b.lastAt ?? b.startedAt ?? 0)
                 return ta != tb ? ta > tb : keyOrder(a.key, b.key)
@@ -167,9 +170,10 @@ public final class Board: ObservableObject {
             // more than 48 h ago. A row with no time at all is not known to be old, so it shows.
             let folds = { (s: Session) -> Bool in
                 guard s.state == .done || s.state == .ended, let t = s.lastAt ?? s.startedAt else { return false }
-                return nowMs - t > foldMs
+                // `t` comes off the wire: compare without arithmetic on it, so no value of it can overflow.
+                return t < cutoff
             }
-            out.append(Group(name: name, kind: kind, rows: sorted.filter { !folds($0) }, older: sorted.filter(folds)))
+            out.append(BoardGroup(name: name, kind: kind, rows: sorted.filter { !folds($0) }, older: sorted.filter(folds)))
         }
         return out
     }

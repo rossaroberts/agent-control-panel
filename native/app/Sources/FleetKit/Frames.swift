@@ -9,7 +9,7 @@ public enum Engine: UInt32, Hashable, Sendable, CaseIterable {
     case claude, codex, muse
 }
 
-public enum State: UInt32, Hashable, Sendable, CaseIterable {
+public enum SessionState: UInt32, Hashable, Sendable, CaseIterable {
     case needsYou, working, waiting, capped, done, ended, unreachable
 }
 
@@ -36,7 +36,7 @@ public struct Session: Equatable, Sendable {
     public var engine: Engine
     public var name: String?
     public var cwd: String?
-    public var state: State
+    public var state: SessionState
     public var reason: String
     public var live: Bool
     public var pid: UInt32?
@@ -62,7 +62,7 @@ public struct Session: Equatable, Sendable {
     public var account: String?
 
     public init(
-        key: SessionKey, engine: Engine, name: String?, cwd: String?, state: State, reason: String, live: Bool,
+        key: SessionKey, engine: Engine, name: String?, cwd: String?, state: SessionState, reason: String, live: Bool,
         pid: UInt32?, stage: String?, model: String?, effort: String?, contextTokens: UInt64?, lastAt: Int64?,
         said: String?, doing: String?, lastAsk: String?, firstAsk: String?, startedAt: Int64?, hookAt: Int64?,
         writtenAt: Int64?, jobId: String?, title: String?, epic: String?, archived: Bool, account: String?
@@ -203,8 +203,10 @@ public enum Frame: Equatable, Sendable {
     }
 
     /// The frame as it goes on the wire, as `wire.rs` `encode`: a `u32` little-endian body length, then the body.
-    public func encode() -> Data {
+    /// Throws `PostcardError.frameTooLarge` for a body over `maxFrame`, as Rust does.
+    public func encode() throws -> Data {
         let body = body()
+        guard body.count <= Int(Self.maxFrame) else { throw PostcardError.frameTooLarge(body.count) }
         let n = UInt32(body.count)
         var out = Data(capacity: 4 + body.count)
         out.append(contentsOf: [UInt8(n & 0xff), UInt8(n >> 8 & 0xff), UInt8(n >> 16 & 0xff), UInt8(n >> 24)])
@@ -233,7 +235,7 @@ extension Postcard where Self: RawRepresentable, RawValue == UInt32 {
 }
 
 extension Engine: Postcard {}
-extension State: Postcard {}
+extension SessionState: Postcard {}
 extension Role: Postcard {}
 
 extension SessionKey: Postcard {
