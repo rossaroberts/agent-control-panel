@@ -100,7 +100,7 @@ fn head_line(f: &Path) -> Vec<u8> {
 }
 
 /// A thread you started: Codex also logs the agents it starts and its reviewer's passes, each as a thread of its own.
-fn is_yours(f: &Path) -> bool {
+pub fn is_yours(f: &Path) -> bool {
     let t = js::parse(&head_line(f));
     let src = t
         .as_ref()
@@ -650,6 +650,23 @@ impl RolloutTail {
             (self.meta, self.meta_read) = read_meta(&self.path);
         }
         Ok(took || self.reader.written_at != before)
+    }
+
+    /// The reconcile's read (Ruling R11): reads the file again from scratch when the bytes before the offset are no
+    /// longer the ones read there, else what was appended. Whether anything changed.
+    pub fn reconcile(&mut self) -> io::Result<bool> {
+        if self.reader.verify()? {
+            return self.advance();
+        }
+        let read = self.reader.bytes_read;
+        *self = RolloutTail::open(&self.path)?;
+        self.reader.bytes_read += read;
+        Ok(true)
+    }
+
+    /// The file this follows.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     fn feed(&mut self, bytes: &[u8]) -> bool {

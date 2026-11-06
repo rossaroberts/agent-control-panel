@@ -323,3 +323,43 @@ fn advance_reads_only_new_bytes() {
         Some("Rebuild the fixture index from scratch")
     );
 }
+
+/// Ruling R11: a file rewritten in place (same inode, not shorter) past the offset is invisible to `advance`, and caught by
+/// `reconcile`'s check of the bytes just before the offset.
+#[test]
+fn reconcile_catches_a_rewrite_in_place() {
+    let said = |text: &str, tokens: u64| {
+        format!(
+            "{}\n",
+            json!({"type":"assistant","timestamp":"2026-11-06T12:00:00.000Z",
+                   "message":{"model":"claude-fixture-2","stop_reason":"end_turn",
+                              "content":[{"type":"text","text":text}],"usage":{"input_tokens":tokens}}})
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("t.jsonl");
+    fs::write(&file, said("Before the rewrite.", 7)).unwrap();
+    let ino = fs::metadata(&file).unwrap().ino();
+    let mut t = Tail::open(&file).unwrap();
+    assert_eq!(t.summary().said.as_deref(), Some("Before the rewrite."));
+
+    // Same inode, same length, other words (and other bytes within the 64 before the offset).
+    let mut f = OpenOptions::new().write(true).open(&file).unwrap();
+    f.write_all(said("Rewrite in place!!!", 8).as_bytes())
+        .unwrap();
+    drop(f);
+    assert_eq!(fs::metadata(&file).unwrap().ino(), ino);
+    t.advance().unwrap();
+    assert_eq!(
+        t.summary().said.as_deref(),
+        Some("Before the rewrite."),
+        "advance alone cannot see it"
+    );
+    assert!(t.reconcile().unwrap());
+    assert_eq!(t.summary().said.as_deref(), Some("Rewrite in place!!!"));
+
+    // Unchanged: the reconcile reads nothing new and says so.
+    let read = t.bytes_read();
+    assert!(!t.reconcile().unwrap());
+    assert_eq!(t.bytes_read(), read);
+}

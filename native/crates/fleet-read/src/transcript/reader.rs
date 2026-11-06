@@ -33,7 +33,13 @@ pub(crate) struct LineReader {
     skip_line: bool,
     pub(crate) written_at: Option<i64>,
     pub(crate) bytes_read: u64,
+    /// The last bytes (at most `FINGERPRINT`) before `offset`, as read: a file rewritten in place past them since is
+    /// caught by `verify` (Ruling R11).
+    fingerprint: Vec<u8>,
 }
+
+/// How many bytes before the offset `verify` compares.
+const FINGERPRINT: usize = 64;
 
 /// What a first read took.
 pub(crate) struct First {
@@ -73,6 +79,7 @@ impl LineReader {
             skip_line: start > 0,
             written_at: meta.modified().ok().and_then(ms),
             bytes_read: 0,
+            fingerprint: Vec::new(),
         };
         // The head and the tail overlap in a file under tail + head: then one read of it all.
         let (head_bytes, body) = if start > 0 && start < head {
@@ -119,11 +126,34 @@ impl LineReader {
         }
     }
 
+    /// Whether the file still holds, just before the offset, the bytes read there: false when it was replaced, shrank, or
+    /// was rewritten in place (same inode, same or greater length), which `advance` alone cannot see. The owner then reads
+    /// it again from scratch.
+    pub(crate) fn verify(&self) -> io::Result<bool> {
+        let meta = fs::metadata(&self.path)?;
+        if meta.ino() != self.inode || meta.len() < self.offset {
+            return Ok(false);
+        }
+        let n = self.fingerprint.len() as u64;
+        if n == 0 {
+            return Ok(true);
+        }
+        let mut f = File::open(&self.path)?;
+        Ok(read_at(&mut f, self.offset - n, n)? == self.fingerprint)
+    }
+
     /// Takes in bytes read at the offset: calls `each(line, end)` for every line they complete, `end` the file offset
     /// just past its newline. Whether any non-empty line was taken in.
     pub(crate) fn feed(&mut self, bytes: &[u8], mut each: impl FnMut(&[u8], u64)) -> bool {
         let base = self.offset - self.partial.len() as u64; // where `data` starts in the file
         self.offset += bytes.len() as u64;
+        if bytes.len() >= FINGERPRINT {
+            self.fingerprint = bytes[bytes.len() - FINGERPRINT..].to_vec();
+        } else {
+            self.fingerprint.extend_from_slice(bytes);
+            let extra = self.fingerprint.len().saturating_sub(FINGERPRINT);
+            self.fingerprint.drain(..extra);
+        }
         let held = std::mem::take(&mut self.partial);
         let data: &[u8] = if held.is_empty() {
             bytes

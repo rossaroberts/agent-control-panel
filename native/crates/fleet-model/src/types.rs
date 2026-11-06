@@ -77,3 +77,12 @@ pub struct Session {
     pub hook_at: Option<i64>,
     pub written_at: Option<i64>,
 }
+
+/// What changed in the board since the previous delta: the sessions whose serialized form changed, and the sessions that
+/// are gone. `seq` numbers deltas one by one from 1; a snapshot carries the `seq` of the last delta it includes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Delta {
+    pub seq: u64,
+    pub upsert: Vec<Session>,
+    pub remove: Vec<SessionKey>,
+}

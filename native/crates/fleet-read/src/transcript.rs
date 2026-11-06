@@ -176,6 +176,26 @@ impl Tail {
         reader.feed(bytes, |l, end| scan.line(l, end, home))
     }
 
+    /// The reconcile's read (Ruling R11): first checks that the bytes before the offset are still the ones read there,
+    /// and reads the file again from scratch when they are not (rewritten in place), then reads what was appended.
+    /// Whether the summary or the facts changed.
+    pub fn reconcile(&mut self) -> io::Result<bool> {
+        if self.reader.verify()? {
+            return self.advance();
+        }
+        let before = (self.summary.clone(), self.reader.written_at);
+        let read = self.reader.bytes_read;
+        let path = self.reader.path().to_path_buf();
+        *self = Tail::open(&path)?;
+        self.reader.bytes_read += read;
+        Ok((&self.summary, self.reader.written_at) != (&before.0, before.1))
+    }
+
+    /// The file this follows.
+    pub fn path(&self) -> &Path {
+        self.reader.path()
+    }
+
     pub fn facts(&self) -> TailFacts {
         TailFacts {
             last_at: self.summary.last_at,

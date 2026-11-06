@@ -4,7 +4,17 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 fleet-model = { path = "../fleet-model" }
 fleet-read = { path = "../fleet-read" }
+libc = "0.2"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
