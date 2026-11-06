@@ -5,6 +5,7 @@
 pub mod kq;
 pub mod machine;
 pub mod procscan;
+pub mod reads;
 pub mod sessions;
 pub mod store;
 pub mod watch;

@@ -1,69 +1,45 @@
 //! What the daemon holds about each session between reads, and the one `Session` built from it: for Claude Code, the
-//! profile's last roster row, the transcript's `Tail`, the last hook event and the status-line snapshot, decided by
-//! `decide` (port of the session row `claudeProfile` builds in fleet/machine.mjs); for Codex, each rollout's
-//! `RolloutTail` and whether a running Codex holds it open; for Muse, its running processes.
+//! profile's last roster row, the transcript's last view, the last hook event and the status-line snapshot, decided by
+//! `decide` (port of the session row `claudeProfile` builds in fleet/machine.mjs); for Codex, each rollout's last view
+//! and whether a running Codex holds it open; for Muse, its running processes.
 //!
-//! The `Fleet` methods do no file I/O: they are what runs under the watcher's board lock. Reads happen before, unlocked
-//! (`read_hook_file`, `reconcile_read`, `Tail::open`), and come in as values. A tail sits behind its own lock, so it is
-//! advanced without the board. Two reads of one small file that race keep the newer one (`newer`): a slow read never
-//! overwrites what a faster one already put in.
+//! The `Fleet` methods do no file I/O and never wait on a tail's lock: they are what runs under the watcher's board
+//! lock. Reads happen before, without it (`reads.rs`, `reconcile_read`), and come in as values: a tail's facts and
+//! summary are published into the board as a numbered `Seen` view after each of its reads. Of two racing reads the
+//! older never replaces the newer.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fleet_model::decide::{decide, hh_mm_utc, RosterRow};
 use fleet_model::hook::hook_state;
 use fleet_model::types::{Engine, HookEvent, Session, SessionKey};
-use fleet_read::codex::{muse_session, recent_rollouts, RolloutTail, RECENT_CODEX_MS};
-use fleet_read::hookfile::read_hook;
+use fleet_read::codex::{muse_session, recent_rollouts, RolloutTail, RolloutView, RECENT_CODEX_MS};
 use fleet_read::profiles::Profile;
 use fleet_read::roster::{pid_alive, RosterError, RosterRead};
-use fleet_read::statusfile::{context_tokens, read_status, StatusSnap};
+use fleet_read::statusfile::{context_tokens, StatusSnap};
 use fleet_read::transcript::Tail;
+use std::sync::Arc;
 
 use crate::procscan::{MuseProc, Scan};
+pub use crate::reads::{
+    gone, hook_path, jobs_signature, new_rollout, new_tail, read_hook_file, read_hook_file_with,
+    read_status_file, sig_of, status_path, take, transcript_of, FileRead, Seen, SharedRollout,
+    SharedTail, Sig, TailView,
+};
 
 /// Rollouts followed at most from the recent list (`codexHome` slices to 60); logs a running Codex holds open come on top.
 const CODEX_RECENT: usize = 60;
-/// Files the hot path follows at most (kqueue fds): the live sessions' and the recently written ones', newest first.
+/// Files the hot path follows at most (kqueue fds), before the open-files limit has its say (`follow_cap`).
 pub const MAX_FOLLOWED: usize = 256;
 /// A closed session's transcript is still followed this long after its last write.
 const FOLLOW_RECENT_MS: i64 = 60 * 60_000;
 
-/// A followed file's tail behind its own lock, with the file's path readable without it.
-pub struct TailCell<T> {
-    path: PathBuf,
-    cell: Mutex<T>,
-}
-
-impl<T> TailCell<T> {
-    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, T>> {
-        self.cell.lock()
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-pub type SharedTail = Arc<TailCell<Tail>>;
-pub type SharedRollout = Arc<TailCell<RolloutTail>>;
-
-fn new_tail(t: Tail) -> SharedTail {
-    Arc::new(TailCell {
-        path: t.path().to_path_buf(),
-        cell: Mutex::new(t),
-    })
-}
-
-fn new_rollout(t: RolloutTail) -> SharedRollout {
-    Arc::new(TailCell {
-        path: t.path().to_path_buf(),
-        cell: Mutex::new(t),
-    })
+/// How many files to follow under an open-files soft limit: a quarter of it, at most `MAX_FOLLOWED`, so that following
+/// never takes the descriptors every other read needs.
+pub fn follow_cap(soft_limit: u64) -> usize {
+    (soft_limit / 4).min(MAX_FOLLOWED as u64) as usize
 }
 
 pub fn now_ms() -> i64 {
@@ -81,127 +57,13 @@ fn tilde(p: &str) -> String {
     }
 }
 
-/// Where a session's transcript is (`transcriptOf`): `projects/<its folder, every character but A-Za-z0-9 a dash>/<id>.jsonl`,
-/// else the first project folder that has `<id>.jsonl`. JS replaces per UTF-16 unit, so a character outside the BMP is
-/// two dashes.
-pub fn transcript_of(p: &Profile, session_id: &str, cwd: Option<&str>) -> Option<PathBuf> {
-    if session_id.is_empty() || session_id.contains('/') {
-        return None;
-    }
-    let root = p.dir.join("projects");
-    let file = format!("{session_id}.jsonl");
-    if let Some(cwd) = cwd {
-        let mut d = String::with_capacity(cwd.len());
-        for c in cwd.chars() {
-            if c.is_ascii_alphanumeric() {
-                d.push(c);
-            } else {
-                d.extend(std::iter::repeat_n('-', c.len_utf16()));
-            }
-        }
-        let f = root.join(d).join(&file);
-        if f.is_file() {
-            return Some(f);
-        }
-    }
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    dirs.sort();
-    dirs.into_iter()
-        .map(|d| d.join(&file))
-        .find(|f| f.is_file())
-}
-
-/// What `jobs/*/state.json` look like (name, modified, length): a change the watcher missed shows as a different one.
-pub fn jobs_signature(p: &Profile) -> Vec<(String, i128, u64)> {
-    let Ok(rd) = std::fs::read_dir(p.dir.join("jobs")) else {
-        return vec![];
-    };
-    let mut sig: Vec<(String, i128, u64)> = rd
-        .flatten()
-        .filter_map(|e| {
-            let s = sig_of(&e.path().join("state.json"))?;
-            Some((
-                e.file_name().to_string_lossy().into_owned(),
-                s.mtime_ns,
-                s.len,
-            ))
-        })
-        .collect();
-    sig.sort();
-    sig
-}
-
-// ---------------------------------------------------------------- small files
-
-/// Which version of a file a read saw: a file replaced by a rename has a new inode; one written in place a new time or
-/// length.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sig {
-    pub ino: u64,
-    pub len: u64,
-    pub mtime_ns: i128,
-}
-
-pub fn sig_of(f: &Path) -> Option<Sig> {
-    let m = std::fs::metadata(f).ok()?;
-    Some(Sig {
-        ino: m.ino(),
-        len: m.len(),
-        mtime_ns: m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
-    })
-}
-
-/// A read of a small file: the version seen (stat first, so a file replaced mid-read shows as changed next time) and
-/// what it said.
-#[derive(Clone, Debug)]
-pub struct FileRead<T> {
-    pub sig: Option<Sig>,
-    pub v: Option<T>,
-}
-
-pub fn hook_path(p: &Profile, sid: &str) -> PathBuf {
-    p.dir.join("fleet-state").join(format!("{sid}.json"))
-}
-
-pub fn status_path(p: &Profile, sid: &str) -> PathBuf {
-    p.dir.join("fleet-status").join(format!("{sid}.json"))
-}
-
-pub fn read_hook_file(p: &Profile, sid: &str) -> FileRead<HookEvent> {
-    let sig = sig_of(&hook_path(p, sid));
-    FileRead {
-        sig,
-        v: sig.and_then(|_| read_hook(p, sid)),
-    }
-}
-
-pub fn read_status_file(p: &Profile, sid: &str) -> FileRead<StatusSnap> {
-    let sig = sig_of(&status_path(p, sid));
-    FileRead {
-        sig,
-        v: sig.and_then(|_| read_status(p, sid)),
-    }
-}
-
-/// Whether a read of version `new` replaces what came from `old`: another version, not older than it. A file gone
-/// replaces anything.
-pub fn newer(old: Option<Sig>, new: Option<Sig>) -> bool {
-    match (old, new) {
-        (None, None) => false,
-        (Some(_), None) | (None, Some(_)) => true,
-        (Some(o), Some(n)) => n != o && n.mtime_ns >= o.mtime_ns,
-    }
-}
-
 // ---------------------------------------------------------------- the board
 
 pub struct ClaudeSession {
     pub row: RosterRow,
     pub tail: Option<SharedTail>,
+    /// What the tail last read (none without a tail).
+    pub view: Option<Seen<TailView>>,
     pub hook: Option<HookEvent>,
     pub hook_sig: Option<Sig>,
     pub status: Option<StatusSnap>,
@@ -216,6 +78,7 @@ impl ClaudeSession {
         ClaudeSession {
             row,
             tail: None,
+            view: None,
             hook: None,
             hook_sig: None,
             status: None,
@@ -225,21 +88,34 @@ impl ClaudeSession {
     }
 
     fn take_hook(&mut self, r: FileRead<HookEvent>) -> bool {
-        if !newer(self.hook_sig, r.sig) {
-            return false;
-        }
-        self.hook_sig = r.sig;
-        self.hook = r.v;
-        true
+        take(&mut self.hook, &mut self.hook_sig, r)
     }
 
     fn take_status(&mut self, r: FileRead<StatusSnap>) -> bool {
-        if !newer(self.status_sig, r.sig) {
-            return false;
+        take(&mut self.status, &mut self.status_sig, r)
+    }
+
+    fn set_tail(&mut self, t: (SharedTail, Seen<TailView>)) {
+        self.tail = Some(t.0);
+        self.view = Some(t.1);
+        self.no_transcript = None;
+    }
+
+    /// Takes a view of this session's tail `t`, if it is still the one followed and the view is newer.
+    fn take_view(&mut self, t: &SharedTail, seen: Seen<TailView>) -> bool {
+        let ours = self.tail.as_ref().is_some_and(|x| Arc::ptr_eq(x, t));
+        if ours && self.view.as_ref().is_none_or(|v| seen.gen > v.gen) {
+            self.view = Some(seen);
+            return true;
         }
-        self.status_sig = r.sig;
-        self.status = r.v;
-        true
+        false
+    }
+
+    fn drop_tail(&mut self, t: &SharedTail) {
+        if self.tail.as_ref().is_some_and(|x| Arc::ptr_eq(x, t)) {
+            self.tail = None;
+            self.view = None;
+        }
     }
 }
 
@@ -270,7 +146,7 @@ impl ProfileState {
 #[derive(Default)]
 pub struct CodexState {
     pub home: PathBuf,
-    pub tails: BTreeMap<PathBuf, SharedRollout>,
+    pub tails: BTreeMap<PathBuf, (SharedRollout, Seen<RolloutView>)>,
     /// The rollouts running Codex processes hold open, by the last scan that worked (Ruling R14).
     pub open: HashSet<PathBuf>,
 }
@@ -294,6 +170,8 @@ pub struct Fleet {
     pub muse_on: bool,
     /// The running Muse processes, by the last scan that worked.
     pub muse: Vec<MuseProc>,
+    /// Files the hot path follows at most (`follow_cap` of the open-files limit).
+    pub max_followed: usize,
 }
 
 impl Fleet {
@@ -307,6 +185,7 @@ impl Fleet {
             },
             muse_on: false,
             muse: vec![],
+            max_followed: MAX_FOLLOWED,
         }
     }
 
@@ -334,14 +213,14 @@ impl Fleet {
     pub fn claude_session(&self, pi: usize, sid: &str, now: i64) -> Option<Session> {
         let ps = &self.profiles[pi];
         let c = ps.sessions.get(sid)?;
-        let tail = c.tail.as_ref().map(|t| t.lock().unwrap());
-        let facts = tail.as_ref().map(|t| t.facts()).unwrap_or_default();
+        let view = c.view.as_ref().map(|v| &v.v);
+        let facts = view.map(|v| v.facts.clone()).unwrap_or_default();
         let (state, live, reason) = decide(&c.row, &facts, c.hook.as_ref(), now);
         let reason = match ps.stale_since {
             Some(at) => format!("roster stale since {}; {reason}", hh_mm_utc(at)),
             None => reason,
         };
-        let t = tail.as_ref().map(|t| t.summary());
+        let t = view.map(|v| &v.summary);
         let of =
             |f: fn(&fleet_read::transcript::TranscriptSummary) -> Option<String>| t.and_then(f);
         let model = of(|t| t.model.clone());
@@ -395,8 +274,8 @@ impl Fleet {
     pub fn codex_sessions(&self, now: i64) -> Vec<Session> {
         // One session per thread id: two logs of one thread show the newer.
         let mut by_id: BTreeMap<String, Session> = BTreeMap::new();
-        for (f, t) in &self.codex.tails {
-            let mut s = t.lock().unwrap().session(self.codex.open.contains(f), now);
+        for (f, (_, seen)) in &self.codex.tails {
+            let mut s = seen.v.session(self.codex.open.contains(f), now);
             s.key.machine = self.machine.clone();
             let newer = by_id
                 .get(&s.key.session_id)
@@ -448,35 +327,31 @@ impl Fleet {
     }
 
     /// The files the hot path should follow: each live or recently written session's transcript or rollout, newest
-    /// first, at most `MAX_FOLLOWED`.
+    /// first, at most `max_followed`.
     pub fn follows(&self, now: i64) -> Vec<PathBuf> {
-        // A tail busy being read (its lock held) counts as just written: it is not let go for being busy.
         let mut want: Vec<(i64, PathBuf)> = vec![];
         for ps in &self.profiles {
             for c in ps.sessions.values() {
-                let Some(t) = &c.tail else { continue };
-                let w = t
-                    .cell
-                    .try_lock()
-                    .map_or(now, |t| t.facts().written_at.unwrap_or(0));
+                let (Some(t), Some(v)) = (&c.tail, &c.view) else {
+                    continue;
+                };
+                let w = v.v.facts.written_at.unwrap_or(0);
                 let live = c.row.active || c.row.pid.is_some_and(|_| c.row.pid_alive);
                 if live || now - w < FOLLOW_RECENT_MS {
                     want.push((w, t.path().to_path_buf()));
                 }
             }
         }
-        for (f, t) in &self.codex.tails {
-            let (live, w) = t.cell.try_lock().map_or((true, now), |t| {
-                let s = t.session(self.codex.open.contains(f), now);
-                (s.live, s.written_at.unwrap_or(0))
-            });
-            if live || now - w < FOLLOW_RECENT_MS {
+        for (f, (_, seen)) in &self.codex.tails {
+            let s = seen.v.session(self.codex.open.contains(f), now);
+            let w = s.written_at.unwrap_or(0);
+            if s.live || now - w < FOLLOW_RECENT_MS {
                 want.push((w, f.clone()));
             }
         }
         want.sort_by_key(|w| std::cmp::Reverse(w.0));
         want.into_iter()
-            .take(MAX_FOLLOWED)
+            .take(self.max_followed)
             .map(|(_, f)| f)
             .collect()
     }
@@ -504,7 +379,7 @@ impl Fleet {
             return Hooked {
                 known: false,
                 changed: false,
-                moved: r.v.is_some(),
+                moved: r.value().is_some(),
             };
         };
         let before = c.hook.as_ref().and_then(hook_state);
@@ -536,23 +411,27 @@ impl Fleet {
     }
 
     /// Puts in a tail opened without the board, unless the session went or one came in meanwhile.
-    pub fn install_tail(&mut self, pi: usize, sid: &str, t: Tail) -> bool {
+    pub fn install_tail(&mut self, pi: usize, sid: &str, t: (SharedTail, Seen<TailView>)) -> bool {
         match self.profiles[pi].sessions.get_mut(sid) {
             Some(c) if c.tail.is_none() => {
-                c.tail = Some(new_tail(t));
-                c.no_transcript = None;
+                c.set_tail(t);
                 true
             }
             _ => false,
         }
     }
 
+    /// Takes the view a read of tail `t` published (only if `t` is still followed and the view is newer).
+    pub fn take_view(&mut self, pi: usize, sid: &str, t: &SharedTail, seen: Seen<TailView>) {
+        if let Some(c) = self.profiles[pi].sessions.get_mut(sid) {
+            c.take_view(t, seen);
+        }
+    }
+
     /// Lets go of a tail whose file is gone (only the one that failed: another may have come in since).
     pub fn drop_tail(&mut self, pi: usize, sid: &str, t: &SharedTail) {
         if let Some(c) = self.profiles[pi].sessions.get_mut(sid) {
-            if c.tail.as_ref().is_some_and(|x| Arc::ptr_eq(x, t)) {
-                c.tail = None;
-            }
+            c.drop_tail(t);
         }
     }
 
@@ -617,8 +496,7 @@ impl Fleet {
                 .unwrap_or_else(|| ClaudeSession::new(RosterRow::default()));
             if c.tail.is_none() {
                 if let Some(t) = got.opened.remove(&sid) {
-                    c.tail = Some(new_tail(t));
-                    c.no_transcript = None;
+                    c.set_tail(new_tail(t));
                 } else if got.missed.contains(&sid) {
                     c.no_transcript = Some(row.cwd.clone());
                 }
@@ -642,15 +520,29 @@ impl Fleet {
     }
 
     pub fn rollout(&self, f: &Path) -> Option<SharedRollout> {
-        self.codex.tails.get(f).cloned()
+        self.codex.tails.get(f).map(|(t, _)| t.clone())
     }
 
-    pub fn install_rollout(&mut self, f: PathBuf, t: RolloutTail) {
-        self.codex.tails.entry(f).or_insert_with(|| new_rollout(t));
+    pub fn install_rollout(&mut self, f: PathBuf, t: (SharedRollout, Seen<RolloutView>)) {
+        self.codex.tails.entry(f).or_insert(t);
+    }
+
+    /// Takes the view a read of rollout `t` published (only if `t` is still followed and the view is newer).
+    pub fn take_rollout_view(&mut self, f: &Path, t: &SharedRollout, seen: Seen<RolloutView>) {
+        if let Some((x, held)) = self.codex.tails.get_mut(f) {
+            if Arc::ptr_eq(x, t) && seen.gen > held.gen {
+                *held = seen;
+            }
+        }
     }
 
     pub fn drop_rollout(&mut self, f: &Path, t: &SharedRollout) {
-        if self.codex.tails.get(f).is_some_and(|x| Arc::ptr_eq(x, t)) {
+        if self
+            .codex
+            .tails
+            .get(f)
+            .is_some_and(|(x, _)| Arc::ptr_eq(x, t))
+        {
             self.codex.tails.remove(f);
         }
     }
@@ -686,7 +578,7 @@ impl Fleet {
         }
         for f in files {
             if let Ok(t) = RolloutTail::open(&f) {
-                self.install_rollout(f, t);
+                self.install_rollout(f, new_rollout(t));
             }
         }
     }
@@ -719,7 +611,7 @@ impl Fleet {
                 .codex
                 .tails
                 .iter()
-                .map(|(f, t)| (f.clone(), t.clone()))
+                .map(|(f, (t, _))| (f.clone(), t.clone()))
                 .collect(),
             codex_home: self.codex.home.clone(),
         }
@@ -745,23 +637,25 @@ impl Fleet {
                         c.row.pid_alive = alive;
                     }
                 }
-                if let Some(t) = &g.failed_tail {
-                    if c.tail.as_ref().is_some_and(|x| Arc::ptr_eq(x, t)) {
-                        c.tail = None;
+                match g.tail {
+                    Some((t, TailRead::Gone)) => c.drop_tail(&t),
+                    Some((t, TailRead::Seen(seen))) => {
+                        c.take_view(&t, *seen);
                     }
+                    None => {}
                 }
                 match g.looked {
-                    Some(Some(t)) if c.tail.is_none() => {
-                        c.tail = Some(new_tail(t));
-                        c.no_transcript = None;
-                    }
-                    Some(None) if c.tail.is_none() => c.no_transcript = Some(g.cwd),
+                    Look::Found(t) if c.tail.is_none() => c.set_tail(*t),
+                    Look::Missed if c.tail.is_none() => c.no_transcript = Some(g.cwd),
                     _ => {}
                 }
             }
         }
         self.muse_on = got.muse_on;
         self.take_scan(got.scan);
+        for (f, t, seen) in got.rollout_views {
+            self.take_rollout_view(&f, &t, seen);
+        }
         for (f, t) in got.dropped_rollouts {
             self.drop_rollout(&f, &t);
         }
@@ -803,6 +697,22 @@ pub struct Plan {
     pub codex_home: PathBuf,
 }
 
+/// What the reconcile's read of a followed tail came to.
+pub enum TailRead {
+    /// Its file is gone: let go.
+    Gone,
+    /// Read (or failed for another reason, which proves nothing): its view after.
+    Seen(Box<Seen<TailView>>),
+}
+
+/// The reconcile's look for a transcript.
+pub enum Look {
+    NotLooked,
+    Found(Box<(SharedTail, Seen<TailView>)>),
+    /// There is none (a read that failed is not a miss).
+    Missed,
+}
+
 pub struct GotSession {
     sid: String,
     pid: Option<u32>,
@@ -810,9 +720,8 @@ pub struct GotSession {
     hook: FileRead<HookEvent>,
     status: FileRead<StatusSnap>,
     pid_alive: Option<bool>,
-    failed_tail: Option<SharedTail>,
-    /// `Some(found)` when a transcript was looked for.
-    looked: Option<Option<Tail>>,
+    tail: Option<(SharedTail, TailRead)>,
+    looked: Look,
 }
 
 pub struct GotProfile {
@@ -824,8 +733,9 @@ pub struct Reconciled {
     profiles: Vec<GotProfile>,
     scan: Option<Scan>,
     muse_on: bool,
+    rollout_views: Vec<(PathBuf, SharedRollout, Seen<RolloutView>)>,
     dropped_rollouts: Vec<(PathBuf, SharedRollout)>,
-    held: Vec<(PathBuf, RolloutTail)>,
+    held: Vec<(PathBuf, (SharedRollout, Seen<RolloutView>))>,
 }
 
 /// The reconcile's reads, files only (R4), with no board lock: each hook and status file, each pid's liveness, each
@@ -842,15 +752,24 @@ pub fn reconcile_read(plan: &Plan, scan: Option<Scan>, muse_on: bool, now: i64) 
                 .sessions
                 .iter()
                 .map(|s| {
-                    let failed_tail = s
-                        .tail
-                        .as_ref()
-                        .filter(|t| t.lock().unwrap().reconcile().is_err())
-                        .cloned();
-                    let looked = s.look.then(|| {
-                        transcript_of(&pp.profile, &s.sid, s.cwd.as_deref())
-                            .and_then(|f| Tail::open(&f).ok())
+                    let tail = s.tail.as_ref().map(|t| {
+                        let (r, seen) = t.run(|t| t.reconcile());
+                        let read = if gone(&r) {
+                            TailRead::Gone
+                        } else {
+                            TailRead::Seen(Box::new(seen))
+                        };
+                        (t.clone(), read)
                     });
+                    let looked = if !s.look {
+                        Look::NotLooked
+                    } else {
+                        match transcript_of(&pp.profile, &s.sid, s.cwd.as_deref()) {
+                            None => Look::Missed,
+                            Some(f) => Tail::open(&f)
+                                .map_or(Look::NotLooked, |t| Look::Found(Box::new(new_tail(t)))),
+                        }
+                    };
                     GotSession {
                         sid: s.sid.clone(),
                         pid: s.pid,
@@ -858,7 +777,7 @@ pub fn reconcile_read(plan: &Plan, scan: Option<Scan>, muse_on: bool, now: i64) 
                         hook: read_hook_file(&pp.profile, &s.sid),
                         status: read_status_file(&pp.profile, &s.sid),
                         pid_alive: s.pid.map(pid_alive),
-                        failed_tail,
+                        tail,
                         looked,
                     }
                 })
@@ -867,16 +786,18 @@ pub fn reconcile_read(plan: &Plan, scan: Option<Scan>, muse_on: bool, now: i64) 
         .collect();
     let open = scan.as_ref().map(|s| &s.codex_open);
     let mut dropped_rollouts = vec![];
+    let mut rollout_views = vec![];
     for (f, t) in &plan.rollouts {
-        let mut g = t.lock().unwrap();
         let held = open.is_some_and(|o| o.contains(f));
-        let keep = g.reconcile().is_ok()
-            && (held
-                || g.session(false, now)
-                    .written_at
-                    .is_some_and(|w| now - w < RECENT_CODEX_MS));
-        if !keep {
+        let (r, seen) = t.run(|t| t.reconcile());
+        let recent = seen
+            .v
+            .written_at()
+            .is_some_and(|w| now - w < RECENT_CODEX_MS);
+        if gone(&r) || !(held || recent) {
             dropped_rollouts.push((f.clone(), t.clone()));
+        } else {
+            rollout_views.push((f.clone(), t.clone(), seen));
         }
     }
     let tracked: HashSet<&PathBuf> = plan.rollouts.iter().map(|(f, _)| f).collect();
@@ -885,12 +806,13 @@ pub fn reconcile_read(plan: &Plan, scan: Option<Scan>, muse_on: bool, now: i64) 
         .into_iter()
         .flatten()
         .filter(|f| f.starts_with(&sessions) && !tracked.contains(f))
-        .filter_map(|f| Some((f.clone(), RolloutTail::open(f).ok()?)))
+        .filter_map(|f| Some((f.clone(), new_rollout(RolloutTail::open(f).ok()?))))
         .collect();
     Reconciled {
         profiles,
         scan,
         muse_on,
+        rollout_views,
         dropped_rollouts,
         held,
     }

@@ -7,12 +7,13 @@ use serde_json::Value;
 use crate::json::read_json;
 use crate::profiles::Profile;
 
-const MAX_BYTES: u64 = 64 * 1024;
+pub const MAX_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusSnap {
-    /// Epoch ms it was written.
-    pub at: i64,
+    /// Epoch ms it was written; `None` when the file says nothing usable (then it is never fresh, as Node's
+    /// `undefined >= x` is false).
+    pub at: Option<i64>,
     pub model: Option<String>,
     /// `context_window.context_window_size`.
     pub window: Option<u64>,
@@ -24,12 +25,7 @@ pub struct StatusSnap {
 
 /// The snapshot of a session, or `None`: a bad id, no file, one over 64 KiB, not JSON, or naming another session.
 pub fn read_status(p: &Profile, session_id: &str) -> Option<StatusSnap> {
-    if session_id.is_empty()
-        || session_id.len() > 80
-        || !session_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
+    if !valid_id(session_id) {
         return None;
     }
     let d: Value = read_json(
@@ -38,6 +34,26 @@ pub fn read_status(p: &Profile, session_id: &str) -> Option<StatusSnap> {
             .join(format!("{session_id}.json")),
         MAX_BYTES,
     )?;
+    snap_of(session_id, &d)
+}
+
+/// A status file's bytes as a snapshot of `session_id`, or `None`: over 64 KiB, not JSON, or naming another session.
+pub fn parse_status(session_id: &str, bytes: &[u8]) -> Option<StatusSnap> {
+    if bytes.len() as u64 > MAX_BYTES || !valid_id(session_id) {
+        return None;
+    }
+    snap_of(session_id, &serde_json::from_slice(bytes).ok()?)
+}
+
+/// statusline.mjs's own test: `^[\w-]{8,80}$`.
+fn valid_id(session_id: &str) -> bool {
+    (8..=80).contains(&session_id.len())
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn snap_of(session_id: &str, d: &Value) -> Option<StatusSnap> {
     if d.get("session_id")?.as_str()? != session_id {
         return None;
     }
@@ -53,7 +69,7 @@ pub fn read_status(p: &Profile, session_id: &str) -> Option<StatusSnap> {
             .max(0.0) as u64
         });
     Some(StatusSnap {
-        at: d.get("at").and_then(Value::as_f64).unwrap_or(0.0) as i64,
+        at: d.get("at").and_then(Value::as_f64).map(|n| n as i64),
         model: d
             .get("model")
             .and_then(|m| m.get("id"))
@@ -98,7 +114,7 @@ pub fn context_tokens(
     });
     let fresh = match (sl, sl_tokens) {
         (Some(s), Some(n)) => {
-            s.at >= transcript_last_at.unwrap_or(0) - 60_000
+            s.at.is_some_and(|at| at >= transcript_last_at.unwrap_or(0) - 60_000)
                 && (n > 0 || transcript_tokens.unwrap_or(0) == 0)
         }
         _ => false,

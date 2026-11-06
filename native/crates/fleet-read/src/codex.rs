@@ -332,7 +332,7 @@ struct Scan {
 }
 
 /// What `readRollout` makes of the scan.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Replayed {
     last_at: Option<i64>,
     last_ask: Option<String>,
@@ -679,6 +679,17 @@ impl RolloutTail {
         self.reader.bytes_read
     }
 
+    /// What the scan says now, as a value: `view().session(open, now)` is `session(open, now)`, without the tail.
+    pub fn view(&self) -> RolloutView {
+        RolloutView {
+            path: self.path.clone(),
+            r: self.scan.replay(),
+            meta: self.meta.clone(),
+            written: self.reader.written_at,
+            first_ask: self.scan.first_ask.clone(),
+        }
+    }
+
     /// The session as of `now` (epoch milliseconds). `open`: a running Codex holds this rollout open.
     ///
     /// Open while a running Codex holds its log, else while it was written in the last ten minutes; a question to you stays
@@ -689,9 +700,39 @@ impl RolloutTail {
     /// Node, with no process scan at all (`open` null), counts an exec thread as still open; here `open == false` is "the
     /// scan ran and found it free", the only case the process scan of this port produces.
     pub fn session(&self, open: bool, now: i64) -> Session {
-        let r = self.scan.replay();
+        self.view().session(open, now)
+    }
+}
+
+/// A rollout's facts as of its last read, held apart from the tail (so a reader need not wait on the tail's lock).
+#[derive(Clone, Debug)]
+pub struct RolloutView {
+    path: PathBuf,
+    r: Replayed,
+    meta: Meta,
+    written: Option<i64>,
+    first_ask: Option<String>,
+}
+
+impl RolloutView {
+    /// When the log was last written (epoch ms).
+    pub fn written_at(&self) -> Option<i64> {
+        self.written
+    }
+
+    /// The session as of `now` (epoch milliseconds). `open`: a running Codex holds this rollout open.
+    ///
+    /// Open while a running Codex holds its log, else while it was written in the last ten minutes; a question to you stays
+    /// up until answered, up to three days. A thread the panel started (`codex exec`, one turn) is over once its process
+    /// has let go of its log. Closed is `Done · finished` when its last record is a finished turn, else
+    /// `Ended · ended, reason unknown`: a reason is never guessed.
+    ///
+    /// Node, with no process scan at all (`open` null), counts an exec thread as still open; here `open == false` is "the
+    /// scan ran and found it free", the only case the process scan of this port produces.
+    pub fn session(&self, open: bool, now: i64) -> Session {
+        let r = self.r.clone();
         let m = &self.meta;
-        let written = self.reader.written_at;
+        let written = self.written;
         let age = now - written.unwrap_or(0);
         let exited = m.source.as_deref() == Some("exec") && !open;
         let live =
@@ -744,8 +785,8 @@ impl RolloutTail {
             last_at: r.last_at.or(written),
             said: r.said,
             doing: r.doing,
-            last_ask: r.last_ask.or_else(|| self.scan.first_ask.clone()),
-            first_ask: self.scan.first_ask.clone(),
+            last_ask: r.last_ask.or_else(|| self.first_ask.clone()),
+            first_ask: self.first_ask.clone(),
             started_at: m.started_at,
             hook_at: None,
             written_at: written,

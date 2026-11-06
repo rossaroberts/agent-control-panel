@@ -20,9 +20,17 @@
 //!   liveness, the jobs' records, the process scan: Codex's open logs and Muse) and emits only real differences; every 5
 //!   minutes it also re-reads each roster (R4).
 //!
-//! The board (`Fleet`) sits behind one lock, held only to look up handles and to merge values read before and to write
-//! the store: no file is read under it (a tail is advanced under its own lock), so neither a roster run nor a reconcile
-//! pass holds up a hook event.
+//! The board (`Fleet`) sits behind one lock, held only to look up handles, to merge values read before and to write the
+//! store. Once `watch_with` returns, no file is read and no tail's lock is waited on while it is held: a tail is read
+//! under its own lock and publishes its view into the board after, and every other read (hooks, status files, the
+//! jobs' signature, transcript lookups, the process scan) is done before taking it. So neither a roster run, a
+//! reconcile pass nor a slow tail holds up a hook event. The one exception is the first read inside `watch_with`
+//! (the recent Codex logs), made under the lock before any other thread of the watcher runs.
+//!
+//! A read that fails for any reason but "no such file" (too many open files, permissions) proves nothing: what is held
+//! from it stays (`reads::FileRead::Failed`, `reads::gone`), and a transcript that could not be opened is not
+//! remembered as missing. The soft open-files limit is raised at start, and the files followed are capped at a
+//! quarter of it.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -42,8 +50,8 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use crate::machine::machine_name;
 use crate::procscan::scan;
 use crate::sessions::{
-    jobs_signature, now_ms, read_hook_file, read_status_file, reconcile_read, sig_of,
-    transcript_of, Fleet, RosterGot,
+    follow_cap, gone, jobs_signature, new_rollout, new_tail, now_ms, read_hook_file,
+    read_status_file, reconcile_read, sig_of, transcript_of, Fleet, RosterGot,
 };
 use crate::store::Store;
 
@@ -127,6 +135,29 @@ impl WatchHandle {
         self.shared.scan_runs.load(Ordering::SeqCst)
     }
 
+    /// Test seam: holds the lock of a session's tail for `d` on a thread of its own, as a slow read would. Whether the
+    /// session has a tail.
+    #[doc(hidden)]
+    pub fn hold_tail(&self, profile: &str, sid: &str, d: Duration) -> bool {
+        let t = {
+            let f = self.shared.fleet.lock().unwrap();
+            f.profiles
+                .iter()
+                .find(|p| p.profile.id == profile)
+                .and_then(|p| p.sessions.get(sid))
+                .and_then(|c| c.tail.clone())
+        };
+        let Some(t) = t else { return false };
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(());
+            t.hold(d);
+        });
+        let _ = rx.recv();
+        thread::sleep(Duration::from_millis(5)); // let it take the lock
+        true
+    }
+
     /// Files the hot path follows now.
     pub fn followed(&self) -> usize {
         #[cfg(target_os = "macos")]
@@ -164,6 +195,34 @@ impl Drop for WatchHandle {
     }
 }
 
+/// Raises the soft open-files limit to `min(hard, 8192)` (launchd starts a daemon at 256): every followed file holds a
+/// descriptor, and the reads the board depends on need their own. The soft and hard limits in force after.
+pub fn raise_open_files() -> (u64, u64) {
+    let mut r = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `r` is a plain struct the call fills.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 {
+        return (MAX_FOLLOWED_FALLBACK, MAX_FOLLOWED_FALLBACK);
+    }
+    let want = r.rlim_max.min(8192);
+    if r.rlim_cur < want {
+        let up = libc::rlimit {
+            rlim_cur: want,
+            rlim_max: r.rlim_max,
+        };
+        // SAFETY: as above; a refusal leaves the limit as it was.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &up) } == 0 {
+            r.rlim_cur = want;
+        }
+    }
+    (r.rlim_cur, r.rlim_max)
+}
+
+/// The limit assumed when it cannot be read: launchd's default.
+const MAX_FOLLOWED_FALLBACK: u64 = 256;
+
 pub fn watch(home: &Path, store: Arc<Store>) -> io::Result<WatchHandle> {
     watch_with(home, store, Options::default())
 }
@@ -177,6 +236,17 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         .unwrap_or_else(|| machine_name(&fleet_read::home::home_dir()));
     let mut fleet = Fleet::new(machine, home.join(".codex"));
     fleet.muse_on = muse_installed(&home);
+    let (soft, hard) = raise_open_files();
+    fleet.max_followed = follow_cap(soft);
+    eprintln!(
+        "fleetd: open files limit {soft} (hard {}), following at most {} files",
+        if hard == libc::RLIM_INFINITY {
+            "unlimited".to_string()
+        } else {
+            hard.to_string()
+        },
+        fleet.max_followed
+    );
     let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
     let watcher = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
         if let Ok(ev) = ev {
@@ -498,19 +568,23 @@ fn on_transcripts(sh: &Arc<Shared>, items: Vec<(usize, String, PathBuf)>) {
             .collect()
     };
     let mut failed = vec![];
+    let mut views = vec![];
     let mut opened = vec![];
     let mut touched = vec![];
     for (tail, pi, sid, p) in looked {
         match tail {
             Some(t) => {
-                if t.lock().unwrap().advance().is_err() {
+                let (r, seen) = t.run(|t| t.advance());
+                if gone(&r) {
                     failed.push((pi, sid.clone(), t));
+                } else {
+                    views.push((pi, sid.clone(), t, seen));
                 }
                 touched.push((pi, sid));
             }
             None => {
                 if let Ok(t) = Tail::open(&p) {
-                    opened.push((pi, sid.clone(), p, t));
+                    opened.push((pi, sid.clone(), p, new_tail(t)));
                     touched.push((pi, sid));
                 }
             }
@@ -521,6 +595,9 @@ fn on_transcripts(sh: &Arc<Shared>, items: Vec<(usize, String, PathBuf)>) {
         let mut f = sh.fleet.lock().unwrap();
         for (pi, sid, t) in &failed {
             f.drop_tail(*pi, sid, t);
+        }
+        for (pi, sid, t, seen) in views {
+            f.take_view(pi, &sid, &t, seen);
         }
         for (pi, sid, p, t) in opened {
             if f.install_tail(pi, &sid, t) {
@@ -558,18 +635,22 @@ fn on_rollouts(sh: &Arc<Shared>, paths: Vec<PathBuf>) {
         )
     };
     let mut failed = vec![];
+    let mut views = vec![];
     let mut opened = vec![];
     for (t, p) in looked {
         match t {
             Some(t) => {
-                if t.lock().unwrap().advance().is_err() {
+                let (r, seen) = t.run(|t| t.advance());
+                if gone(&r) {
                     failed.push((p, t));
+                } else {
+                    views.push((p, t, seen));
                 }
             }
             None => {
                 if p.is_file() && is_yours(&p) {
                     if let Ok(t) = RolloutTail::open(&p) {
-                        opened.push((p, t));
+                        opened.push((p, new_rollout(t)));
                     }
                 }
             }
@@ -580,6 +661,9 @@ fn on_rollouts(sh: &Arc<Shared>, paths: Vec<PathBuf>) {
         let mut f = sh.fleet.lock().unwrap();
         for (p, t) in &failed {
             f.drop_rollout(p, t);
+        }
+        for (p, t, seen) in views {
+            f.take_rollout_view(&p, &t, seen);
         }
         for (p, t) in opened {
             follow.push(p.clone());
@@ -695,20 +779,21 @@ fn request(sh: &Arc<Shared>, job: Job) {
 /// file outside the lock, then the board updated.
 fn run_roster(sh: &Shared, pi: usize) {
     sh.roster_runs.fetch_add(1, Ordering::SeqCst);
-    let profile = {
-        let mut f = sh.fleet.lock().unwrap();
-        let ps = &mut f.profiles[pi];
-        ps.jobs_sig = jobs_signature(&ps.profile);
-        ps.profile.clone()
-    };
+    let profile = sh.fleet.lock().unwrap().profiles[pi].profile.clone();
+    // The jobs' records as this run starts, read without the board: the reconcile compares against it.
+    let jobs_sig = jobs_signature(&profile);
+    sh.fleet.lock().unwrap().profiles[pi].jobs_sig = jobs_sig;
     let read = sh.roster.read(&profile);
     let mut got = RosterGot::default();
     if let Ok(r) = &read {
         let need = sh.fleet.lock().unwrap().untailed(pi, r);
         for (sid, cwd) in need {
-            match transcript_of(&profile, &sid, cwd.as_deref()).and_then(|f| Tail::open(&f).ok()) {
-                Some(t) => {
-                    got.opened.insert(sid, t);
+            // Only "there is none" is remembered as a miss: a transcript that could not be opened is looked for again.
+            match transcript_of(&profile, &sid, cwd.as_deref()) {
+                Some(f) => {
+                    if let Ok(t) = Tail::open(&f) {
+                        got.opened.insert(sid, t);
+                    }
                 }
                 None => {
                     got.missed.insert(sid);
@@ -741,7 +826,7 @@ fn run_scan(sh: &Shared) {
     let new = sh.fleet.lock().unwrap().held_untracked(&found.codex_open);
     let opened: Vec<_> = new
         .into_iter()
-        .filter_map(|f| Some((f.clone(), RolloutTail::open(&f).ok()?)))
+        .filter_map(|f| Some((f.clone(), new_rollout(RolloutTail::open(&f).ok()?))))
         .collect();
     {
         let mut f = sh.fleet.lock().unwrap();

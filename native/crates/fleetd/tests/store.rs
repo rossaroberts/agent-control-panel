@@ -854,7 +854,7 @@ async fn a_running_muse_is_a_session() {
 fn context_prefers_a_fresh_status_line() {
     use fleet_read::statusfile::{context_tokens, StatusSnap};
     let sl = |at: i64, used: Option<u64>, pct: Option<f64>, window: Option<u64>| StatusSnap {
-        at,
+        at: Some(at),
         model: None,
         window,
         used_tokens: used,
@@ -912,4 +912,138 @@ fn context_prefers_a_fresh_status_line() {
         Some(40_000)
     );
     assert_eq!(context_tokens(None, t, Some(7), None), Some(7));
+    // P1: no `at` is never fresh (Node: `undefined >= x` is false), even with no transcript time.
+    let no_at = StatusSnap {
+        at: None,
+        ..sl(0, Some(5), None, None)
+    };
+    assert_eq!(context_tokens(Some(&no_at), None, Some(7), None), Some(7));
+    assert_eq!(context_tokens(Some(&no_at), None, None, None), None);
+}
+
+/// NB2: a tail whose lock is held by a slow read (500 ms) does not hold up a hook delta for its own session: the board
+/// never waits on a tail's lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hook_is_not_held_up_by_a_busy_tail() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    append(&home.transcript(0), &assistant("Reading the loader."));
+    let (_store, h, mut rx) = home.start();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drain(&mut rx, Duration::from_millis(100)).await;
+    assert!(h.hold_tail("default", &sid(0), Duration::from_millis(500)));
+    let t0 = Instant::now();
+    let at = home.hook(0, "UserPromptSubmit", None);
+    let (s, got) = wait_for(&mut rx, Duration::from_secs(2), |s| s.hook_at == Some(at))
+        .await
+        .expect("a hook delta");
+    let ms = got.duration_since(t0).as_secs_f64() * 1000.0;
+    eprintln!("hook beside a busy tail -> delta: {ms:.2} ms");
+    assert_eq!(s.state, State::Working);
+    assert_eq!(
+        s.said.as_deref(),
+        Some("Reading the loader."),
+        "the tail's last facts still"
+    );
+    assert!(ms < 50.0, "{ms:.2} ms");
+}
+
+/// NB1 (c): a hook file that cannot be read (here: too many open files) keeps the hook held; only a file that is gone
+/// clears it.
+#[test]
+fn a_failed_hook_read_keeps_the_last_hook() {
+    use fleet_model::decide::RosterRow;
+    use fleet_read::profiles::Profile;
+    use fleet_read::roster::RosterRead;
+    use fleetd::sessions::{read_hook_file, read_hook_file_with, Fleet, RosterGot};
+    let dir = tempfile::tempdir().unwrap();
+    let pdir = dir.path().join(".claude");
+    fs::create_dir_all(pdir.join("fleet-state")).unwrap();
+    let p = Profile {
+        id: "default".into(),
+        dir: pdir.clone(),
+        plain: true,
+        config: dir.path().join(".claude.json"),
+    };
+    let mut f = Fleet::new("fixture-mac".into(), dir.path().join(".codex"));
+    f.add_profiles(vec![p.clone()]);
+    let row = RosterRow {
+        session_id: Some(sid(0)),
+        pid: Some(std::process::id()),
+        pid_alive: true,
+        status: Some("idle".into()),
+        ..RosterRow::default()
+    };
+    let read = RosterRead {
+        rows: vec![row],
+        active_known: true,
+    };
+    f.apply_roster(0, Ok(read), RosterGot::default(), now_ms());
+    let hook = |at: i64| {
+        fs::write(
+            pdir.join("fleet-state/.t"),
+            json!({"e": "UserPromptSubmit", "at": at}).to_string(),
+        )
+        .unwrap();
+        fs::rename(
+            pdir.join("fleet-state/.t"),
+            pdir.join(format!("fleet-state/{}.json", sid(0))),
+        )
+        .unwrap();
+    };
+    let (t1, t2) = (now_ms(), now_ms() + 1);
+    hook(t1);
+    f.merge_hook(0, &sid(0), read_hook_file(&p, &sid(0)));
+    assert_eq!(
+        f.claude_session(0, &sid(0), now_ms()).unwrap().hook_at,
+        Some(t1)
+    );
+
+    hook(t2);
+    let emfile = |_: &Path| -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+    };
+    f.merge_hook(0, &sid(0), read_hook_file_with(&p, &sid(0), &emfile));
+    let s = f.claude_session(0, &sid(0), now_ms()).unwrap();
+    assert_eq!(s.hook_at, Some(t1), "a failed read keeps what was held");
+    assert_eq!(s.state, State::Working);
+    // The next good read still takes the new version.
+    f.merge_hook(0, &sid(0), read_hook_file(&p, &sid(0)));
+    assert_eq!(
+        f.claude_session(0, &sid(0), now_ms()).unwrap().hook_at,
+        Some(t2)
+    );
+    // Gone clears it.
+    fs::remove_file(pdir.join(format!("fleet-state/{}.json", sid(0)))).unwrap();
+    f.merge_hook(0, &sid(0), read_hook_file(&p, &sid(0)));
+    assert_eq!(
+        f.claude_session(0, &sid(0), now_ms()).unwrap().hook_at,
+        None
+    );
+}
+
+/// NB1 (a, b): launchd's 256 soft limit is raised to min(hard, 8192), and the files followed are a quarter of what is
+/// obtained, at most 256.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_open_files_limit_is_raised_and_bounds_the_follows() {
+    use fleetd::sessions::follow_cap;
+    use fleetd::watch::raise_open_files;
+    let _g = SERIAL.lock().await;
+    let mut was = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut was) }, 0);
+    let low = libc::rlimit {
+        rlim_cur: 256,
+        rlim_max: was.rlim_max,
+    };
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &low) }, 0);
+    let (soft, hard) = raise_open_files();
+    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &was) };
+    assert_eq!(hard, was.rlim_max);
+    assert_eq!(soft, was.rlim_max.min(8192));
+    assert_eq!(follow_cap(256), 64);
+    assert_eq!(follow_cap(100), 25);
+    assert_eq!(follow_cap(8192), 256);
 }
