@@ -293,6 +293,9 @@ struct Kept {
 
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
+#[cfg(test)]
+type GapHook = Box<dyn Fn(&Auth, IpAddr) + Send + Sync>;
+
 /// The decision: who may talk to this daemon over TCP.
 pub struct Auth {
     key: Option<[u8; 32]>,
@@ -310,6 +313,9 @@ pub struct Auth {
     range_any: bool,
     /// The tests' switch: no address counts as this machine's own, so a loopback connection can stand in for a peer.
     nothing_local: bool,
+    /// The tests' hook, run in `tailnet()` right after a kept allow is read: where a re-check's revoke could land.
+    #[cfg(test)]
+    gap: Mutex<Option<GapHook>>,
 }
 
 /// One connection in auth, counted until dropped.
@@ -338,6 +344,8 @@ impl Auth {
             clock: Arc::new(Instant::now),
             range_any: range_any(),
             nothing_local: false,
+            #[cfg(test)]
+            gap: Mutex::new(None),
         };
         if let Some(w) = &a.whois {
             match w.status() {
@@ -532,6 +540,9 @@ impl Auth {
             return Err("no tailscale CLI".into());
         }
         let now = (self.clock)();
+        // A kept allow is joined to its IP's revocation while `kept` is still held: a re-check removes the entry under
+        // `kept` and revokes only after letting go of it, so this connection either sees no entry or is subscribed
+        // before that revoke. (Lock order: `kept`, then `revokers`; `revoke` takes `revokers` alone.)
         let recheck = {
             let mut kept = self.kept.lock().unwrap();
             match kept.get_mut(&IpAddr::V4(ip)) {
@@ -543,17 +554,20 @@ impl Auth {
                     if stale {
                         k.rechecking = true;
                     }
-                    Some(stale)
+                    Some((stale, self.subscribe(IpAddr::V4(ip))))
                 }
                 _ => None,
             }
         };
+        #[cfg(test)]
+        if let Some(h) = self.gap.lock().unwrap().as_ref() {
+            h(self, IpAddr::V4(ip));
+        }
         match recheck {
-            Some(false) => Ok(Allowed {
-                revoked: Some(self.subscribe(IpAddr::V4(ip))),
+            Some((false, revoked)) => Ok(Allowed {
+                revoked: Some(revoked),
             }),
-            Some(true) => {
-                let revoked = self.subscribe(IpAddr::V4(ip));
+            Some((true, revoked)) => {
                 let me = self.clone();
                 tokio::spawn(async move {
                     let v = me.decide(peer).await;
@@ -590,7 +604,8 @@ impl Auth {
             }
             None => {
                 let v = self.decide(peer).await.map_err(Deny::why);
-                self.kept.lock().unwrap().insert(
+                let mut kept = self.kept.lock().unwrap();
+                kept.insert(
                     IpAddr::V4(ip),
                     Kept {
                         at: (self.clock)(),
@@ -598,6 +613,7 @@ impl Auth {
                         rechecking: false,
                     },
                 );
+                // Subscribed under the same lock as the insert, for the same reason as above.
                 v.map(|()| Allowed {
                     revoked: Some(self.subscribe(IpAddr::V4(ip))),
                 })
@@ -681,26 +697,39 @@ async fn blocking<T: Send + 'static>(
 
 /// The first `n` bytes the peer sent, left in the stream. `UnexpectedEof` if it closed first.
 /// Waits on the socket's readiness, never a timer: while fewer than `n` bytes are there, the peek reports `WouldBlock`,
-/// which clears the readiness, so the next wait is for more bytes to arrive.
+/// which clears the readiness, so the next wait is for more bytes to arrive. A peer that has shut its side (EOF, or
+/// read-closed readiness, which tokio never clears) with fewer than `n` bytes sent can send no more: `UnexpectedEof`
+/// at once, never a spin until the caller's time limit.
 async fn peek(stream: &TcpStream, n: usize) -> io::Result<Vec<u8>> {
     use std::os::fd::AsRawFd;
+    use tokio::io::Interest;
     let mut buf = vec![0u8; n];
     let fd = stream.as_raw_fd();
     loop {
-        stream.readable().await?;
-        let got = stream.try_io(tokio::io::Interest::READABLE, || {
+        let ready = stream.ready(Interest::READABLE).await?;
+        let mut short = 0;
+        let got = stream.try_io(Interest::READABLE, || {
             // SAFETY: a recv into our own buffer of `n` bytes on the stream's fd, which it keeps open.
             let k = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), n, libc::MSG_PEEK) };
             match k {
                 k if k < 0 => Err(io::Error::last_os_error()),
-                0 => Ok(0),
-                k if (k as usize) < n => Err(io::ErrorKind::WouldBlock.into()),
+                k if k > 0 && (k as usize) < n => {
+                    // Short: `WouldBlock` clears the readable readiness, so the next wait is for more bytes.
+                    short = k as usize;
+                    Err(io::ErrorKind::WouldBlock.into())
+                }
                 k => Ok(k as usize),
             }
         });
         match got {
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(_) => return Ok(buf),
+            // Short, and the peer has closed its side: what is here is all there will be.
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock && short > 0 && ready.is_read_closed() =>
+            {
+                return Err(io::ErrorKind::UnexpectedEof.into())
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e),
         }
@@ -1161,6 +1190,32 @@ mod tests {
             f => panic!("expected the refusal, got {f:?}"),
         }
         assert_eq!(s.whois_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A re-check's revoke landing between a connection's read of the kept allow and its subscription: the connection
+    /// must still be closed (it is subscribed under the same lock that read the allow). The hook plays the re-check task:
+    /// the entry goes, then the revoke, exactly as `tailnet()`'s task does them.
+    #[tokio::test]
+    async fn a_revoke_racing_a_kept_allow_still_closes_it() {
+        for stale in [false, true] {
+            let s = Arc::new(Stub {
+                nodes: vec![known([100, 101, 102, 1], 42, false)],
+                // The re-check (stale case) finds the node still fine: only the hook revokes.
+                ..Stub::new(&[42], 42, false)
+            });
+            let (now, clock) = mock_clock();
+            let a = Arc::new(Auth::new(None, Some(s.clone() as Arc<dyn WhoIs>)).with_clock(clock));
+            if stale {
+                *now.lock().unwrap() += Duration::from_secs(61);
+            }
+            *a.gap.lock().unwrap() = Some(Box::new(|a: &Auth, ip| {
+                a.kept.lock().unwrap().remove(&ip);
+                a.revoke(ip, "a tagged node");
+            }));
+            let r = a.tailnet(tailnet_peer(1)).await.unwrap();
+            let why = timeout(Duration::from_secs(1), r.revoked.unwrap().wait()).await;
+            assert_eq!(why.ok().as_deref(), Some("a tagged node"), "stale {stale}");
+        }
     }
 
     #[tokio::test]

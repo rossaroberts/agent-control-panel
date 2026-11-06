@@ -315,7 +315,9 @@ async fn board_of(sock: &Path, n: usize) {
 
 /// Reads frames from a raw stream until EOF; each frame, and whether the end was a clean EOF.
 fn frames_until_eof(s: &mut std::net::TcpStream) -> (Vec<Frame>, bool) {
-    s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    // macOS refuses the option (EINVAL) on a socket the server has already finished with: it is at EOF or reset then,
+    // and the read below says which.
+    let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
     let mut all = vec![];
     let clean = loop {
         let mut buf = [0u8; 4096];
@@ -711,5 +713,42 @@ fn a_burst_of_refusals_holds_at_most_the_cap() {
                 Frame::Error { .. }
             ));
         }
+    }
+}
+
+/// A peer that sends part of the preamble and then half-closes is refused at once, not spun on until the 10 s limit:
+/// 16 of them at once (the whole auth cap) are all answered well inside the time one spin would take.
+#[test]
+fn half_closed_preamble_is_refused_fast() {
+    let home = board_home(0);
+    let d = Daemon::start(home.path(), &["--listen", "loopback", "--port", "0"], &[]);
+    let addr = d.loopback();
+    for (n, part) in [(1usize, &b"FKE"[..]), (16, &b"FKEYabc"[..])] {
+        let t0 = Instant::now();
+        let mut peers: Vec<std::net::TcpStream> = (0..n)
+            .map(|_| {
+                let mut s = std::net::TcpStream::connect(&addr).unwrap();
+                s.write_all(part).unwrap();
+                s.shutdown(std::net::Shutdown::Write).unwrap();
+                s
+            })
+            .collect();
+        for s in &mut peers {
+            let (frames, _) = frames_until_eof(s);
+            assert!(
+                frames.len() <= 1
+                    && frames
+                        .iter()
+                        .all(|f| matches!(f, Frame::Error { message } if message.starts_with("not allowed"))),
+                "{frames:?}"
+            );
+        }
+        let took = t0.elapsed();
+        eprintln!("{n} half-closed peer(s) answered in {took:?}");
+        let budget = Duration::from_millis(if n == 1 { 100 } else { 500 });
+        assert!(
+            took < budget,
+            "{n} half-closed peer(s) answered in {took:?}"
+        );
     }
 }
