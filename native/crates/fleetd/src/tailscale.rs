@@ -17,6 +17,8 @@ pub struct Peer {
 /// A node `tailscale status --json` lists (this machine's own included): its addresses, its user, whether it is tagged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Known {
+    /// This machine's own node (`Self`).
+    pub is_self: bool,
     /// `OS` as the CLI says it (`iOS`, `macOS`, `linux`, ...), for the diagnostic listing.
     pub os: String,
     pub ips: Vec<IpAddr>,
@@ -114,15 +116,28 @@ impl Cli {
             .stderr(Stdio::piped())
             .spawn()?;
         let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+        // Both pipes drained at once, so a CLI that fills one while the other is read never stalls.
+        let (etx, erx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut e = vec![];
+            let _ = err.read_to_end(&mut e);
+            let _ = etx.send(e);
+        });
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut o = vec![];
-            let mut e = vec![];
             let _ = out.read_to_end(&mut o);
-            let _ = err.read_to_end(&mut e);
-            let _ = tx.send((o, e));
+            let _ = tx.send(o);
         });
-        let Ok((o, e)) = rx.recv_timeout(self.timeout) else {
+        let end = std::time::Instant::now() + self.timeout;
+        let got = rx.recv_timeout(self.timeout).ok().and_then(|o| {
+            Some((
+                o,
+                erx.recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+                    .ok()?,
+            ))
+        });
+        let Some((o, e)) = got else {
             let _ = child.kill();
             let _ = child.wait();
             return Err(io::Error::new(
@@ -148,8 +163,9 @@ fn parse_status(v: &serde_json::Value) -> io::Result<Status> {
         .pointer("/Self/UserID")
         .and_then(|u| u.as_u64())
         .ok_or_else(|| invalid("status --json has no Self.UserID".into()))?;
-    let node = |n: &serde_json::Value| -> Option<Known> {
+    let node = |n: &serde_json::Value, is_self: bool| -> Option<Known> {
         Some(Known {
+            is_self,
             os: n
                 .get("OS")
                 .and_then(|o| o.as_str())
@@ -168,9 +184,13 @@ fn parse_status(v: &serde_json::Value) -> io::Result<Status> {
                 .is_some_and(|t| !t.is_empty()),
         })
     };
-    let mut nodes: Vec<Known> = v.get("Self").and_then(node).into_iter().collect();
+    let mut nodes: Vec<Known> = v
+        .get("Self")
+        .and_then(|n| node(n, true))
+        .into_iter()
+        .collect();
     if let Some(peers) = v.get("Peer").and_then(|p| p.as_object()) {
-        nodes.extend(peers.values().filter_map(node));
+        nodes.extend(peers.values().filter_map(|n| node(n, false)));
     }
     Ok(Status { self_user, nodes })
 }

@@ -197,6 +197,47 @@ fn tcp_listens(pid: u32) -> Vec<String> {
     out
 }
 
+/// How many TCP sockets process `pid` holds (listeners included).
+#[cfg(target_os = "macos")]
+fn tcp_sockets(pid: u32) -> usize {
+    let o = Command::new("lsof")
+        .args(["-a", "-nP", "-p", &pid.to_string(), "-iTCP", "-Fn"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .filter(|l| l.starts_with('n'))
+        .count()
+}
+
+/// How many TCP sockets process `pid` holds (listeners included): its socket fds found in `/proc/net/tcp{,6}`.
+#[cfg(target_os = "linux")]
+fn tcp_sockets(pid: u32) -> usize {
+    let inodes: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .map(|d| {
+            d.filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+                .filter_map(|l| {
+                    let s = l.to_string_lossy().to_string();
+                    Some(s.strip_prefix("socket:[")?.strip_suffix(']')?.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut n = 0;
+    for table in ["tcp", "tcp6"] {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/net/{table}")).unwrap_or_default();
+        n += text
+            .lines()
+            .skip(1)
+            .filter(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                f.len() > 9 && inodes.iter().any(|i| i == f[9])
+            })
+            .count();
+    }
+    n
+}
+
 /// A home whose stand-in roster lists `n` live interactive sessions (run by this test's pid), so the board is not empty.
 fn board_home(n: usize) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -524,10 +565,16 @@ fn never_binds_unspecified() {
 
 #[test]
 fn tailscale_retry_binds_later() {
-    // The Tailscale address the stub answers once it is up: 127.0.0.1, the one loopback address both macOS (lo0 has no
-    // 127.0.0.2 unless aliased) and Linux have on an interface. It shares the loopback listener.
+    // The Tailscale address the stub answers once it is up. Linux: 127.0.0.2, a real second bind (all of 127/8 is on
+    // lo). macOS: 127.0.0.1, unavoidably, since lo0 has no other loopback address unless aliased; there the stand-in
+    // shares the loopback listener.
+    let ts = if cfg!(target_os = "linux") {
+        "127.0.0.2"
+    } else {
+        "127.0.0.1"
+    };
     let home = board_home(0);
-    let stub = StubTailscale::new(home.path(), "127.0.0.1");
+    let stub = StubTailscale::new(home.path(), ts);
     stub.fail_ip(1);
     let bin = stub.bin();
     let env = [
@@ -542,8 +589,9 @@ fn tailscale_retry_binds_later() {
         l.starts_with("fleetd: tailscale: ip -4: ") && l.ends_with("retrying in 0.2s")
     })
     .unwrap_or_else(|| panic!("no failure logged: {:?}", d.lines()));
+    let port = addr.rsplit(':').next().unwrap();
     d.wait_line(Duration::from_secs(2), |l| {
-        l == format!("fleetd: listening tcp {addr} (tailscale)")
+        l == format!("fleetd: listening tcp {ts}:{port} (tailscale)")
     })
     .unwrap_or_else(|| panic!("no second bind within 2 s: {:?}", d.lines()));
     assert!(failed.elapsed() < Duration::from_secs(2));
@@ -563,4 +611,105 @@ fn tailscale_retry_binds_later() {
             .count(),
         2
     );
+}
+
+/// Ruling P5-R9: a process on this machine that dials its own Tailscale address is local, not a tailnet peer: it needs
+/// the key (or, on Linux, the uid), though Self is this machine's own user, untagged. WhoIs is never asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn own_tailscale_ip_is_local_needs_key() {
+    // The stand-in Tailscale address: on Linux a real second bind (all of 127/8 is on lo); macOS has only 127.0.0.1 on
+    // lo0, so there it is the loopback listener's address.
+    let ts = if cfg!(target_os = "linux") {
+        "127.0.0.2"
+    } else {
+        "127.0.0.1"
+    };
+    let home = board_home(0);
+    let stub = StubTailscale::new(home.path(), ts);
+    let bin = stub.bin();
+    let env = [
+        ("FLEETD_TAILSCALE", bin.to_str().unwrap()),
+        ("FLEETD_TEST_TS_RANGE_ANY", "1"),
+    ];
+    let d = Daemon::start(home.path(), &["--listen", "tailscale", "--port", "0"], &env);
+    let port = d.loopback().rsplit(':').next().unwrap().to_string();
+    let addr = format!("{ts}:{port}");
+    d.wait_line(Duration::from_secs(5), |l| {
+        l == format!("fleetd: listening tcp {addr} (tailscale)")
+    })
+    .unwrap_or_else(|| panic!("no tailscale listener: {:?}", d.lines()));
+    let mut c = Client::connect_tcp(&addr, None, None).await.unwrap();
+    let f = tokio::time::timeout(Duration::from_secs(10), c.next())
+        .await
+        .unwrap();
+    if cfg!(target_os = "macos") {
+        match f {
+            Ok(Frame::Error { message }) => {
+                assert_eq!(message, "not allowed: loopback needs the key")
+            }
+            f => panic!("expected a refusal, got {f:?}"),
+        }
+    } else {
+        assert!(
+            matches!(f, Ok(Frame::Snapshot { .. })),
+            "the uid path: {f:?}"
+        );
+    }
+    let mut c = Client::connect_tcp(&addr, Some(d.key()), None)
+        .await
+        .unwrap();
+    let f = tokio::time::timeout(Duration::from_secs(10), c.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(f, Ok(Frame::Snapshot { .. })),
+        "with the key: {f:?}"
+    );
+    assert!(
+        !stub.calls().iter().any(|c| c.starts_with("whois")),
+        "{:?}",
+        stub.calls()
+    );
+}
+
+/// A burst of refused peers that never hang up holds at most the auth cap (16) of the daemon's TCP sockets at any
+/// moment: a refusal keeps its place in auth until its socket is gone, and past the cap a peer is refused at once.
+#[test]
+fn a_burst_of_refusals_holds_at_most_the_cap() {
+    let home = board_home(0);
+    let d = Daemon::start(home.path(), &["--listen", "loopback", "--port", "0"], &[]);
+    let addr = d.loopback();
+    let mut wrong = d.key();
+    wrong[5] ^= 1;
+    let mut preamble = b"FKEY".to_vec();
+    preamble.extend_from_slice(&wrong);
+    let base = tcp_sockets(d.pid());
+    let mut held = vec![];
+    for _ in 0..64 {
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        s.write_all(&preamble).unwrap();
+        held.push(s);
+    }
+    let mut most = 0;
+    let end = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < end {
+        most = most.max(tcp_sockets(d.pid()) - base);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // A busy refusal's socket can be caught for a moment between its accept and its close.
+    assert!(most <= 16 + 2, "{most} TCP sockets held at once");
+    // Every peer was told, or closed on.
+    for s in &mut held {
+        // A socket the server has already reset (a busy refusal) refuses the option on macOS: that is a close too.
+        let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+        let mut b = [0u8; 256];
+        let n = s.read(&mut b).unwrap_or(0);
+        if n > 0 {
+            let len = u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
+            assert!(matches!(
+                decode(&b[4..4 + len]).unwrap(),
+                Frame::Error { .. }
+            ));
+        }
+    }
 }

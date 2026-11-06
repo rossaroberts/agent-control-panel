@@ -1,7 +1,7 @@
 //! A stand-in `tailscale` CLI for the network tests: a shell script in a temp folder, pointed at by `FLEETD_TAILSCALE`.
 //! It answers from files beside it, so a test can change its answers while a daemon runs:
 //! - `ip -4`: the contents of `ip`; while `ip-fails` holds a number above 0, it fails instead (and counts it down);
-//! - `status --json`: `{"Self": {"UserID": <self-user>}}`;
+//! - `status --json`: `{"Self": {"UserID": <self-user>, "TailscaleIPs": [<ip>]}}`;
 //! - `whois --json <ip:port>`: `whois.json`, after sleeping `slow` seconds when that file exists.
 //!
 //! Every call is appended to `calls.log`.
@@ -21,7 +21,7 @@ case "$1" in
       exit 1
     fi
     cat "$D/ip" ;;
-  status) printf '{"Self": {"ID": "nodeSelf", "UserID": %s}}\n' "$(cat "$D/self-user")" ;;
+  status) printf '{"Self": {"ID": "nodeSelf", "UserID": %s, "TailscaleIPs": ["%s"]}}\n' "$(cat "$D/self-user")" "$(cat "$D/ip")" ;;
   whois)
     [ -f "$D/slow" ] && sleep "$(cat "$D/slow")"
     cat "$D/whois.json" ;;

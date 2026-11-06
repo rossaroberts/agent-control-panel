@@ -141,7 +141,22 @@ fn read_key(path: &Path) -> io::Result<[u8; 32]> {
             format!("{}: {why}", path.display()),
         )
     };
-    let m = std::fs::symlink_metadata(path)?;
+    // Opened without following a link (and without blocking on a FIFO), then the handle itself is checked: what is
+    // checked is what is read, with no window for the path to change in between.
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(bad("a symbolic link; left alone".into()))
+        }
+        Err(e) => return Err(e),
+    };
+    let m = f.metadata()?;
     if !m.file_type().is_file() {
         return Err(bad("not a regular file".into()));
     }
@@ -155,7 +170,8 @@ fn read_key(path: &Path) -> io::Result<[u8; 32]> {
             m.mode() & 0o777
         )));
     }
-    let text = std::fs::read(path)?;
+    let mut text = vec![];
+    f.by_ref().take(256).read_to_end(&mut text)?;
     let text = text.strip_suffix(b"\n").unwrap_or(&text);
     unhex(text).ok_or_else(|| bad("not 64 hex characters; left alone".into()))
 }
@@ -240,5 +256,17 @@ mod tests {
         std::fs::write(&p, "not a key").unwrap();
         assert!(key(d.path()).is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "not a key");
+        // A link to a good key is refused, and left alone.
+        let real = d.path().join("elsewhere.key");
+        std::fs::write(&real, "ab".repeat(32)).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        std::os::unix::fs::symlink(&real, &p).unwrap();
+        let e = key(d.path()).unwrap_err();
+        assert!(e.to_string().contains("symbolic link"), "{e}");
+        assert!(std::fs::symlink_metadata(&p)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

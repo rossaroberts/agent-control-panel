@@ -173,16 +173,19 @@ The same conversation over TCP, for a phone on the tailnet, another machine's hu
   Never `0.0.0.0`, never another interface, never IPv6. While the Tailscale address cannot be had (Tailscale down, not
   logged in), it is tried again every 30 s; loopback serves meanwhile.
 - **Who is allowed**, decided before a byte of the peer is read as a frame:
-  - **loopback**: a peer that sends the key preamble with the right key. On Linux, also a peer whose socket belongs to the
-    daemon's own uid (read from `/proc/net/tcp`), with no key. On macOS there is no cheap per-socket uid, so loopback
-    always needs the key (Ruling P5-R2).
+  - **local**: a peer whose source address is this machine's own (loopback, an interface's, the Tailscale address, or
+    `Self.TailscaleIPs`), on either listener: a process here that dials the Tailscale address is local too (Ruling
+    P5-R9). It sends the key preamble with the right key. On Linux, also a peer whose socket belongs to the daemon's own
+    uid (read from `/proc/net/tcp`), with no key. On macOS there is no cheap per-socket uid, so a local peer always needs
+    the key (Ruling P5-R2).
   - **Tailscale**: a peer whose node is untagged and whose user is this machine's own Tailscale user (`Self.UserID`),
     asked of `tailscale whois --json <ip>:<port>` with a 2 s limit (Ruling P5-R3). The nodes `tailscale status --json`
-    lists when the listener starts are allowed at once by the same rule, with no call (Ruling P5-R7). A decision is kept
-    60 s per peer IP, allow and deny alike; a kept allow older than that is used at once and asked again in the
-    background, and if the answer is now a deny that connection is closed. No CLI: every Tailscale peer is refused. A
-    Tailscale peer sends no key.
-  - at most 16 connections are being decided at once; past that a connection is refused (`busy`) at once.
+    lists when the listener starts are allowed at once by the same rule, with no call (Ruling P5-R7); this machine's own
+    node never is. A decision is kept 60 s per peer IP, allow and deny alike; a kept allow older than that is used at
+    once and asked again in the background, and if the answer is now a deny every connection from that IP is closed. No
+    CLI: every Tailscale peer is refused. A Tailscale peer sends no key.
+  - at most 16 connections are being decided or refused at once (a refusal holds its place until its socket is gone);
+    past that a connection is refused (`busy`) at once.
 - **The key preamble** (transport, not a `Frame`): the 4 bytes `FKEY`, then the 32 key bytes, before the `Hello`. Read as a
   frame length, `FKEY` is ~1.26 GB, over the 64 MiB limit, so it is never mistaken for a frame. The key is
   `fleetd.key` beside `fleetd.json`: 64 hex characters, made 0600 on first use; a key file of looser mode or other content

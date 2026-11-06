@@ -189,9 +189,9 @@ pub async fn serve_tcp(
                         Err(_) => return,
                     };
                     let checked = auth.check(peer, local, &stream).await;
-                    drop(in_auth);
                     match checked {
                         Ok(allowed) => {
+                            drop(in_auth);
                             let fd = stream.as_raw_fd();
                             let (r, w) = stream.into_split();
                             let conn = handle(r, w, fd, store, machine, terms);
@@ -200,9 +200,11 @@ pub async fn serve_tcp(
                                 let _ = why;
                             }
                         }
+                        // The place in auth is held until the refused socket is gone: refusals count toward the cap.
                         Err(why) => {
                             auth.log_refusal(peer.ip(), &why);
                             net::refuse(stream, &why).await;
+                            drop(in_auth);
                         }
                     }
                 });

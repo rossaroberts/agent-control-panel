@@ -258,6 +258,8 @@ fn run_tailnet() {
             .collect();
         let why = if allowed {
             "allowed"
+        } else if n.is_self {
+            "local (this machine: needs the key)"
         } else if n.tagged {
             "refused (tagged)"
         } else {

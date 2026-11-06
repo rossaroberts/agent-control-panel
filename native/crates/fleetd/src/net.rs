@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use fleet_model::wire::{encode, Frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::time::timeout;
 
 use crate::config::{Config, Listen};
@@ -62,7 +62,7 @@ fn keepalive_times() -> (Duration, Duration) {
 /// Sets `TCP_NODELAY` and the keepalive on a TCP socket: every accepted one, and every one `Client::connect_tcp` dials.
 pub fn keepalive<S: AsFd>(s: &S) -> io::Result<()> {
     let s = socket2::SockRef::from(s);
-    s.set_nodelay(true)?;
+    s.set_tcp_nodelay(true)?;
     let (idle, interval) = keepalive_times();
     let ka = socket2::TcpKeepalive::new()
         .with_time(idle)
@@ -95,7 +95,12 @@ fn ts_retry() -> Duration {
 }
 
 /// The IPv4 addresses assigned to this machine's interfaces.
-fn local_ipv4s() -> Vec<Ipv4Addr> {
+pub fn local_ipv4s() -> Vec<Ipv4Addr> {
+    interfaces().into_iter().map(|(ip, _, _)| ip).collect()
+}
+
+/// Each interface IPv4: (address, netmask, is loopback).
+fn interfaces() -> Vec<(Ipv4Addr, Ipv4Addr, bool)> {
     let mut out = vec![];
     let mut ifa: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills a list we free with freeifaddrs; each entry is read only while the list lives.
@@ -108,7 +113,15 @@ fn local_ipv4s() -> Vec<Ipv4Addr> {
             let a = (*p).ifa_addr;
             if !a.is_null() && (*a).sa_family as i32 == libc::AF_INET {
                 let sin = &*(a as *const libc::sockaddr_in);
-                out.push(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)));
+                let m = (*p).ifa_netmask;
+                let mask = if m.is_null() {
+                    Ipv4Addr::BROADCAST
+                } else {
+                    let sm = &*(m as *const libc::sockaddr_in);
+                    Ipv4Addr::from(u32::from_be(sm.sin_addr.s_addr))
+                };
+                let lo = (*p).ifa_flags & libc::IFF_LOOPBACK as libc::c_uint != 0;
+                out.push((Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)), mask, lo));
             }
             p = (*p).ifa_next;
         }
@@ -125,10 +138,19 @@ fn usable(ip: Ipv4Addr, any: bool) -> Result<(), String> {
     if !any && !in_tailnet(ip) {
         return Err("not in 100.64.0.0/10".into());
     }
-    if !local_ipv4s().contains(&ip) {
+    if !on_local_interface(ip) {
         return Err("not on a local interface".into());
     }
     Ok(())
+}
+
+/// Assigned to an interface, or inside a loopback interface's subnet (Linux's lo answers all of 127/8; that is the only
+/// case, and only a debug build's stand-in can ask for it).
+fn on_local_interface(ip: Ipv4Addr) -> bool {
+    let ip_n = u32::from(ip);
+    interfaces()
+        .into_iter()
+        .any(|(a, m, lo)| a == ip || (lo && u32::from(a) & u32::from(m) == ip_n & u32::from(m)))
 }
 
 fn std_bind(addr: SocketAddr) -> io::Result<TcpListener> {
@@ -193,7 +215,8 @@ fn bind_tailscale(port: u16, auth: &Auth) -> Result<Option<TcpListener>, String>
     usable(ip, auth.range_any).map_err(|why| format!("not binding {ip}: {why}"))?;
     let addr = SocketAddr::new(ip.into(), port);
     if ip == Ipv4Addr::LOCALHOST {
-        // A test's stand-in (debug builds only): the loopback listener is this address already.
+        // A test's stand-in (debug builds only), on macOS, whose lo0 has no other loopback address: the loopback listener
+        // is this address already. On Linux the tests stand in 127.0.0.2, a real second bind.
         auth.set_tailscale(ip);
         eprintln!("fleetd: listening tcp {addr} (tailscale)");
         return Ok(None);
@@ -237,11 +260,29 @@ impl WhoIs for tailscale::Cli {
     }
 }
 
-/// An allowed connection. `revoked` fires (with the reason) if a background re-check of a kept allow now denies the
-/// peer: the connection is then closed.
+/// An allowed connection. A Tailscale one carries `revoked`, its peer IP's revocation: it fires (with the reason) when a
+/// re-check of that IP now denies it, and every connection from that IP is then closed.
 #[derive(Debug)]
 pub struct Allowed {
-    pub revoked: Option<oneshot::Receiver<String>>,
+    pub revoked: Option<Revoked>,
+}
+
+/// One connection's view of its peer IP's revocation.
+#[derive(Debug)]
+pub struct Revoked(watch::Receiver<Option<String>>);
+
+impl Revoked {
+    /// The reason, once the peer is revoked; never, if it is not.
+    pub async fn wait(mut self) -> String {
+        loop {
+            if let Some(why) = self.0.borrow_and_update().clone() {
+                return why;
+            }
+            if self.0.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+        }
+    }
 }
 
 struct Kept {
@@ -261,8 +302,14 @@ pub struct Auth {
     logged: Mutex<HashMap<IpAddr, Instant>>,
     in_auth: AtomicUsize,
     tailscale: Mutex<Option<Ipv4Addr>>,
+    /// This machine's own tailnet addresses (`Self.TailscaleIPs`): local, never a tailnet peer (Ruling P5-R9).
+    self_ips: Mutex<Vec<IpAddr>>,
+    /// Per peer IP, the revocation every connection allowed from it waits on.
+    revokers: Mutex<HashMap<IpAddr, watch::Sender<Option<String>>>>,
     clock: Clock,
     range_any: bool,
+    /// The tests' switch: no address counts as this machine's own, so a loopback connection can stand in for a peer.
+    nothing_local: bool,
 }
 
 /// One connection in auth, counted until dropped.
@@ -286,8 +333,11 @@ impl Auth {
             logged: Mutex::new(HashMap::new()),
             in_auth: AtomicUsize::new(0),
             tailscale: Mutex::new(None),
+            self_ips: Mutex::new(vec![]),
+            revokers: Mutex::new(HashMap::new()),
             clock: Arc::new(Instant::now),
             range_any: range_any(),
+            nothing_local: false,
         };
         if let Some(w) = &a.whois {
             match w.status() {
@@ -308,13 +358,29 @@ impl Auth {
         self
     }
 
-    /// Takes this machine's user from `status`, and pre-allows each of its nodes of that user that is untagged.
+    /// Takes this machine's user and own addresses from `status`, and pre-allows each other node of that user that is
+    /// untagged. Self is never pre-allowed: a connection from it is local (Ruling P5-R9).
     fn learn(&self, s: &tailscale::Status) {
         *self.self_user.lock().unwrap() = Some(s.self_user);
+        {
+            let mut mine = self.self_ips.lock().unwrap();
+            for n in s.nodes.iter().filter(|n| n.is_self) {
+                for ip in &n.ips {
+                    if !mine.contains(ip) {
+                        mine.push(*ip);
+                    }
+                }
+            }
+        }
         let now = (self.clock)();
         let mut kept = self.kept.lock().unwrap();
         for n in s.nodes.iter().filter(|n| pre_allowed(s, n)) {
             for ip in n.ips.iter().filter(|ip| ip.is_ipv4()) {
+                if let IpAddr::V4(v4) = ip {
+                    if self.is_local(*v4) {
+                        continue;
+                    }
+                }
                 kept.entry(*ip).or_insert(Kept {
                     at: now,
                     verdict: Ok(()),
@@ -327,6 +393,38 @@ impl Auth {
     /// The nodes pre-allowed now: (node, allowed), for `fleetd tailnet`.
     pub fn listing(s: &tailscale::Status) -> Vec<(&tailscale::Known, bool)> {
         s.nodes.iter().map(|n| (n, pre_allowed(s, n))).collect()
+    }
+
+    /// A source address of this machine's own (Ruling P5-R9): loopback, an interface's, the bound Tailscale address, or
+    /// one of `Self.TailscaleIPs`. A peer from one is local on either listener.
+    fn is_local(&self, ip: Ipv4Addr) -> bool {
+        if self.nothing_local {
+            return false;
+        }
+        ip.is_loopback()
+            || self.tailscale_addr() == Some(ip)
+            || self.self_ips.lock().unwrap().contains(&IpAddr::V4(ip))
+            || local_ipv4s().contains(&ip)
+    }
+
+    /// A connection from `ip`'s share in that IP's revocation.
+    fn subscribe(&self, ip: IpAddr) -> Revoked {
+        let mut r = self.revokers.lock().unwrap();
+        if r.len() > 256 {
+            r.retain(|_, tx| tx.receiver_count() > 0);
+        }
+        Revoked(
+            r.entry(ip)
+                .or_insert_with(|| watch::channel(None).0)
+                .subscribe(),
+        )
+    }
+
+    /// Closes every connection allowed from `ip`.
+    fn revoke(&self, ip: IpAddr, why: &str) {
+        if let Some(tx) = self.revokers.lock().unwrap().remove(&ip) {
+            let _ = tx.send(Some(why.to_string()));
+        }
     }
 
     fn set_tailscale(&self, ip: Ipv4Addr) {
@@ -374,17 +472,21 @@ impl Auth {
             IpAddr::V4(ip) => ip,
             IpAddr::V6(_) => return Err("not a listening address".into()),
         };
-        if Some(local_ip) == self.tailscale_addr() {
-            return self.tailnet(peer).await;
-        }
-        if local_ip == Ipv4Addr::LOCALHOST {
+        let IpAddr::V4(peer_ip) = peer.ip() else {
+            return Err("not a tailnet address".into());
+        };
+        // A process of this machine's, whichever address it dialled, is local: the key, or the uid (Ruling P5-R9).
+        if self.is_local(peer_ip) {
             self.loopback(peer, local, stream).await?;
             return Ok(Allowed { revoked: None });
+        }
+        if Some(local_ip) == self.tailscale_addr() {
+            return self.tailnet(peer).await;
         }
         Err("not a listening address".into())
     }
 
-    /// A loopback peer: the key preamble, else (Linux only) this user's own socket.
+    /// A local peer: the key preamble, else (Linux only) this user's own socket.
     async fn loopback(
         &self,
         peer: SocketAddr,
@@ -423,6 +525,9 @@ impl Auth {
             IpAddr::V4(ip) if self.range_any || in_tailnet(ip) => ip,
             _ => return Err("not a tailnet address".into()),
         };
+        if self.is_local(ip) {
+            return Err("a local peer needs the key".into());
+        }
         if self.whois.is_none() {
             return Err("no tailscale CLI".into());
         }
@@ -444,9 +549,11 @@ impl Auth {
             }
         };
         match recheck {
-            Some(false) => Ok(Allowed { revoked: None }),
+            Some(false) => Ok(Allowed {
+                revoked: Some(self.subscribe(IpAddr::V4(ip))),
+            }),
             Some(true) => {
-                let (tx, rx) = oneshot::channel();
+                let revoked = self.subscribe(IpAddr::V4(ip));
                 let me = self.clone();
                 tokio::spawn(async move {
                     let v = me.decide(peer).await;
@@ -462,12 +569,12 @@ impl Auth {
                                 },
                             );
                         }
-                        // A deny now: the entry goes, and so does this connection.
+                        // A deny now: the entry goes, and so does every connection from this IP.
                         Err(Deny::Is(why)) => {
                             kept.remove(&IpAddr::V4(ip));
                             drop(kept);
                             me.log_refusal(IpAddr::V4(ip), &why);
-                            let _ = tx.send(why);
+                            me.revoke(IpAddr::V4(ip), &why);
                         }
                         // The CLI could not say (slow, gone): the allow stands, unrefreshed, and is asked again next time.
                         Err(Deny::Unknown(_)) => {
@@ -477,7 +584,9 @@ impl Auth {
                         }
                     }
                 });
-                Ok(Allowed { revoked: Some(rx) })
+                Ok(Allowed {
+                    revoked: Some(revoked),
+                })
             }
             None => {
                 let v = self.decide(peer).await.map_err(Deny::why);
@@ -489,7 +598,9 @@ impl Auth {
                         rechecking: false,
                     },
                 );
-                v.map(|()| Allowed { revoked: None })
+                v.map(|()| Allowed {
+                    revoked: Some(self.subscribe(IpAddr::V4(ip))),
+                })
             }
         }
     }
@@ -530,9 +641,10 @@ impl Auth {
     }
 }
 
-/// A node `status` lists is pre-allowed when it is this machine's user's and untagged (Ruling P5-R7).
+/// A node `status` lists is pre-allowed when it is this machine's user's and untagged (Ruling P5-R7), and is not this
+/// machine itself (Ruling P5-R9: a connection from Self is local and needs the key).
 pub fn pre_allowed(s: &tailscale::Status, n: &tailscale::Known) -> bool {
-    n.user == s.self_user && !n.tagged
+    !n.is_self && n.user == s.self_user && !n.tagged
 }
 
 /// Why a peer is not allowed: it is not (`Is`), or the CLI could not say (`Unknown`; on a first connect that is a
@@ -568,18 +680,30 @@ async fn blocking<T: Send + 'static>(
 }
 
 /// The first `n` bytes the peer sent, left in the stream. `UnexpectedEof` if it closed first.
+/// Waits on the socket's readiness, never a timer: while fewer than `n` bytes are there, the peek reports `WouldBlock`,
+/// which clears the readiness, so the next wait is for more bytes to arrive.
 async fn peek(stream: &TcpStream, n: usize) -> io::Result<Vec<u8>> {
+    use std::os::fd::AsRawFd;
     let mut buf = vec![0u8; n];
+    let fd = stream.as_raw_fd();
     loop {
-        let got = stream.peek(&mut buf).await?;
-        if got == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
+        stream.readable().await?;
+        let got = stream.try_io(tokio::io::Interest::READABLE, || {
+            // SAFETY: a recv into our own buffer of `n` bytes on the stream's fd, which it keeps open.
+            let k = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), n, libc::MSG_PEEK) };
+            match k {
+                k if k < 0 => Err(io::Error::last_os_error()),
+                0 => Ok(0),
+                k if (k as usize) < n => Err(io::ErrorKind::WouldBlock.into()),
+                k => Ok(k as usize),
+            }
+        });
+        match got {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(_) => return Ok(buf),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
         }
-        if got >= n {
-            return Ok(buf);
-        }
-        // Part of it is here: the rest is a packet away.
-        tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
 
@@ -683,14 +807,11 @@ pub fn refuse_now(stream: TcpStream, why: &str) {
 /// Runs `conn` until it ends or `revoked` fires (then `conn` is dropped, closing its socket); the revocation's reason.
 pub async fn until_revoked<F: std::future::Future>(
     conn: F,
-    revoked: Option<oneshot::Receiver<String>>,
+    revoked: Option<Revoked>,
 ) -> Option<String> {
     let revoked = async {
         match revoked {
-            Some(rx) => match rx.await {
-                Ok(why) => why,
-                Err(_) => std::future::pending().await,
-            },
+            Some(r) => r.wait().await,
             None => std::future::pending().await,
         }
     };
@@ -839,9 +960,12 @@ mod tests {
         assert_eq!(s.whois_calls.load(Ordering::SeqCst), 2);
         // An allow is kept alike: within 60 s, no call at all.
         *now.lock().unwrap() += Duration::from_secs(59);
-        let r = a.tailnet(tailnet_peer(2)).await.unwrap();
-        assert!(r.revoked.is_none(), "fresh: no re-check");
-        assert_eq!(s.whois_calls.load(Ordering::SeqCst), 2);
+        assert!(a.tailnet(tailnet_peer(2)).await.is_ok());
+        assert_eq!(
+            s.whois_calls.load(Ordering::SeqCst),
+            2,
+            "fresh: no re-check"
+        );
     }
 
     #[tokio::test]
@@ -878,6 +1002,7 @@ mod tests {
 
     fn known(ip: [u8; 4], user: u64, tagged: bool) -> tailscale::Known {
         tailscale::Known {
+            is_self: false,
             os: "iOS".into(),
             ips: vec![IpAddr::from(ip), "fd7a:115c:a1e0::9".parse().unwrap()],
             user,
@@ -897,8 +1022,7 @@ mod tests {
             ..Stub::new(&[42], 0, true)
         });
         let a = auth(&s);
-        let r = a.tailnet(tailnet_peer(1)).await.unwrap();
-        assert!(r.revoked.is_none());
+        assert!(a.tailnet(tailnet_peer(1)).await.is_ok());
         assert_eq!(s.whois_calls.load(Ordering::SeqCst), 0);
         // The tagged node and the other user's are not pre-allowed: asked, and refused.
         assert!(a.tailnet(tailnet_peer(2)).await.is_err());
@@ -906,53 +1030,136 @@ mod tests {
         assert_eq!(s.whois_calls.load(Ordering::SeqCst), 2);
     }
 
-    #[tokio::test]
+    /// A daemon's TCP side on 127.0.0.1, which stands in for the Tailscale address and counts as no machine's own, so
+    /// a loopback connection is a tailnet peer here; on `clock`. Its address and the auth.
+    async fn tailnet_server(
+        s: &Arc<Stub>,
+        clock: Option<Clock>,
+    ) -> (String, Arc<Auth>, tempfile::TempDir) {
+        let mut a = Auth::new(None, Some(s.clone() as Arc<dyn WhoIs>));
+        if let Some(c) = clock {
+            a = a.with_clock(c);
+        }
+        a.range_any = true;
+        a.nothing_local = true;
+        // Learnt again now that the stand-in address is not this machine's own.
+        a.learn(&s.status().unwrap());
+        let a = Arc::new(a);
+        a.set_tailscale(Ipv4Addr::LOCALHOST);
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::Store::new());
+        let terms =
+            Arc::new(crate::terms::Terms::new(dir.path().to_path_buf(), |_| false).unwrap());
+        tokio::spawn(crate::serve::serve_tcp(
+            l,
+            a.clone(),
+            store,
+            "fixture-mac".into(),
+            terms,
+        ));
+        (addr, a, dir)
+    }
+
+    async fn snapshot_of(c: &mut crate::client::Client) {
+        match timeout(Duration::from_secs(5), c.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Frame::Snapshot { .. } => {}
+            f => panic!("expected a Snapshot, got {f:?}"),
+        }
+    }
+
+    /// Reads a board client until the server closes; false if it is still open after 3 s.
+    async fn board_closed(c: &mut crate::client::Client) -> bool {
+        timeout(Duration::from_secs(3), async {
+            while c.next().await.is_ok() {}
+        })
+        .await
+        .is_ok()
+    }
+
+    /// A kept allow whose background re-check now denies: the connection that set it off, and every connection the
+    /// same IP opened before it (a Board and a Terminals one), are closed; the next connect asks on the connect path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn revalidation_deny_closes() {
         let s = Arc::new(Stub {
-            nodes: vec![known([100, 101, 102, 1], 42, false)],
+            nodes: vec![known([127, 0, 0, 1], 42, false)],
             ..Stub::new(&[42], 42, false)
         });
         let (now, clock) = mock_clock();
-        let a = Arc::new(Auth::new(None, Some(s.clone() as Arc<dyn WhoIs>)).with_clock(clock));
-        // The node is tagged since: the kept allow, 61 s old, is used at once and checked again behind it.
+        let (addr, _a, _dir) = tailnet_server(&s, Some(clock)).await;
+        // Two connections while the allow is fresh: no WhoIs.
+        let mut board = crate::client::Client::connect_tcp(&addr, None, None)
+            .await
+            .unwrap();
+        snapshot_of(&mut board).await;
+        let (mut tx, mut rx) = crate::client::term_connect_tcp(&addr, None).await.unwrap();
+        tx.send(&Frame::TermOpen {
+            r#ref: 1,
+            target: fleet_model::types::AttachTarget::Claude {
+                profile: "default".into(),
+                job: "not a job".into(),
+            },
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .unwrap();
+        match timeout(Duration::from_secs(5), rx.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Frame::TermEnd { r#ref: 1, .. } => {}
+            f => panic!("the Terminals connection is served: {f:?}"),
+        }
+        assert_eq!(s.whois_calls.load(Ordering::SeqCst), 0);
+
+        // The node is tagged since; 61 s on, a third connection is let in at once and sets off the re-check.
         *s.peer.lock().unwrap() = tailscale::Peer {
             user: 42,
             tagged: true,
         };
         *now.lock().unwrap() += Duration::from_secs(61);
         let t0 = Instant::now();
-        let r = a.tailnet(tailnet_peer(1)).await.unwrap();
+        let mut third = crate::client::Client::connect_tcp(&addr, None, None)
+            .await
+            .unwrap();
+        snapshot_of(&mut third).await;
         assert!(
             t0.elapsed() < Duration::from_millis(50),
             "not on the connect path"
         );
 
-        // A real connection, held by the server side until revoked.
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
-        let (server, _) = l.accept().await.unwrap();
-        let conn = async move {
-            let _held = server;
-            std::future::pending::<()>().await
-        };
-        let why = timeout(Duration::from_secs(3), until_revoked(conn, r.revoked))
-            .await
-            .expect("revoked in time");
-        assert_eq!(why.as_deref(), Some("a tagged node"));
-        let mut b = [0u8; 1];
-        let n = timeout(Duration::from_secs(3), client.read(&mut b))
+        assert!(board_closed(&mut third).await, "the third is closed");
+        assert!(
+            board_closed(&mut board).await,
+            "the earlier Board is closed"
+        );
+        let closed = timeout(Duration::from_secs(3), async {
+            while rx.next().await.is_ok() {}
+        })
+        .await
+        .is_ok();
+        assert!(closed, "the earlier Terminals connection is closed");
+        assert_eq!(s.whois_calls.load(Ordering::SeqCst), 1);
+
+        // The entry is gone: the next connect asks on the connect path, and is refused.
+        let mut next = crate::client::Client::connect_tcp(&addr, None, None)
             .await
             .unwrap();
-        assert!(
-            matches!(n, Ok(0) | Err(_)),
-            "the connection is closed: {n:?}"
-        );
-        assert_eq!(s.whois_calls.load(Ordering::SeqCst), 1);
-        // The entry is gone: the next connect asks on the connect path, and is refused.
-        assert_eq!(
-            v(a.tailnet(tailnet_peer(1)).await),
-            Err("a tagged node".into())
-        );
+        match timeout(Duration::from_secs(5), next.next())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Frame::Error { message } => assert_eq!(message, "not allowed: a tagged node"),
+            f => panic!("expected the refusal, got {f:?}"),
+        }
         assert_eq!(s.whois_calls.load(Ordering::SeqCst), 2);
     }
 
@@ -966,14 +1173,36 @@ mod tests {
         let a = Arc::new(Auth::new(None, Some(s.clone() as Arc<dyn WhoIs>)).with_clock(clock));
         *now.lock().unwrap() += Duration::from_secs(61);
         let r = a.tailnet(tailnet_peer(1)).await.unwrap();
-        let mut rx = r.revoked.unwrap();
-        // Still allowed: the sender goes without a word.
-        assert!(timeout(Duration::from_secs(3), &mut rx)
-            .await
-            .unwrap()
-            .is_err());
+        // Still allowed: no revocation.
+        assert!(
+            timeout(Duration::from_millis(300), r.revoked.unwrap().wait())
+                .await
+                .is_err()
+        );
         assert_eq!(s.whois_calls.load(Ordering::SeqCst), 1);
-        assert!(a.tailnet(tailnet_peer(1)).await.unwrap().revoked.is_none());
+        // Refreshed: the next one within 60 s asks nothing.
+        assert!(a.tailnet(tailnet_peer(1)).await.is_ok());
+        assert_eq!(s.whois_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Ruling P5-R9: this machine's own node is never pre-allowed, and a peer from its address is never asked of WhoIs
+    /// (it is local: the key).
+    #[tokio::test]
+    async fn self_is_never_a_tailnet_peer() {
+        let mut me = known([100, 101, 102, 9], 42, false);
+        me.is_self = true;
+        let s = Arc::new(Stub {
+            nodes: vec![me],
+            ..Stub::new(&[42], 42, false)
+        });
+        let a = auth(&s);
+        let st = s.status().unwrap();
+        assert!(!pre_allowed(&st, &st.nodes[0]));
+        assert_eq!(
+            v(a.tailnet(tailnet_peer(9)).await),
+            Err("a local peer needs the key".into())
+        );
+        assert_eq!(s.whois_calls.load(Ordering::SeqCst), 0);
     }
 
     /// A pre-allowed peer, end to end over a real listener (127.0.0.1 standing in for the Tailscale address): no WhoIs
@@ -984,23 +1213,7 @@ mod tests {
             nodes: vec![known([127, 0, 0, 1], 42, false)],
             ..Stub::new(&[42], 0, true)
         });
-        let mut a = Auth::new(None, Some(s.clone() as Arc<dyn WhoIs>));
-        a.range_any = true;
-        let a = Arc::new(a);
-        a.set_tailscale(Ipv4Addr::LOCALHOST);
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap().to_string();
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(crate::store::Store::new());
-        let terms =
-            Arc::new(crate::terms::Terms::new(dir.path().to_path_buf(), |_| false).unwrap());
-        let task = tokio::spawn(crate::serve::serve_tcp(
-            l,
-            a,
-            store,
-            "fixture-mac".into(),
-            terms,
-        ));
+        let (addr, _a, _dir) = tailnet_server(&s, None).await;
         let mut times = vec![];
         for _ in 0..21 {
             let t0 = Instant::now();
@@ -1017,7 +1230,6 @@ mod tests {
             }
             times.push(t0.elapsed());
         }
-        task.abort();
         times.sort();
         let median = times[times.len() / 2];
         eprintln!(
