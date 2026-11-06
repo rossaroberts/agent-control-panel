@@ -136,7 +136,7 @@ fn open_state(r: &RosterRow, t: &TailFacts, h: Option<&HookEvent>, now: i64) -> 
 }
 
 /// `hh:mm` in UTC of an epoch-millisecond time.
-fn hh_mm_utc(ms: i64) -> String {
+pub fn hh_mm_utc(ms: i64) -> String {
     let minutes = ms.div_euclid(60_000).rem_euclid(24 * 60);
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }

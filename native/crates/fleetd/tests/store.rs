@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod common;
+
 use fleet_model::types::{Delta, Engine, Session, SessionKey, State};
 use fleetd::store::Store;
 use fleetd::watch::{watch, WatchHandle};
@@ -44,6 +46,7 @@ impl Home {
         let p = root.join(".claude");
         for d in [
             "fleet-state",
+            "fleet-status",
             "jobs",
             "projects",
             "../.local/bin",
@@ -182,8 +185,26 @@ async fn drain(rx: &mut Receiver<Delta>, quiet: Duration) -> Vec<Delta> {
     out
 }
 
-/// One hook write's latency to its delta, `n` times, flipping between working and waiting: (p50, max) in ms.
-async fn hook_latency(home: &Home, rx: &mut Receiver<Delta>, n: usize) -> (f64, f64) {
+/// Latencies in ms, sorted.
+struct Lat(Vec<f64>);
+
+impl Lat {
+    fn at(&self, q: f64) -> f64 {
+        self.0[((self.0.len() as f64 * q).ceil() as usize).clamp(1, self.0.len()) - 1]
+    }
+    fn p50(&self) -> f64 {
+        self.at(0.5)
+    }
+    fn p95(&self) -> f64 {
+        self.at(0.95)
+    }
+    fn max(&self) -> f64 {
+        self.0[self.0.len() - 1]
+    }
+}
+
+/// One hook write's latency to its delta, `n` times `gap` apart, flipping between working and waiting.
+async fn hook_latency(home: &Home, rx: &mut Receiver<Delta>, n: usize, gap: Duration) -> Lat {
     let mut ms = vec![];
     for i in 0..n {
         let (e, want) = if i % 2 == 0 {
@@ -200,10 +221,10 @@ async fn hook_latency(home: &Home, rx: &mut Receiver<Delta>, n: usize) -> (f64, 
         .unwrap_or_else(|| panic!("no delta for hook write {i}"));
         assert_eq!(got.0.state, want);
         ms.push(got.1.duration_since(t0).as_secs_f64() * 1000.0);
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(gap).await;
     }
     ms.sort_by(f64::total_cmp);
-    (ms[ms.len() / 2], ms[ms.len() - 1])
+    Lat(ms)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -230,9 +251,14 @@ async fn a_hook_write_is_a_delta_within_50ms() {
     assert_eq!(s.reason, "idle at prompt");
     assert_eq!(s.name.as_deref(), Some("fixture 0"));
 
-    let (p50, max) = hook_latency(&home, &mut rx, 30).await;
-    eprintln!("hook write -> delta: p50 {p50:.2} ms, max {max:.2} ms (30 writes)");
-    assert!(max < 50.0, "max {max:.2} ms");
+    let l = hook_latency(&home, &mut rx, 30, Duration::from_millis(20)).await;
+    eprintln!(
+        "hook write -> delta: p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms (30 writes)",
+        l.p50(),
+        l.p95(),
+        l.max()
+    );
+    assert!(l.max() < 50.0, "max {:.2} ms", l.max());
     let (_, snap) = store.snapshot();
     assert_eq!(snap[0].reason, "idle at prompt");
 }
@@ -247,7 +273,15 @@ async fn a_transcript_append_is_a_delta_with_the_new_said() {
         &json!({"type":"user","timestamp":"2026-11-06T11:59:00.000Z",
                        "message":{"role":"user","content":"Fix the fixture loader"}}),
     );
-    let (store, _h, mut rx) = home.start();
+    let (store, h, mut rx) = home.start();
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        h.followed(),
+        1,
+        "the live session's transcript is on the hot path"
+    );
+    #[cfg(not(target_os = "macos"))]
+    let _ = h;
     let (_, snap) = store.snapshot();
     assert_eq!(snap[0].first_ask.as_deref(), Some("Fix the fixture loader"));
     assert_eq!(snap[0].said, None);
@@ -273,7 +307,9 @@ async fn a_burst_of_200_hook_writes_coalesces() {
     let _g = SERIAL.lock().await;
     let home = Home::new(10);
     let (_store, h, mut rx) = home.start();
-    let (before, _) = hook_latency(&home, &mut rx, 10).await;
+    let before = hook_latency(&home, &mut rx, 20, Duration::from_millis(20))
+        .await
+        .p50();
     drain(&mut rx, Duration::from_millis(200)).await;
     let runs = h.roster_runs();
 
@@ -323,11 +359,16 @@ async fn a_burst_of_200_hook_writes_coalesces() {
         );
     }
 
-    let (after, max) = hook_latency(&home, &mut rx, 10).await;
+    let l = hook_latency(&home, &mut rx, 20, Duration::from_millis(20)).await;
+    let (after, max) = (l.p50(), l.max());
     eprintln!(
         "single write p50 before the burst {before:.2} ms, after {after:.2} ms (max {max:.2})"
     );
     assert!(max < 50.0, "after the burst: max {max:.2} ms");
+    assert!(
+        after <= before * 1.5 + 2.0,
+        "after the burst p50 {after:.2} ms, before {before:.2} ms"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -631,20 +672,244 @@ async fn an_unknown_running_set_keeps_the_last_good_one() {
     );
 }
 
-/// Ruling R14: a failed process scan keeps the last good open set; a good one replaces it.
+/// Ruling R14: a failed process scan keeps the last good open set and Muse list; a good one replaces them.
 #[test]
 fn a_failed_open_scan_keeps_the_last_good_set() {
+    use fleetd::procscan::{MuseProc, Scan};
     use fleetd::sessions::Fleet;
     let dir = tempfile::tempdir().unwrap();
     let mut f = Fleet::new("fixture-mac".into(), dir.path().join(".codex"));
     let held: std::collections::HashSet<PathBuf> =
         [dir.path().join(".codex/sessions/rollout-a.jsonl")].into();
-    f.reconcile_codex(Some(held.clone()), now_ms());
-    assert_eq!(f.codex.open, held);
-    f.reconcile_codex(None, now_ms());
-    assert_eq!(f.codex.open, held, "failed scan: kept");
-    f.on_codex(&dir.path().join(".codex/sessions/rollout-b.jsonl"), None);
-    assert_eq!(f.codex.open, held);
-    f.reconcile_codex(Some(Default::default()), now_ms());
-    assert!(f.codex.open.is_empty(), "a good scan replaces it");
+    let muse = vec![MuseProc {
+        pid: 4242,
+        cwd: None,
+        since: STARTED,
+        args: "exec".into(),
+    }];
+    f.take_scan(Some(Scan {
+        codex_open: held.clone(),
+        muse: muse.clone(),
+    }));
+    f.take_scan(None);
+    assert_eq!(
+        (&f.codex.open, &f.muse),
+        (&held, &muse),
+        "failed scan: kept"
+    );
+    f.take_scan(Some(Scan::default()));
+    assert!(
+        f.codex.open.is_empty() && f.muse.is_empty(),
+        "a good scan replaces it"
+    );
+}
+
+/// A hook written while a slow roster run (1 s) is under way is a delta at once: the run holds no lock the hook needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hook_during_a_slow_roster_run_is_not_held_up() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    let (_store, _h, mut rx) = home.start();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drain(&mut rx, Duration::from_millis(100)).await;
+    fs::write(home.stand_in().join("slow"), "1").unwrap();
+    let calls = home.calls("agents --json --all");
+    let job = home.profile().join("jobs/0000cafe");
+    fs::create_dir_all(&job).unwrap();
+    fs::write(job.join("state.json"), "{}").unwrap();
+    let t0 = Instant::now();
+    while home.calls("agents --json --all") == calls {
+        assert!(t0.elapsed() < Duration::from_secs(2), "no run started");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let t1 = Instant::now();
+    let at = home.hook(0, "UserPromptSubmit", None);
+    let (s, got) = wait_for(&mut rx, Duration::from_millis(900), |s| {
+        s.hook_at == Some(at)
+    })
+    .await
+    .expect("a delta while the roster runs");
+    let ms = got.duration_since(t1).as_secs_f64() * 1000.0;
+    eprintln!("hook during a slow roster run -> delta: {ms:.2} ms");
+    assert_eq!(s.state, State::Working);
+    assert!(ms < 50.0, "{ms:.2} ms");
+    assert!(
+        home.calls("agents --json --all") == calls + 1,
+        "the run was still under way"
+    );
+}
+
+/// The hot path's budget (R15): hook write -> delta p95 under 5 ms over 200 single writes. Timing-sensitive: run with
+/// `cargo test --release -p fleetd --test store -- --ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn hook_to_delta_p95_under_5ms() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    let (_store, _h, mut rx) = home.start();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drain(&mut rx, Duration::from_millis(100)).await;
+    let l = hook_latency(&home, &mut rx, 200, Duration::from_millis(10)).await;
+    eprintln!(
+        "hook write -> delta over 200 writes: p50 {:.3} ms, p95 {:.3} ms, max {:.3} ms",
+        l.p50(),
+        l.p95(),
+        l.max()
+    );
+    assert!(l.p95() < 5.0, "p95 {:.3} ms", l.p95());
+}
+
+/// G3: a session's context comes from its status-line snapshot when that is fresh (`contextOf`), else the transcript.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_line_gives_the_context() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    append(&home.transcript(0), &assistant("Reading the loader."));
+    let (store, _h, mut rx) = home.start();
+    assert_eq!(
+        store.snapshot().1[0].context_tokens,
+        Some(7),
+        "the transcript's"
+    );
+    let d = home.profile().join("fleet-status");
+    // Written after the transcript's last line (12:00:00Z), so fresh.
+    let snap = json!({"at": 1_793_966_401_000i64, "session_id": sid(0), "model": {"id": "claude-fixture-2"},
+                      "context_window": {"context_window_size": 200000,
+                                         "current_usage": {"input_tokens": 1000, "cache_creation_input_tokens": 200,
+                                                           "cache_read_input_tokens": 30000}}});
+    let t0 = Instant::now();
+    fs::write(d.join(".tmp"), snap.to_string()).unwrap();
+    fs::rename(d.join(".tmp"), d.join(format!("{}.json", sid(0)))).unwrap();
+    let (_, got) = wait_for(&mut rx, Duration::from_secs(1), |s| {
+        s.context_tokens == Some(31_200)
+    })
+    .await
+    .expect("a delta with the status line's context");
+    eprintln!(
+        "status write -> delta: {:.2} ms",
+        got.duration_since(t0).as_secs_f64() * 1000.0
+    );
+}
+
+#[test]
+fn helper_hold() {
+    common::hold();
+}
+
+/// The gap: a running Muse (installed and signed in) is a session on the board, found by the scan at startup and by
+/// the reconcile, and gone in a delta when its process ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_muse_is_a_session() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    fs::create_dir_all(home.root.join(".config/muse")).unwrap();
+    fs::write(home.root.join(".config/muse/auth.json"), "{}").unwrap();
+    let work = home.root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    // The program is the one installed: `muse_installed` wants an executable `~/.local/bin/muse`.
+    let first = common::Held::start(&home.root.join(".local/bin/muse"), &[], &work);
+    let (store, h, mut rx) = home.start();
+    let muse = |pid: u32| {
+        move |s: &Session| s.engine == Engine::Muse && s.key.session_id == pid.to_string()
+    };
+    let snap = store.snapshot().1;
+    let s = snap
+        .iter()
+        .find(|s| muse(first.pid())(s))
+        .expect("found at startup");
+    assert_eq!(
+        (s.state.clone(), s.live, s.key.profile.as_str()),
+        (State::Working, true, "muse")
+    );
+    assert_eq!(s.cwd.as_deref(), Some("~/work"));
+    assert_eq!(
+        s.doing.as_deref(),
+        Some("--exact helper_hold --nocapture --test-threads=1")
+    );
+
+    let second = common::Held::start(&home.root.join("muse"), &[], &work);
+    h.reconcile();
+    wait_for(&mut rx, Duration::from_secs(1), muse(second.pid()))
+        .await
+        .expect("a new one found by the reconcile");
+    let pid = first.pid();
+    first.stop();
+    h.reconcile();
+    let end = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut gone = false;
+    while let Ok(Ok(d)) = tokio::time::timeout_at(end, rx.recv()).await {
+        if d.remove.iter().any(|k| k.session_id == pid.to_string()) {
+            gone = true;
+            break;
+        }
+    }
+    assert!(gone, "a delta removes it");
+    assert!(store.snapshot().1.iter().any(|s| muse(second.pid())(s)));
+    second.stop();
+}
+
+/// `contextOf`'s choice: the status line when fresh, else the transcript; a 0 just after a restart defers to the
+/// transcript; a percentage without a size uses the guessed window.
+#[test]
+fn context_prefers_a_fresh_status_line() {
+    use fleet_read::statusfile::{context_tokens, StatusSnap};
+    let sl = |at: i64, used: Option<u64>, pct: Option<f64>, window: Option<u64>| StatusSnap {
+        at,
+        model: None,
+        window,
+        used_tokens: used,
+        used_pct: pct,
+    };
+    let t = Some(100_000);
+    assert_eq!(
+        context_tokens(
+            Some(&sl(100_000, Some(5), None, None)),
+            Some(100_000),
+            Some(7),
+            None
+        ),
+        Some(5)
+    );
+    assert_eq!(
+        context_tokens(
+            Some(&sl(10_000, Some(5), None, None)),
+            Some(100_000),
+            Some(7),
+            None
+        ),
+        Some(7),
+        "stale"
+    );
+    assert_eq!(
+        context_tokens(Some(&sl(100_000, Some(0), None, None)), t, Some(7), None),
+        Some(7),
+        "0 after a restart"
+    );
+    assert_eq!(
+        context_tokens(Some(&sl(100_000, Some(0), None, None)), t, None, None),
+        Some(0)
+    );
+    assert_eq!(
+        context_tokens(Some(&sl(100_000, None, Some(10.0), None)), t, None, None),
+        Some(20_000)
+    );
+    assert_eq!(
+        context_tokens(
+            Some(&sl(100_000, None, Some(10.0), None)),
+            t,
+            None,
+            Some("m[1m]")
+        ),
+        Some(100_000)
+    );
+    assert_eq!(
+        context_tokens(
+            Some(&sl(100_000, None, Some(10.0), Some(400_000))),
+            t,
+            None,
+            None
+        ),
+        Some(40_000)
+    );
+    assert_eq!(context_tokens(None, t, Some(7), None), Some(7));
 }

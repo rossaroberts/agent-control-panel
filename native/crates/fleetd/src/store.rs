@@ -26,6 +26,10 @@ struct Inner {
     ring: VecDeque<Delta>,
 }
 
+/// A reader that wants the board and then every change: call `subscribe()` first, then `snapshot()`, and skip every
+/// delta whose `seq` is at or below the snapshot's (it is already in it). The other order can lose a delta written
+/// between the two calls. A reader coming back with a `seq` asks `since(seq)` (after subscribing, likewise) and falls
+/// back to a snapshot on `None`.
 pub struct Store {
     inner: Mutex<Inner>,
     tx: broadcast::Sender<Delta>,

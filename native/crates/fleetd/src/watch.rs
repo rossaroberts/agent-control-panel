@@ -1,19 +1,28 @@
-//! File events in, sessions re-read, deltas out. One FSEvents stream (macOS: latency 0, `kFSEventStreamCreateFlagNoDefer`,
-//! file events, which is what notify's FSEvents backend sets) or inotify (Linux) over each profile's `fleet-state/`, `jobs/`
-//! and `projects/`, and `~/.codex/sessions/`. There is no debounce: each event is handled the moment it comes, and events
-//! that arrive while one is handled are taken together in the next pass (a burst coalesces, a single event waits on
-//! nothing).
+//! File events in, sessions re-read, deltas out.
 //!
-//! - a hook file re-decides that one session, from the roster rows already held;
-//! - a transcript advances that one `Tail`; a rollout its `RolloutTail` (and, when it is not known to be held open, the
-//!   Codex open set is scanned again);
-//! - a `jobs/` change, or a hook that says something new, re-reads that profile's roster on a thread of its own: at most
-//!   one run in flight per profile, and any number of requests during it make exactly one more run after it (R4);
-//! - every 30 s a reconcile pass re-reads files only (hooks, tails against their fingerprints, pid liveness, the jobs'
-//!   records, the open set) and emits only real differences; every 5 minutes it also re-reads each roster (R4).
+//! - **Hot path** (macOS, Ruling R15): kqueue on each profile's `fleet-state/` and `fleet-status/` folders and on each
+//!   followed transcript and rollout (`kq.rs`), handled on its own thread the moment the kernel says so. At most
+//!   `MAX_FOLLOWED` files are followed: the live sessions' and the recently written ones'. On Linux inotify (notify's
+//!   backend) is already immediate and carries all of it.
+//! - **Discovery**: FSEvents (notify's backend: latency 0, `kFSEventStreamCreateFlagNoDefer`) over each profile's
+//!   `fleet-state/`, `fleet-status/`, `jobs/` and `projects/` and `~/.codex/sessions/`: new transcripts and rollouts,
+//!   jobs, hooks of sessions not listed yet. Its events for files kqueue follows are dropped; a hook or status file it
+//!   names is re-read only when its version differs from the one held, so the hot path's work is not done twice.
 //!
-//! The board (`Fleet`) sits behind one lock that is held only for file reads of a session or two and for the store's
-//! write, so a slow roster run (hundreds of ms, outside the lock) never holds up a hook event.
+//! Routing, with no debounce anywhere (what arrives while one pass runs is taken together in the next):
+//! - a hook file re-decides that one session, from the roster rows already held; a status file the same;
+//! - a transcript advances that one `Tail`; a rollout its `RolloutTail`, and when it is not known to be held open the
+//!   process scan runs again on a thread of its own (one in flight, one follow-up);
+//! - a `jobs/` change, or a hook that says something new or names a session not listed (R16), re-reads that profile's
+//!   roster on a thread of its own: at most one run in flight per profile, and any number of requests during it make
+//!   exactly one more run after it (R4);
+//! - every 30 s a reconcile pass re-reads files only (hooks, status files, tails against their fingerprints, pid
+//!   liveness, the jobs' records, the process scan: Codex's open logs and Muse) and emits only real differences; every 5
+//!   minutes it also re-reads each roster (R4).
+//!
+//! The board (`Fleet`) sits behind one lock, held only to look up handles and to merge values read before and to write
+//! the store: no file is read under it (a tail is advanced under its own lock), so neither a roster run nor a reconcile
+//! pass holds up a hook event.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -21,21 +30,27 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use fleet_read::codex::{is_yours, muse_installed, RolloutTail};
 use fleet_read::profiles::claude_profiles;
 use fleet_read::roster::{default_source, RosterSource};
 use fleet_read::transcript::Tail;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::machine::machine_name;
-use crate::procscan::codex_open;
-use crate::sessions::{jobs_signature, now_ms, transcript_of, Fleet};
+use crate::procscan::scan;
+use crate::sessions::{
+    jobs_signature, now_ms, read_hook_file, read_status_file, reconcile_read, sig_of,
+    transcript_of, Fleet, RosterGot,
+};
 use crate::store::Store;
 
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(30);
 pub const ROSTER_SAFETY_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How long `Drop` waits for roster and scan runs under way (a roster run gives up after 8 s).
+const WORKER_GRACE: Duration = Duration::from_secs(10);
 
 pub struct Options {
     pub roster: Box<dyn RosterSource + Send + Sync>,
@@ -62,23 +77,38 @@ struct Runner {
     again: bool,
 }
 
+/// What a background run is for.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Job {
+    Roster(usize),
+    Scan,
+}
+
 struct Shared {
     /// The home folder as the file events name it (symlinks resolved).
     home: PathBuf,
     store: Arc<Store>,
     fleet: Mutex<Fleet>,
     roster: Box<dyn RosterSource + Send + Sync>,
-    runners: Mutex<HashMap<usize, Runner>>,
+    runners: Mutex<HashMap<Job, Runner>>,
     roster_runs: AtomicU64,
+    scan_runs: AtomicU64,
     watcher: Mutex<Option<RecommendedWatcher>>,
     watched: Mutex<HashSet<PathBuf>>,
+    #[cfg(target_os = "macos")]
+    kq: crate::kq::Kq,
+    /// Per folder kqueue watches: each entry's inode as last seen, so a rename over one shows as a change.
+    #[cfg(target_os = "macos")]
+    entries: Mutex<HashMap<PathBuf, HashMap<String, u64>>>,
     stop: AtomicBool,
     wake: (Mutex<()>, Condvar),
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
-/// The running watcher. Dropping it stops the event stream and the reconcile timer.
+/// The running watcher. Dropping it stops the streams and the timer, and waits for its threads.
 pub struct WatchHandle {
     shared: Arc<Shared>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 impl WatchHandle {
@@ -91,14 +121,46 @@ impl WatchHandle {
     pub fn roster_runs(&self) -> u64 {
         self.shared.roster_runs.load(Ordering::SeqCst)
     }
+
+    /// Process scans run by events (not the reconcile's or the first one).
+    pub fn scan_runs(&self) -> u64 {
+        self.shared.scan_runs.load(Ordering::SeqCst)
+    }
+
+    /// Files the hot path follows now.
+    pub fn followed(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        return self.shared.kq.followed();
+        #[cfg(not(target_os = "macos"))]
+        0
+    }
 }
 
 impl Drop for WatchHandle {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        self.shared.wake.1.notify_all();
+        {
+            // Under the timer's lock, so its wait cannot miss it.
+            let _g = self.shared.wake.0.lock().unwrap();
+            self.shared.stop.store(true, Ordering::SeqCst);
+            self.shared.wake.1.notify_all();
+        }
         // Dropping the watcher closes the event channel, which ends the dispatcher.
         self.shared.watcher.lock().unwrap().take();
+        #[cfg(target_os = "macos")]
+        self.shared.kq.wake();
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+        let workers: Vec<_> = self.shared.workers.lock().unwrap().drain(..).collect();
+        let end = Instant::now() + WORKER_GRACE;
+        for w in workers {
+            while !w.is_finished() && Instant::now() < end {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if w.is_finished() {
+                let _ = w.join();
+            }
+        }
     }
 }
 
@@ -106,14 +168,15 @@ pub fn watch(home: &Path, store: Arc<Store>) -> io::Result<WatchHandle> {
     watch_with(home, store, Options::default())
 }
 
-/// Starts watching, and returns once the board holds the first full read (each profile's roster, in parallel, and the
-/// recent Codex logs), so a reader connecting now gets a whole snapshot.
+/// Starts watching, and returns once the board holds the first full read (each profile's roster, in parallel, the
+/// recent Codex logs and the running Muse), so a reader connecting now gets a whole snapshot.
 pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<WatchHandle> {
     let home = home.canonicalize()?;
     let machine = opts
         .machine
         .unwrap_or_else(|| machine_name(&fleet_read::home::home_dir()));
-    let fleet = Fleet::new(machine, home.join(".codex"));
+    let mut fleet = Fleet::new(machine, home.join(".codex"));
+    fleet.muse_on = muse_installed(&home);
     let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
     let watcher = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
         if let Ok(ev) = ev {
@@ -130,10 +193,16 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         roster: opts.roster,
         runners: Mutex::new(HashMap::new()),
         roster_runs: AtomicU64::new(0),
+        scan_runs: AtomicU64::new(0),
         watcher: Mutex::new(Some(watcher)),
         watched: Mutex::new(HashSet::new()),
+        #[cfg(target_os = "macos")]
+        kq: crate::kq::Kq::new()?,
+        #[cfg(target_os = "macos")]
+        entries: Mutex::new(HashMap::new()),
         stop: AtomicBool::new(false),
         wake: (Mutex::new(()), Condvar::new()),
+        workers: Mutex::new(vec![]),
     });
 
     // Watch first, then read: nothing written in between is missed.
@@ -148,36 +217,64 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
             let sh = &shared;
             s.spawn(move || run_roster(sh, pi));
         }
-        let open = codex_open();
+        let found = scan();
         let now = now_ms();
         let mut f = shared.fleet.lock().unwrap();
-        f.open_codex(open, now);
-        let cs = f.codex_sessions(now);
-        shared.store.replace(f.in_codex(), cs);
+        f.open_codex(found, now);
+        let os = f.others(now);
+        shared.store.replace(f.in_others(), os);
     });
+    sync_follows(&shared);
 
+    let mut threads = vec![];
     let sh = shared.clone();
-    thread::Builder::new()
-        .name("fleetd-events".into())
-        .spawn(move || dispatch(&sh, rx))?;
+    threads.push(
+        thread::Builder::new()
+            .name("fleetd-events".into())
+            .spawn(move || dispatch(&sh, rx))?,
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let sh = shared.clone();
+        threads.push(
+            thread::Builder::new()
+                .name("fleetd-kqueue".into())
+                .spawn(move || kq_loop(&sh))?,
+        );
+    }
     let sh = shared.clone();
     let (every, safety) = (opts.reconcile_every, opts.roster_safety_every);
-    thread::Builder::new()
-        .name("fleetd-reconcile".into())
-        .spawn(move || timer(&sh, every, safety))?;
-    Ok(WatchHandle { shared })
+    threads.push(
+        thread::Builder::new()
+            .name("fleetd-reconcile".into())
+            .spawn(move || timer(&sh, every, safety))?,
+    );
+    Ok(WatchHandle { shared, threads })
 }
 
-/// Adds a watch on each folder that exists and is not watched yet (a folder made later is picked up by the reconcile).
+/// Adds a watch on each folder that exists and is not watched yet (a folder made later is picked up by the reconcile),
+/// and on macOS the kqueue watch of each hook and status folder.
 fn arm(sh: &Shared) {
-    let mut want: Vec<PathBuf> = {
+    let profiles: Vec<PathBuf> = {
         let f = sh.fleet.lock().unwrap();
-        f.profiles
-            .iter()
-            .flat_map(|p| ["fleet-state", "jobs", "projects"].map(|d| p.profile.dir.join(d)))
-            .collect()
+        f.profiles.iter().map(|p| p.profile.dir.clone()).collect()
     };
+    let mut want: Vec<PathBuf> = profiles
+        .iter()
+        .flat_map(|d| ["fleet-state", "fleet-status", "jobs", "projects"].map(|s| d.join(s)))
+        .collect();
     want.push(sh.home.join(".codex").join("sessions"));
+    #[cfg(target_os = "macos")]
+    for d in profiles
+        .iter()
+        .flat_map(|d| ["fleet-state", "fleet-status"].map(|s| d.join(s)))
+    {
+        let new = !sh.entries.lock().unwrap().contains_key(&d);
+        if sh.kq.watch_dir(&d) && new {
+            let seen = entries_of(&d);
+            sh.entries.lock().unwrap().entry(d).or_insert(seen);
+        }
+    }
     let mut watched = sh.watched.lock().unwrap();
     let new: Vec<PathBuf> = want
         .into_iter()
@@ -197,16 +294,33 @@ fn arm(sh: &Shared) {
     let _ = paths.commit();
 }
 
-/// What a changed path is.
-enum Route {
-    Hook(usize, String),
-    Transcript(usize, String),
-    Jobs(usize),
-    Codex,
+/// A folder's `*.json` entries and their inodes (from the directory itself: no stat per file).
+#[cfg(target_os = "macos")]
+fn entries_of(dir: &Path) -> HashMap<String, u64> {
+    use std::os::unix::fs::DirEntryExt;
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().into_string().ok()?;
+            (n.ends_with(".json") && !n.starts_with('.')).then(|| (n, e.ino()))
+        })
+        .collect()
 }
 
-fn route(sh: &Shared, f: &Fleet, path: &Path) -> Option<Route> {
-    let rel = path.strip_prefix(&sh.home).ok()?;
+/// What a changed path is.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Route {
+    Hook(usize, String),
+    Status(usize, String),
+    Transcript(usize, String, PathBuf),
+    Jobs(usize),
+    Codex(PathBuf),
+}
+
+fn route(home: &Path, f: &Fleet, path: &Path) -> Option<Route> {
+    let rel = path.strip_prefix(home).ok()?;
     let parts: Vec<&str> = rel
         .components()
         .map(|c| match c {
@@ -215,17 +329,24 @@ fn route(sh: &Shared, f: &Fleet, path: &Path) -> Option<Route> {
         })
         .collect::<Option<_>>()?;
     match parts.as_slice() {
-        [".codex", "sessions", .., name] if name.ends_with(".jsonl") => Some(Route::Codex),
+        [".codex", "sessions", .., name] if name.ends_with(".jsonl") => {
+            Some(Route::Codex(path.to_path_buf()))
+        }
         [p, rest @ ..] => {
             let pi = f.profile_named(p)?;
+            let json = |n: &str| {
+                n.strip_suffix(".json")
+                    .filter(|s| !s.starts_with('.'))
+                    .map(str::to_string)
+            };
             match rest {
-                ["fleet-state", name] => {
-                    Some(Route::Hook(pi, name.strip_suffix(".json")?.to_string()))
-                }
+                ["fleet-state", name] => Some(Route::Hook(pi, json(name)?)),
+                ["fleet-status", name] => Some(Route::Status(pi, json(name)?)),
                 ["jobs", ..] => Some(Route::Jobs(pi)),
                 ["projects", _, name] => Some(Route::Transcript(
                     pi,
                     name.strip_suffix(".jsonl")?.to_string(),
+                    path.to_path_buf(),
                 )),
                 _ => None,
             }
@@ -241,110 +362,337 @@ fn dispatch(sh: &Arc<Shared>, rx: mpsc::Receiver<Vec<PathBuf>>) {
         while let Ok(more) = rx.try_recv() {
             paths.extend(more);
         }
-        let mut seen = HashSet::new();
-        paths.retain(|p| seen.insert(p.clone()));
-        handle(sh, &paths);
+        let routes: Vec<Route> = {
+            let f = sh.fleet.lock().unwrap();
+            paths
+                .iter()
+                .filter_map(|p| route(&sh.home, &f, p))
+                .collect()
+        };
+        // kqueue has these: FSEvents is only discovery for them.
+        #[cfg(target_os = "macos")]
+        let routes: Vec<Route> = routes
+            .into_iter()
+            .filter(|r| match r {
+                Route::Transcript(_, _, p) | Route::Codex(p) => !sh.kq.is_followed(p),
+                _ => true,
+            })
+            .collect();
+        handle(sh, routes);
     }
 }
 
-fn handle(sh: &Arc<Shared>, paths: &[PathBuf]) {
-    let routes: Vec<(Route, &PathBuf)> = {
+/// One pass over routed events: hooks and status files first (the hot path), then transcripts, rollouts, rosters.
+fn handle(sh: &Arc<Shared>, routes: Vec<Route>) {
+    let mut seen = HashSet::new();
+    let mut hooks: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut statuses: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut transcripts = vec![];
+    let mut rollouts = vec![];
+    for r in routes {
+        if !seen.insert(r.clone()) {
+            continue;
+        }
+        match r {
+            Route::Hook(pi, sid) => hooks.entry(pi).or_default().push(sid),
+            Route::Status(pi, sid) => statuses.entry(pi).or_default().push(sid),
+            Route::Transcript(pi, sid, p) => transcripts.push((pi, sid, p)),
+            Route::Jobs(pi) => request(sh, Job::Roster(pi)),
+            Route::Codex(p) => rollouts.push(p),
+        }
+    }
+    for (pi, sids) in hooks {
+        on_hooks(sh, pi, sids);
+    }
+    for (pi, sids) in statuses {
+        on_statuses(sh, pi, sids);
+    }
+    if !transcripts.is_empty() {
+        on_transcripts(sh, transcripts);
+    }
+    if !rollouts.is_empty() {
+        on_rollouts(sh, rollouts);
+    }
+}
+
+/// Hook files changed: those whose version differs from the one held are read (without the board), merged, and their
+/// sessions re-decided at once. A hook that moved, or of a session not listed, asks for a roster read (R16).
+fn on_hooks(sh: &Arc<Shared>, pi: usize, sids: Vec<String>) {
+    let (profile, held) = {
         let f = sh.fleet.lock().unwrap();
-        paths
-            .iter()
-            .filter_map(|p| Some((route(sh, &f, p)?, p)))
-            .collect()
+        (f.profiles[pi].profile.clone(), f.hook_sigs(pi, &sids))
     };
-    if routes.is_empty() {
+    let reads: Vec<_> = sids
+        .into_iter()
+        .zip(held)
+        .filter(|(sid, h)| match h {
+            Some(held) => sig_of(&crate::sessions::hook_path(&profile, sid)) != *held,
+            None => true,
+        })
+        .map(|(sid, _)| {
+            let r = read_hook_file(&profile, &sid);
+            (sid, r)
+        })
+        .collect();
+    if reads.is_empty() {
         return;
     }
-    // A rollout not known to be held open may be one a Codex just opened: scan again, outside the lock (about 1 ms).
-    let rescan = {
-        let f = sh.fleet.lock().unwrap();
-        routes
-            .iter()
-            .any(|(r, p)| matches!(r, Route::Codex) && !f.codex.open.contains(*p))
-    };
-    let open = if rescan { codex_open() } else { None };
+    let mut roster = false;
+    {
+        let mut f = sh.fleet.lock().unwrap();
+        let now = now_ms();
+        let mut out = vec![];
+        for (sid, r) in reads {
+            let h = f.merge_hook(pi, &sid, r);
+            roster |= h.moved;
+            if h.changed {
+                out.extend(f.claude_session(pi, &sid, now));
+            }
+        }
+        sh.store.upsert(out);
+    }
+    if roster {
+        request(sh, Job::Roster(pi));
+    }
+}
 
-    let mut rosters = HashSet::new();
+/// Status files changed: as hooks, without a roster read.
+fn on_statuses(sh: &Arc<Shared>, pi: usize, sids: Vec<String>) {
+    let (profile, held) = {
+        let f = sh.fleet.lock().unwrap();
+        (f.profiles[pi].profile.clone(), f.status_sigs(pi, &sids))
+    };
+    let reads: Vec<_> = sids
+        .into_iter()
+        .zip(held)
+        .filter_map(|(sid, h)| {
+            let held = h?; // a session not listed has no row to show it on
+            (sig_of(&crate::sessions::status_path(&profile, &sid)) != held).then(|| {
+                let r = read_status_file(&profile, &sid);
+                (sid, r)
+            })
+        })
+        .collect();
+    if reads.is_empty() {
+        return;
+    }
     let mut f = sh.fleet.lock().unwrap();
     let now = now_ms();
-    let mut touched: Vec<(usize, String)> = vec![];
-    let mut codex = false;
-    let mut open = open;
-    for (r, p) in &routes {
-        match r {
-            Route::Hook(pi, sid) => {
-                let h = f.on_hook(*pi, sid);
-                if h.known {
-                    touched.push((*pi, sid.clone()));
+    let mut out = vec![];
+    for (sid, r) in reads {
+        if f.merge_status(pi, &sid, r) {
+            out.extend(f.claude_session(pi, &sid, now));
+        }
+    }
+    sh.store.upsert(out);
+}
+
+/// Transcripts changed: each listed session's `Tail` advances under its own lock, or a new transcript's first read is
+/// made without the board; then the board takes them in.
+fn on_transcripts(sh: &Arc<Shared>, items: Vec<(usize, String, PathBuf)>) {
+    let looked: Vec<_> = {
+        let f = sh.fleet.lock().unwrap();
+        items
+            .into_iter()
+            .filter_map(|(pi, sid, p)| Some((f.tail_for(pi, &sid, &p)?, pi, sid, p)))
+            .collect()
+    };
+    let mut failed = vec![];
+    let mut opened = vec![];
+    let mut touched = vec![];
+    for (tail, pi, sid, p) in looked {
+        match tail {
+            Some(t) => {
+                if t.lock().unwrap().advance().is_err() {
+                    failed.push((pi, sid.clone(), t));
                 }
-                if h.moved {
-                    rosters.insert(*pi);
+                touched.push((pi, sid));
+            }
+            None => {
+                if let Ok(t) = Tail::open(&p) {
+                    opened.push((pi, sid.clone(), p, t));
+                    touched.push((pi, sid));
                 }
-            }
-            Route::Transcript(pi, sid) => {
-                if f.on_transcript(*pi, sid, p) {
-                    touched.push((*pi, sid.clone()));
-                }
-            }
-            Route::Jobs(pi) => {
-                rosters.insert(*pi);
-            }
-            Route::Codex => {
-                f.on_codex(p, open.take());
-                codex = true;
             }
         }
     }
-    let mut out: Vec<_> = touched
-        .iter()
-        .filter_map(|(pi, sid)| f.claude_session(*pi, sid, now))
-        .collect();
-    if codex {
-        let cs = f.codex_sessions(now);
-        sh.store.replace(f.in_codex(), cs);
+    let mut follow = vec![];
+    {
+        let mut f = sh.fleet.lock().unwrap();
+        for (pi, sid, t) in &failed {
+            f.drop_tail(*pi, sid, t);
+        }
+        for (pi, sid, p, t) in opened {
+            if f.install_tail(pi, &sid, t) {
+                follow.push(p);
+            }
+        }
+        let now = now_ms();
+        let out: Vec<_> = touched
+            .iter()
+            .filter_map(|(pi, sid)| f.claude_session(*pi, sid, now))
+            .collect();
+        sh.store.upsert(out);
     }
-    out.dedup_by(|a, b| a.key == b.key);
-    sh.store.upsert(out);
-    drop(f);
-    for pi in rosters {
-        request_roster(sh, pi);
+    #[cfg(target_os = "macos")]
+    for p in follow {
+        sh.kq.follow(&p);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = follow;
+}
+
+/// Rollouts changed: each followed one advances under its own lock, a new one of yours is opened without the board.
+/// One not known to be held open asks for a process scan, which runs on its own thread: this pass does not wait for it.
+fn on_rollouts(sh: &Arc<Shared>, paths: Vec<PathBuf>) {
+    let (looked, unknown_open): (Vec<_>, bool) = {
+        let f = sh.fleet.lock().unwrap();
+        let unknown = paths.iter().any(|p| !f.codex.open.contains(p));
+        (
+            paths
+                .into_iter()
+                .filter(|p| f.under_sessions(p))
+                .map(|p| (f.rollout(&p), p))
+                .collect(),
+            unknown,
+        )
+    };
+    let mut failed = vec![];
+    let mut opened = vec![];
+    for (t, p) in looked {
+        match t {
+            Some(t) => {
+                if t.lock().unwrap().advance().is_err() {
+                    failed.push((p, t));
+                }
+            }
+            None => {
+                if p.is_file() && is_yours(&p) {
+                    if let Ok(t) = RolloutTail::open(&p) {
+                        opened.push((p, t));
+                    }
+                }
+            }
+        }
+    }
+    let mut follow = vec![];
+    {
+        let mut f = sh.fleet.lock().unwrap();
+        for (p, t) in &failed {
+            f.drop_rollout(p, t);
+        }
+        for (p, t) in opened {
+            follow.push(p.clone());
+            f.install_rollout(p, t);
+        }
+        let now = now_ms();
+        let os = f.others(now);
+        sh.store.replace(f.in_others(), os);
+    }
+    #[cfg(target_os = "macos")]
+    for p in follow {
+        sh.kq.follow(&p);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = follow;
+    if unknown_open {
+        request(sh, Job::Scan);
     }
 }
 
-/// Asks for a roster read of a profile: one starts now unless one is under way, in which case exactly one more runs after it.
-fn request_roster(sh: &Arc<Shared>, pi: usize) {
+#[cfg(target_os = "macos")]
+fn kq_loop(sh: &Arc<Shared>) {
+    use crate::kq::Target;
+    while !sh.stop.load(Ordering::SeqCst) {
+        let events = sh.kq.wait();
+        let mut routes = vec![];
+        for t in events {
+            match t {
+                Target::Dir(d) => {
+                    // Which entries changed: a rename over a file is a new inode.
+                    let now = entries_of(&d);
+                    let changed: Vec<String> = {
+                        let mut all = sh.entries.lock().unwrap();
+                        let was = all.entry(d.clone()).or_default();
+                        let ch = now
+                            .iter()
+                            .filter(|(n, ino)| was.get(*n) != Some(ino))
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        *was = now;
+                        ch
+                    };
+                    let f = sh.fleet.lock().unwrap();
+                    routes.extend(
+                        changed
+                            .iter()
+                            .filter_map(|n| route(&sh.home, &f, &d.join(n))),
+                    );
+                }
+                Target::File(p) => {
+                    let f = sh.fleet.lock().unwrap();
+                    routes.extend(route(&sh.home, &f, &p));
+                }
+            }
+        }
+        if !routes.is_empty() {
+            handle(sh, routes);
+        }
+    }
+}
+
+/// Follows exactly the files the board says are worth it (live or recent sessions, newest first, capped).
+fn sync_follows(sh: &Shared) {
+    #[cfg(target_os = "macos")]
+    {
+        let want = sh.fleet.lock().unwrap().follows(now_ms());
+        sh.kq.set_follows(&want);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = sh;
+}
+
+/// Asks for a background run: one starts now unless one is under way, in which case exactly one more runs after it.
+fn request(sh: &Arc<Shared>, job: Job) {
     {
         let mut rs = sh.runners.lock().unwrap();
-        let r = rs.entry(pi).or_default();
+        let r = rs.entry(job).or_default();
         if r.in_flight {
             r.again = true;
             return;
         }
         r.in_flight = true;
     }
-    let sh = sh.clone();
-    let spawned = thread::Builder::new().name("fleetd-roster".into()).spawn({
-        let sh = sh.clone();
-        move || loop {
-            run_roster(&sh, pi);
-            let mut rs = sh.runners.lock().unwrap();
-            let r = rs.entry(pi).or_default();
-            if std::mem::take(&mut r.again) && !sh.stop.load(Ordering::SeqCst) {
+    let s = sh.clone();
+    let spawned = thread::Builder::new()
+        .name("fleetd-worker".into())
+        .spawn(move || loop {
+            match job {
+                Job::Roster(pi) => run_roster(&s, pi),
+                Job::Scan => run_scan(&s),
+            }
+            let mut rs = s.runners.lock().unwrap();
+            let r = rs.entry(job).or_default();
+            if std::mem::take(&mut r.again) && !s.stop.load(Ordering::SeqCst) {
                 continue;
             }
             r.in_flight = false;
             break;
+        });
+    match spawned {
+        Ok(h) => {
+            let mut w = sh.workers.lock().unwrap();
+            w.retain(|h| !h.is_finished());
+            w.push(h);
         }
-    });
-    if spawned.is_err() {
-        sh.runners.lock().unwrap().entry(pi).or_default().in_flight = false;
+        Err(_) => {
+            sh.runners.lock().unwrap().entry(job).or_default().in_flight = false;
+        }
     }
 }
 
-/// One roster read of a profile: the read and the new transcripts' first reads outside the lock, then the board updated.
+/// One roster read of a profile: the read, the new transcripts' first reads and every listed session's hook and status
+/// file outside the lock, then the board updated.
 fn run_roster(sh: &Shared, pi: usize) {
     sh.roster_runs.fetch_add(1, Ordering::SeqCst);
     let profile = {
@@ -354,60 +702,96 @@ fn run_roster(sh: &Shared, pi: usize) {
         ps.profile.clone()
     };
     let read = sh.roster.read(&profile);
-    let need = match &read {
-        Ok(r) => sh.fleet.lock().unwrap().untailed(pi, r),
-        Err(_) => vec![],
-    };
-    let opened: HashMap<String, Tail> = need
-        .into_iter()
-        .filter_map(|(sid, cwd)| {
-            let t = Tail::open(&transcript_of(&profile, &sid, cwd.as_deref())?).ok()?;
-            Some((sid, t))
-        })
-        .collect();
-    let mut f = sh.fleet.lock().unwrap();
-    let now = now_ms();
-    f.apply_roster(pi, read, opened, now);
-    let ss = f.profile_sessions(pi, now);
-    sh.store.replace(f.in_profile(pi), ss);
-}
-
-/// The reconcile pass: files only, then one write of everything that really changed. `rosters`: also re-read each roster
-/// (the 5-minute safety run).
-fn reconcile(sh: &Arc<Shared>, rosters: bool) {
-    let found = claude_profiles(&sh.home);
-    let open = codex_open();
-    let mut wanted = HashSet::new();
-    {
-        let mut f = sh.fleet.lock().unwrap();
-        wanted.extend(f.add_profiles(found));
-        let now = now_ms();
-        for pi in 0..f.profiles.len() {
-            f.reconcile_profile(pi);
-            let ps = &f.profiles[pi];
-            if rosters || jobs_signature(&ps.profile) != ps.jobs_sig {
-                wanted.insert(pi);
+    let mut got = RosterGot::default();
+    if let Ok(r) = &read {
+        let need = sh.fleet.lock().unwrap().untailed(pi, r);
+        for (sid, cwd) in need {
+            match transcript_of(&profile, &sid, cwd.as_deref()).and_then(|f| Tail::open(&f).ok()) {
+                Some(t) => {
+                    got.opened.insert(sid, t);
+                }
+                None => {
+                    got.missed.insert(sid);
+                }
             }
         }
-        f.reconcile_codex(open, now);
+        for sid in r.rows.iter().filter_map(|r| r.session_id.as_deref()) {
+            got.hooks.insert(sid.into(), read_hook_file(&profile, sid));
+            got.statuses
+                .insert(sid.into(), read_status_file(&profile, sid));
+        }
+    }
+    {
+        let mut f = sh.fleet.lock().unwrap();
+        let now = now_ms();
+        f.apply_roster(pi, read, got, now);
+        let ss = f.profile_sessions(pi, now);
+        sh.store.replace(f.in_profile(pi), ss);
+    }
+    sync_follows(sh);
+}
+
+/// One process scan (Codex's open logs, Muse), off the event threads: logs newly held open are opened without the
+/// board, then Codex and Muse re-decided.
+fn run_scan(sh: &Shared) {
+    sh.scan_runs.fetch_add(1, Ordering::SeqCst);
+    let Some(found) = scan() else {
+        return; // R14: keep the last good result
+    };
+    let new = sh.fleet.lock().unwrap().held_untracked(&found.codex_open);
+    let opened: Vec<_> = new
+        .into_iter()
+        .filter_map(|f| Some((f.clone(), RolloutTail::open(&f).ok()?)))
+        .collect();
+    {
+        let mut f = sh.fleet.lock().unwrap();
+        for (p, t) in opened {
+            f.install_rollout(p, t);
+        }
+        f.take_scan(Some(found));
+        let now = now_ms();
+        let os = f.others(now);
+        sh.store.replace(f.in_others(), os);
+    }
+    sync_follows(sh);
+}
+
+/// The reconcile pass: a plan taken under the lock, every read without it, the results merged, then one write of
+/// everything that really changed. `rosters`: also re-read each roster (the 5-minute safety run).
+fn reconcile(sh: &Arc<Shared>, rosters: bool) {
+    let found = claude_profiles(&sh.home);
+    let added = sh.fleet.lock().unwrap().add_profiles(found);
+    let plan = sh.fleet.lock().unwrap().reconcile_plan();
+    let got = reconcile_read(&plan, scan(), muse_installed(&sh.home), now_ms());
+    let mut wanted: HashSet<usize> = added.into_iter().collect();
+    {
+        let mut f = sh.fleet.lock().unwrap();
+        let now = now_ms();
+        wanted.extend(f.merge_reconcile(got));
+        if rosters {
+            wanted.extend(0..f.profiles.len());
+        }
         let all = f.all_sessions(now);
         sh.store.replace(f.in_machine(), all);
     }
     arm(sh);
+    sync_follows(sh);
     for pi in wanted {
-        request_roster(sh, pi);
+        request(sh, Job::Roster(pi));
     }
 }
 
 fn timer(sh: &Arc<Shared>, every: Duration, safety: Duration) {
     let mut last_safety = Instant::now();
     loop {
-        let g = sh.wake.0.lock().unwrap();
-        let (_g, _) = sh
-            .wake
-            .1
-            .wait_timeout_while(g, every, |_| !sh.stop.load(Ordering::SeqCst))
-            .unwrap();
+        {
+            let g = sh.wake.0.lock().unwrap();
+            let _ = sh
+                .wake
+                .1
+                .wait_timeout_while(g, every, |_| !sh.stop.load(Ordering::SeqCst))
+                .unwrap();
+        }
         if sh.stop.load(Ordering::SeqCst) {
             return;
         }

@@ -6,4 +6,5 @@ pub mod hookfile;
 mod json;
 pub mod profiles;
 pub mod roster;
+pub mod statusfile;
 pub mod transcript;
