@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+pub mod stub_tailscale;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};

@@ -14,14 +14,16 @@ use fleet_model::wire::{
     decode, encode, hello_proto, read_body, write_frame, Frame, Role, PROTO, TERM_CLIENT_MAX,
     TERM_IN_MAX,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{UnixListener, UnixStream};
+use std::os::fd::{AsRawFd, RawFd};
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+use crate::net::{self, Auth};
 use crate::store::Store;
 use crate::terms::{term_sink, ConnId, TermSink, TermSource, Terms, SINK_HIGH};
 
@@ -64,7 +66,6 @@ impl Drop for SocketGuard {
 /// A leftover socket is replaced only when it is a socket and nothing answers (refused or gone); any other file at the
 /// path, or any other connect error, is left alone and reported.
 pub fn bind(path: &Path) -> io::Result<(UnixListener, SocketGuard)> {
-    use std::os::fd::AsRawFd;
     use std::os::unix::fs::FileTypeExt;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -148,7 +149,10 @@ pub async fn serve(listener: UnixListener, store: Arc<Store>, machine: String, t
             Ok((stream, _)) => {
                 let (store, machine, terms) = (store.clone(), machine.clone(), terms.clone());
                 tokio::spawn(async move {
-                    let _ = handle(stream, store, machine, terms).await;
+                    // The fd stays open while either half lives: `hung_up` polls it.
+                    let fd = stream.as_raw_fd();
+                    let (r, w) = stream.into_split();
+                    let _ = handle(r, w, fd, store, machine, terms).await;
                 });
             }
             Err(e) => {
@@ -159,7 +163,59 @@ pub async fn serve(listener: UnixListener, store: Arc<Store>, machine: String, t
     }
 }
 
-async fn send(w: &mut OwnedWriteHalf, f: &Frame) -> io::Result<()> {
+/// Accepts TCP clients until the task is dropped (`net`): each is allowed or refused by `auth` before a byte of it is
+/// read as a frame, and an allowed one is then served exactly as a Unix socket client is.
+pub async fn serve_tcp(
+    listener: TcpListener,
+    auth: Arc<Auth>,
+    store: Arc<Store>,
+    machine: String,
+    terms: Arc<Terms>,
+) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                let _ = net::keepalive(&stream);
+                let Some(in_auth) = auth.enter() else {
+                    auth.log_refusal(peer.ip(), "busy");
+                    net::refuse_now(stream, "busy");
+                    continue;
+                };
+                let (auth, store, machine, terms) =
+                    (auth.clone(), store.clone(), machine.clone(), terms.clone());
+                tokio::spawn(async move {
+                    let local = match stream.local_addr() {
+                        Ok(a) => a,
+                        Err(_) => return,
+                    };
+                    let checked = auth.check(peer, local, &stream).await;
+                    drop(in_auth);
+                    match checked {
+                        Ok(allowed) => {
+                            let fd = stream.as_raw_fd();
+                            let (r, w) = stream.into_split();
+                            let conn = handle(r, w, fd, store, machine, terms);
+                            if let Some(why) = net::until_revoked(conn, allowed.revoked).await {
+                                // Logged by auth; the connection is dropped here, which closes it.
+                                let _ = why;
+                            }
+                        }
+                        Err(why) => {
+                            auth.log_refusal(peer.ip(), &why);
+                            net::refuse(stream, &why).await;
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("fleetd: accept tcp: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+async fn send<W: AsyncWrite + Unpin>(w: &mut W, f: &Frame) -> io::Result<()> {
     timeout(WRITE_WITHIN, write_frame(w, f))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "client not reading"))?
@@ -179,13 +235,19 @@ fn snapshot(store: &Store, machine: &str) -> (u64, Frame) {
     )
 }
 
-async fn handle(
-    stream: UnixStream,
+/// One connection, over either socket: `fd` is the connection's own, for `hung_up`, and stays open while `r` lives.
+async fn handle<R, W>(
+    mut r: R,
+    mut w: W,
+    fd: RawFd,
     store: Arc<Store>,
     machine: String,
     terms: Arc<Terms>,
-) -> io::Result<()> {
-    let (mut r, mut w) = stream.into_split();
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
     let body = timeout(HELLO_WITHIN, read_body(&mut r, HELLO_MAX))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello"))??;
@@ -202,7 +264,7 @@ async fn handle(
                 ..
             }),
             Some(PROTO),
-        ) => return terminals(r, w, terms).await,
+        ) => return terminals(r, w, fd, terms).await,
         // `since` counts within one run only (R24): from another run, or with no run, it gets a snapshot.
         (Ok(Frame::Hello { since, run, .. }), Some(PROTO)) => {
             since.filter(|_| run == Some(store.run()))
@@ -306,11 +368,11 @@ fn test_ms(var: &str) -> Option<Duration> {
 /// refused opens, in one order) goes back, and this layer's last word (an `Error`) before it closes. A client that reads
 /// slowly only stops its own ptys (backpressure in `Terms`), so it is kept; one whose sink is full and that has taken
 /// nothing for `term_stall()` is closed. Nothing here takes the board's lock.
-async fn terminals(
-    mut r: OwnedReadHalf,
-    mut w: OwnedWriteHalf,
-    terms: Arc<Terms>,
-) -> io::Result<()> {
+async fn terminals<R, W>(mut r: R, mut w: W, fd: RawFd, terms: Arc<Terms>) -> io::Result<()>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
     let conn: ConnId = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     let (sink, source) = term_sink();
     // The reader's last word, an `Error`, just before it closes.
@@ -320,7 +382,7 @@ async fn terminals(
     let mut inflight: Option<JoinHandle<Result<(), String>>> = None;
     // In a block of its own: both halves (and their borrows) are gone before the cleanup.
     let res = {
-        let reader = read_terms(&mut r, &terms, conn, &sink, &source, ctl, &mut inflight);
+        let reader = read_terms(&mut r, fd, &terms, conn, &sink, &source, ctl, &mut inflight);
         let writer = async {
             let stall = term_stall();
             loop {
@@ -356,8 +418,8 @@ async fn terminals(
 
 /// Writes one frame. Partial writes are progress; `stall` with no progress at all while the sink is full too (its ptys
 /// stopped on it) ends the connection (Ruling P2-R5). A stall with room in the sink is waited out: the programs still run.
-async fn write_term(
-    w: &mut OwnedWriteHalf,
+async fn write_term<W: AsyncWrite + Unpin>(
+    w: &mut W,
     f: &Frame,
     source: &TermSource,
     stall: Duration,
@@ -383,8 +445,10 @@ async fn write_term(
 }
 
 /// Reads the client's frames until it hangs up or breaks a rule (then its `Error` is the last thing queued).
-async fn read_terms(
-    r: &mut OwnedReadHalf,
+#[allow(clippy::too_many_arguments)]
+async fn read_terms<R: AsyncRead + Unpin>(
+    r: &mut R,
+    fd: RawFd,
     terms: &Arc<Terms>,
     conn: ConnId,
     sink: &TermSink,
@@ -434,7 +498,7 @@ async fn read_terms(
                 if let Err(error) = opened? {
                     // Through the sink, behind any output of an earlier terminal of this `ref`; and not past a full sink,
                     // so a client sent refusals it does not read stops being read.
-                    if !wait_room(r, source).await {
+                    if !wait_room(fd, source).await {
                         return Ok(());
                     }
                     sink.end(r#ref, Some(error));
@@ -446,7 +510,7 @@ async fn read_terms(
                     refuse(format!("TermIn of {n} bytes; at most {TERM_IN_MAX}")).await;
                     return Ok(());
                 }
-                if !offer(r, terms, conn, r#ref, &data).await {
+                if !offer(fd, terms, conn, r#ref, &data).await {
                     return Ok(());
                 }
             }
@@ -461,10 +525,10 @@ async fn read_terms(
 }
 
 /// Waits (every 5 ms) until the sink is at or below `SINK_HIGH`. False when the client hung up meanwhile.
-async fn wait_room(r: &OwnedReadHalf, source: &TermSource) -> bool {
+async fn wait_room(fd: RawFd, source: &TermSource) -> bool {
     while source.pending_bytes() > SINK_HIGH {
         tokio::time::sleep(STALL_POLL).await;
-        if hung_up(r) {
+        if hung_up(fd) {
             return false;
         }
     }
@@ -476,10 +540,10 @@ async fn wait_room(r: &OwnedReadHalf, source: &TermSource) -> bool {
 /// never dropped (Ruling P2-R4). Re-offering is what "until `input_pending` drops" comes to for this one terminal: the
 /// connection-wide `input_pending` is the fullest of its terminals, which may be another one. False when the client hung
 /// up meanwhile.
-async fn offer(r: &OwnedReadHalf, terms: &Terms, conn: ConnId, r#ref: u32, data: &[u8]) -> bool {
+async fn offer(fd: RawFd, terms: &Terms, conn: ConnId, r#ref: u32, data: &[u8]) -> bool {
     while terms.input(conn, r#ref, data).is_err() {
         tokio::time::sleep(STALL_POLL).await;
-        if hung_up(r) {
+        if hung_up(fd) {
             return false;
         }
     }
@@ -487,15 +551,16 @@ async fn offer(r: &OwnedReadHalf, terms: &Terms, conn: ConnId, r#ref: u32, data:
 }
 
 /// The client has closed the connection: `POLLHUP` (or an error) on the socket. Unlike a read, this sees the hang-up
-/// even while frames the client sent before it are still unread.
-fn hung_up(r: &OwnedReadHalf) -> bool {
-    use std::os::fd::AsRawFd;
+/// even while frames the client sent before it are still unread. `fd` is the connection's, open while its read half lives
+/// (the callers hold it).
+fn hung_up(fd: RawFd) -> bool {
     let mut p = libc::pollfd {
-        fd: r.as_ref().as_raw_fd(),
+        fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    // SAFETY: one pollfd on the stack, for an fd the stream owns for as long as `r` lives; a timeout of 0 never blocks.
+    // SAFETY: one pollfd on the stack, for an fd the stream owns for as long as its read half lives (held by every caller);
+    // a timeout of 0 never blocks.
     let n = unsafe { libc::poll(&mut p, 1, 0) };
     n > 0 && p.revents & (libc::POLLHUP | libc::POLLERR) != 0
 }
