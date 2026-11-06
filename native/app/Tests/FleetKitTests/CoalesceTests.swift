@@ -173,6 +173,13 @@ private let meta = Meta(
         #expect(file == 0o600 && dir == 0o700)
         let left = try fm.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
         #expect(left == ["board.cache"])  // no temp file left behind
+
+        // A folder someone else made 0755 first (fleetd, under the default umask) is tightened on the next write.
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.deletingLastPathComponent().path)
+        _ = board.apply(.delta(Delta(seq: 1, upsert: [session("b")], remove: [])))
+        BoardCache.writeFile(Data("x".utf8), to: url)
+        let again = try fm.attributesOfItem(atPath: url.deletingLastPathComponent().path)[.posixPermissions] as? Int
+        #expect(again == 0o700)
     }
 
     /// I2: a quiet board ticking (the 30 s refresh, a render that changes nothing) writes nothing.
@@ -316,5 +323,39 @@ private let meta = Meta(
                 #expect(BoardRows.apply(edit, to: old, from: new) == new)
             }
         }
+    }
+}
+
+/// Ross saw the row text overlap at his window width: no two columns ever share a pixel, each lies inside its row,
+/// state and title always show, and the right-hand columns give way in their order.
+@Suite struct RowLayoutTests {
+    @Test func noColumnsOverlapAndAllLieInsideTheRowAtAnyWidth() {
+        for w in stride(from: CGFloat(40), through: 1600, by: 7) {
+            let f = RowLayout.frames(width: w, height: 30)
+            let row = CGRect(x: 0, y: 0, width: w, height: 30)
+            let rects = Array(f.values)
+            for r in rects { #expect(row.contains(r), "outside the row at \(w)") }
+            for i in rects.indices {
+                for j in rects.indices where j > i {
+                    #expect(!rects[i].intersects(rects[j]), "overlap at \(w): \(rects[i]) \(rects[j])")
+                }
+            }
+            if w >= 140 { #expect(f[.state] != nil && f[.title] != nil, "state and title at \(w)") }
+        }
+    }
+
+    @Test func columnsGiveWayInOrderAndTheTitleKeepsItsRoom() {
+        let wide = RowLayout.frames(width: 680, height: 30)
+        #expect(Set(wide.keys) == Set(RowColumn.allCases))
+        var dropped: [RowColumn] = []
+        for w in stride(from: CGFloat(680), through: 260, by: -1) {
+            let f = RowLayout.frames(width: w, height: 30)
+            for c in RowLayout.dropOrder where f[c] == nil && !dropped.contains(c) { dropped.append(c) }
+            // While any column that can give way still shows, the title has its room.
+            if RowLayout.dropOrder.contains(where: { f[$0] != nil }) {
+                #expect(f[.title]!.width >= RowLayout.minTitle, "title room at \(w)")
+            }
+        }
+        #expect(dropped == RowLayout.dropOrder)
     }
 }

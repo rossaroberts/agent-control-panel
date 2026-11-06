@@ -90,15 +90,29 @@ public final class BoardCache {
         disk.async { Self.writeFile(data, to: url) }
     }
 
-    /// The temp file is 0600 from its first byte, in a 0700 folder, then renamed over the cache: the titles in it are
-    /// never readable by anyone else, and a reader sees the old file or the new one, never half of one.
-    private nonisolated static func writeFile(_ data: Data, to url: URL) {
+    /// The folder is set to 0700 on every write (fleetd may have made it first, under the default umask), and the
+    /// temp file is created 0600 and exclusive before a byte goes in, then renamed over the cache: the titles in it
+    /// are never readable by anyone else, and a reader sees the old file or the new one, never half of one.
+    nonisolated static func writeFile(_ data: Data, to url: URL) {
         let fm = FileManager.default
         let dir = url.deletingLastPathComponent()
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).\(getpid()).tmp")
-        guard fm.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600]) else { return }
-        if rename(tmp.path, url.path) != 0 { try? fm.removeItem(at: tmp) }
+        unlink(tmp.path)  // one left by a crash of this pid number
+        let fd = open(tmp.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return }
+        let whole = data.withUnsafeBytes { buf -> Bool in
+            var off = 0
+            while off < buf.count {
+                let n = Darwin.write(fd, buf.baseAddress! + off, buf.count - off)
+                if n <= 0 { return false }
+                off += n
+            }
+            return true
+        }
+        close(fd)
+        if !whole || rename(tmp.path, url.path) != 0 { unlink(tmp.path) }
     }
 
     public nonisolated static func encode(_ c: Contents) -> Data {

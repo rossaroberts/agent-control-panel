@@ -7,7 +7,7 @@ use std::time::Duration;
 use fleet_model::types::{Delta, Engine, Session, SessionKey, State};
 use fleet_model::wire::{read_frame, write_frame, Frame, Role, MAX_FRAME, PROTO};
 use fleetd::client::Client;
-use fleetd::serve::{bind, serve};
+use fleetd::serve::{bind, private_dir, serve};
 use fleetd::store::Store;
 use tokio::task::JoinHandle;
 
@@ -523,4 +523,35 @@ async fn a_board_connection_is_sent_the_meta_after_its_first_frame_and_after_eac
     let mut cur = Client::connect(&s.path, Some((run, 1))).await.unwrap();
     assert!(matches!(next_any(&mut cur).await, Frame::Delta(_)));
     assert!(matches!(next_any(&mut cur).await, Frame::Meta(_)));
+}
+
+/// The socket's folder holds the app's board cache (session titles) too: fleetd makes it 0700, tightens its own folder
+/// when it is already there, and leaves any other folder (a shared /tmp, a FLEETD_SOCK elsewhere) as it found it.
+#[tokio::test]
+async fn the_socket_folder_is_0700_and_only_fleetds_own_is_tightened() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let root = tempfile::tempdir().unwrap();
+
+    // Made fresh, every level it creates is 0700, and the socket in it 0600.
+    let fresh = root.path().join("a/b/Fleet");
+    let (_l, _g) = bind(&fresh.join("fleetd.sock")).unwrap();
+    assert_eq!(mode(&root.path().join("a")), 0o700);
+    assert_eq!(mode(&fresh), 0o700);
+    assert_eq!(mode(&fresh.join("fleetd.sock")), 0o600);
+
+    // fleetd's own folder, left 0755 by an older fleetd or a default umask: tightened.
+    let own = root.path().join("Fleet");
+    std::fs::create_dir(&own).unwrap();
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (_l2, _g2) = bind(&own.join("fleetd.sock")).unwrap();
+    assert_eq!(mode(&own), 0o700);
+
+    // Anyone else's folder: untouched.
+    let shared = root.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    private_dir(&shared).unwrap();
+    let (_l3, _g3) = bind(&shared.join("fleetd.sock")).unwrap();
+    assert_eq!(mode(&shared), 0o755);
 }

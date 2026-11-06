@@ -25,23 +25,40 @@ final class BoardToolbar: NSObject, NSToolbarDelegate {
         toolbar.allowsUserCustomization = false
     }
 
+    /// The room each side has (the sidebar's width less the window buttons; the detail's less its title and the
+    /// connection), from the split view; the meters that do not fit are left out from the right.
+    private var room: (accounts: CGFloat, vitals: CGFloat) = (.greatestFiniteMagnitude, .greatestFiniteMagnitude)
+
+    func fit(sidebar: CGFloat, detail: CGFloat) {
+        // The window buttons and the toolbar's own padding take ~150 pt of the sidebar; the title ~150 pt of the
+        // detail, and each item ~30 pt of padding.
+        let r = (max(0, sidebar - 150), max(0, detail - 150 - connection.intrinsicContentSize.width - 70))
+        guard r != room else { return }
+        room = r
+        if let s = shown { draw(s.0, s.1, s.2) }
+    }
+
     func show(meta: Meta, machine: String?, status: BoardClient.Status) {
         if let s = shown, s.0 == meta, s.1 == machine, s.2 == status { return }
         shown = (meta, machine, status)
-        accounts.runs = Self.accounts(meta.accounts)
+        draw(meta, machine, status)
+    }
+
+    private func draw(_ meta: Meta, _ machine: String?, _ status: BoardClient.Status) {
+        accounts.fit(Self.accounts(meta.accounts), maxWidth: room.accounts, gap: 14)
         accounts.toolTip = meta.accounts.map { "\($0.name) · \($0.engine) · \($0.profile)" }.joined(separator: "\n")
-        vitals.runs = Self.vitals(machine, meta.health)
+        vitals.fit(Self.vitals(machine, meta.health), maxWidth: room.vitals, gap: 12)
         vitals.toolTip = meta.health.map { "\($0.dev) dev servers, \($0.db) database stacks" }
+        // The connection always shows, whole.
         let (word, colour, help) = Self.connection(status)
         connection.runs = [.gap(10), .dot(colour, ring: false), .gap(5), .text(word, .labelColor, Fonts.small)]
         connection.toolTip = help
     }
 
-    private static func accounts(_ list: [Account]) -> [RunsView.Run] {
-        var out: [RunsView.Run] = []
-        for (i, a) in list.enumerated() {
-            if i > 0 { out.append(.gap(14)) }
-            out.append(.text(a.name, .labelColor, Fonts.small))
+    /// One piece per account: its name and its meters.
+    private static func accounts(_ list: [Account]) -> [[RunsView.Run]] {
+        list.map { a in
+            var out: [RunsView.Run] = [.text(a.name, .labelColor, Fonts.small)]
             if a.limits.isEmpty { out += [.gap(6), .text("·", .secondaryLabelColor, Fonts.small)] }
             for l in a.limits {
                 let pct = Double(l.usedPct), c = Palette.level(pct)
@@ -49,22 +66,22 @@ final class BoardToolbar: NSObject, NSToolbarDelegate {
                         .bar(pct / 100, c ?? Palette.grey, 28), .gap(5),
                         .text("\(l.usedPct)%", c ?? .secondaryLabelColor, Fonts.small)]
             }
+            return out
         }
-        return out
     }
 
-    private static func vitals(_ machine: String?, _ h: Health?) -> [RunsView.Run] {
-        var out: [RunsView.Run] = []
-        if let machine { out.append(.text(machine, .secondaryLabelColor, Fonts.small)) }
+    /// One piece per vital, the machine's name first.
+    private static func vitals(_ machine: String?, _ h: Health?) -> [[RunsView.Run]] {
+        var out: [[RunsView.Run]] = []
+        if let machine { out.append([.text(machine, .secondaryLabelColor, Fonts.small)]) }
         guard let h else { return out }
         let items: [(String, String, Double?)] = [
             ("dev", "\(h.dev)", nil), ("db", "\(h.db)", nil), ("cpu", "\(h.cpuPct)%", Double(h.cpuPct)),
             ("mem", "\(h.memPct)%", Double(h.memPct)), ("disk", "\(h.diskPct)%", Double(h.diskPct)),
         ]
         for (k, v, pct) in items {
-            if !out.isEmpty { out.append(.gap(12)) }
-            out += [.text(k, .secondaryLabelColor, Fonts.small), .gap(4),
-                    .text(v, pct.flatMap(Palette.level) ?? .labelColor, Fonts.small)]
+            out.append([.text(k, .secondaryLabelColor, Fonts.small), .gap(4),
+                        .text(v, pct.flatMap(Palette.level) ?? .labelColor, Fonts.small)])
         }
         return out
     }

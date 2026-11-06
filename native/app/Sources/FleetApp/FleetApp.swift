@@ -1,11 +1,15 @@
-// Fleet.app: the board window, all AppKit (Ruling P3-R6: the launch budget is 120 ms from process start to the last
-// board on screen, 200 ms to the live one). In order: the cached board is read, the window is made at its final frame
-// with the board in it, drawn and handed to the window server; only then does the BoardClient connect.
+// Fleet.app: the board window, all AppKit (Ruling P3-R6). Its launch is gated against the machine's own floor, measured
+// in the same bench run (Ruling P3-R7): the last board on screen within floor + 60 ms of process start, the live board
+// within floor + 100 ms, the floor being this binary's `--floor` window. The absolute 120 / 200 ms are reported, not
+// gated. In order: the cached board is read, the window is made at its final frame with the board in it, drawn and
+// handed to the window server; only then does the BoardClient connect.
 //
 //   FleetApp                    the app
 //   FleetApp --bench out.json   launch, time "last board on screen" and "live board on screen" from process start
 //                               (each after the table's rows are laid out, drawn and flushed; os_signpost events in
 //                               the "dev.fleet.app" subsystem mark the same points), write them as JSON, quit
+//   FleetApp --floor out.json   the floor: one empty titled window, made, ordered front, drawn and flushed the same
+//                               way, timed from process start ({"floorMs": …}), then quit. No board, no cache, no socket
 //   FleetApp --shot out.png     once the live board is drawn, capture the window (toolbar included) to a PNG and quit:
 //                               a screenshot that needs no Screen Recording permission
 //
@@ -22,6 +26,9 @@ enum FleetMain {
     @MainActor static var delegate: AppDelegate?
 
     @MainActor static func main() {
+        if let i = CommandLine.arguments.firstIndex(of: "--floor"), i + 1 < CommandLine.arguments.count {
+            Floor.run(out: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+        }
         let bench = Bench.fromArguments()  // its first mark is before NSApplication connects to the window server
         let app = NSApplication.shared
         bench?.mark("shared")
@@ -75,11 +82,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         header = HeaderController()
         let split = NSSplitViewController()
         let side = NSSplitViewItem(sidebarWithViewController: boardView)
-        side.minimumThickness = 540
+        side.minimumThickness = 300
         side.maximumThickness = 980
         side.canCollapse = true
         let detail = NSSplitViewItem(viewController: header)
-        detail.minimumThickness = 280
+        detail.minimumThickness = 200
         split.addSplitViewItem(side)
         split.addSplitViewItem(detail)
 
@@ -106,6 +113,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setFrameAutosaveName("FleetBoard")
         bench?.mark("window made")
 
+        // The toolbar's meters fit the room each side of the split has, now and on every resize.
+        let fit = { [weak self, weak split] in
+            guard let self, let split, split.splitView.arrangedSubviews.count == 2 else { return }
+            let panes = split.splitView.arrangedSubviews
+            self.toolbar.fit(sidebar: panes[0].frame.width, detail: panes[1].frame.width)
+        }
+        watches.append(
+            NotificationCenter.default.publisher(for: NSSplitView.didResizeSubviewsNotification, object: split.splitView)
+                .sink { _ in MainActor.assumeIsolated { fit() } })
+        watches.append(
+            NotificationCenter.default.publisher(for: NSWindow.didResizeNotification, object: window)
+                .sink { _ in MainActor.assumeIsolated { fit() } })
+        fit()
         boardView.onSelect = { [weak self] in self?.showChrome() }
         showChrome()
         window.makeKeyAndOrderFront(nil)
@@ -139,6 +159,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         ticker?.tolerance = 5
         if let i = CommandLine.arguments.firstIndex(of: "--shot"), i + 1 < CommandLine.arguments.count {
+            // `--width <pt>`: the window that wide (the sidebar keeps 260 pt for the detail beside it), to check the
+            // board at a narrow window.
+            if let j = CommandLine.arguments.firstIndex(of: "--width"), j + 1 < CommandLine.arguments.count,
+                let w = Double(CommandLine.arguments[j + 1])
+            {
+                // Not saved: Ross's own frame and sidebar width stay as he left them.
+                window.setFrameAutosaveName("")
+                split.splitView.autosaveName = nil
+                var f = window.frame
+                f.size.width = w
+                window.setFrame(f, display: true)
+                split.splitView.setPosition(max(300, w - 260), ofDividerAt: 0)
+            }
             shoot(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]), tries: 50)
         }
     }
@@ -288,6 +321,42 @@ final class Bench {
         var now = timeval()
         gettimeofday(&now, nil)
         return Double(now.tv_sec - start.tv_sec) * 1000 + Double(now.tv_usec - start.tv_usec) / 1000
+    }
+}
+
+/// `--floor`: what any AppKit app on this machine pays before its first window is on screen, measured by the same clock
+/// as the bench: NSApplication, one empty titled window, ordered front, drawn, flushed.
+@MainActor
+final class Floor: NSObject, NSApplicationDelegate {
+    private let out: URL
+    private var window: NSWindow?
+
+    private init(out: URL) {
+        self.out = out
+    }
+
+    static func run(out: URL) -> Never {
+        let app = NSApplication.shared
+        let d = Floor(out: out)
+        app.delegate = d
+        app.setActivationPolicy(.regular)
+        app.run()
+        exit(0)
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1320, height: 800), styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false)
+        window = w
+        w.makeKeyAndOrderFront(nil)
+        w.displayIfNeeded()
+        CATransaction.flush()
+        let ms = Bench.sinceProcessStart()
+        if let data = try? JSONSerialization.data(withJSONObject: ["floorMs": (ms * 100).rounded() / 100]) {
+            try? data.write(to: out)
+        }
+        exit(0)
     }
 }
 

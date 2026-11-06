@@ -70,11 +70,15 @@ import FleetKit
 
     static func title(_ s: Session) -> String { s.title ?? s.name ?? s.jobId ?? "\(s.engine)" }
 
-    static func time(_ d: Date) -> String {
+    private static let formatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateStyle = Calendar.current.isDateInToday(d) ? .none : .medium
         f.timeStyle = .short
-        return f.string(from: d)
+        return f
+    }()
+
+    static func time(_ d: Date) -> String {
+        formatter.dateStyle = Calendar.current.isDateInToday(d) ? .none : .medium
+        return formatter.string(from: d)
     }
 }
 
@@ -91,6 +95,13 @@ import FleetKit
 
 /// Draws a line of runs (text, a thin meter line, a dot): the toolbar's meters and a header's tally.
 final class RunsView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
     enum Run {
         case text(String, NSColor, NSFont)
         /// A 2 pt line `width` wide, filled to `fraction` (fleet.html `.line`).
@@ -104,6 +115,26 @@ final class RunsView: NSView {
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
+    }
+
+    /// The runs as whole pieces (an account's meters, one vital): as many as fit in `maxWidth`, from the left; the
+    /// ones that do not fit are left out whole, never drawn over their neighbours.
+    /// When not even the first piece fits, the first run of each (an account's name) stands in, as many as fit; the
+    /// view is never empty, so the toolbar never pushes it into its overflow menu.
+    func fit(_ pieces: [[Run]], maxWidth: CGFloat, gap: CGFloat) {
+        func take(_ ps: [[Run]]) -> [Run] {
+            var out: [Run] = [], used: CGFloat = 0
+            for (i, p) in ps.enumerated() {
+                let w = p.reduce(0) { $0 + width($1) } + (i > 0 ? gap : 0)
+                if used + w > maxWidth { break }
+                if i > 0 { out.append(.gap(gap)) }
+                out += p
+                used += w
+            }
+            return out
+        }
+        let full = take(pieces)
+        runs = full.isEmpty ? take(pieces.compactMap { $0.first.map { [$0] } }) : full
     }
 
     override var isFlipped: Bool { true }
@@ -219,37 +250,38 @@ final class RowCell: NSTableCellView {
         guard let s = session else { return }
         let on = backgroundStyle == .emphasized ? NSColor.alternateSelectedControlTextColor : nil
         let h = bounds.height, lh: CGFloat = 16, y = (h - lh) / 2
-        func text(_ t: String, _ x: CGFloat, _ w: CGFloat, _ f: NSFont, _ c: NSColor, _ p: NSParagraphStyle = RowCell.leftStyle) {
-            guard !t.isEmpty, w > 0 else { return }
+        let cols = RowLayout.frames(width: bounds.width, height: h)
+        // Each string is clipped to its own column and cut with "…": nothing draws outside its column.
+        func text(_ c: RowColumn, _ t: String, _ f: NSFont, _ colour: NSColor, _ p: NSParagraphStyle = RowCell.leftStyle) {
+            guard !t.isEmpty, let r = cols[c] else { return }
+            NSGraphicsContext.saveGraphicsState()
+            r.clip()
             (t as NSString).draw(
-                with: NSRect(x: x, y: y, width: w, height: lh), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                attributes: [.font: f, .foregroundColor: on ?? c, .paragraphStyle: p])
+                with: NSRect(x: r.minX, y: y, width: r.width, height: lh),
+                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                attributes: [.font: f, .foregroundColor: on ?? colour, .paragraphStyle: p])
+            NSGraphicsContext.restoreGraphicsState()
         }
         // fleet.html `.dot`: filled in the state's colour; waiting is a ring; done and ended are quiet and faded.
-        let dot = NSBezierPath(ovalIn: NSRect(x: 6, y: (h - 7) / 2, width: 7, height: 7).insetBy(dx: 0.75, dy: 0.75))
-        if s.state == .waiting {
-            (on ?? Palette.quiet).setStroke()
-            dot.lineWidth = 1.5
-            dot.stroke()
-        } else {
-            (on ?? Palette.of(s.state)).withAlphaComponent(s.state.order >= 4 ? 0.7 : 1).setFill()
-            dot.fill()
+        if let d = cols[.dot] {
+            let dot = NSBezierPath(ovalIn: NSRect(x: d.minX, y: (h - 7) / 2, width: 7, height: 7).insetBy(dx: 0.75, dy: 0.75))
+            if s.state == .waiting {
+                (on ?? Palette.quiet).setStroke()
+                dot.lineWidth = 1.5
+                dot.stroke()
+            } else {
+                (on ?? Palette.of(s.state)).withAlphaComponent(s.state.order >= 4 ? 0.7 : 1).setFill()
+                dot.fill()
+            }
         }
-        text(s.state.word, 19, 74, s.state.order <= 2 ? Fonts.word : Fonts.small, Palette.of(s.state))
-        // From the right: context, effort, age, account, machine; the title takes what is left.
         let grey = NSColor.secondaryLabelColor
-        var x = bounds.width - 6
-        func col(_ t: String, _ w: CGFloat, _ p: NSParagraphStyle = RowCell.leftStyle) {
-            x -= w
-            text(t, x, w, Fonts.small, grey, p)
-            x -= 10
-        }
-        col(Words.tokens(s.contextTokens), 40, Self.rightStyle)
-        col(s.effort ?? "", 54)
-        col(ageText, 32, Self.rightStyle)
-        col(s.account ?? "", 64)
-        col(s.key.machine, 64)
-        text(Words.title(s), 101, x - 101, Fonts.row, s.live ? .labelColor : grey)
+        text(.state, s.state.word, s.state.order <= 2 ? Fonts.word : Fonts.small, Palette.of(s.state))
+        text(.title, Words.title(s), Fonts.row, s.live ? .labelColor : grey)
+        text(.machine, s.key.machine, Fonts.small, grey)
+        text(.account, s.account ?? "", Fonts.small, grey)
+        text(.age, ageText, Fonts.small, grey, Self.rightStyle)
+        text(.effort, s.effort ?? "", Fonts.small, grey)
+        text(.context, Words.tokens(s.contextTokens), Fonts.small, grey, Self.rightStyle)
     }
 
     /// On the selection's accent fill every mark is drawn in the selected-text colour, so it stays legible.
@@ -269,6 +301,7 @@ final class HeaderCell: NSTableCellView {
         identifier = Self.id
         addSubview(name)
         addSubview(tally)
+        tally.clipsToBounds = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -283,11 +316,14 @@ final class HeaderCell: NSTableCellView {
         }
     }
 
+    /// The name gives way first (cut with "…"), down to 60 pt; past that the tally is cut at the left of its room.
+    /// The two never share a pixel.
     override func layout() {
         super.layout()
-        let w = tally.intrinsicContentSize.width, y = bounds.height - 22
+        let y = bounds.height - 22, inner = max(0, bounds.width - 12)
+        let w = min(tally.intrinsicContentSize.width, max(0, inner - 60 - 12))
         tally.frame = NSRect(x: bounds.width - 6 - w, y: y, width: w, height: 18)
-        name.frame = NSRect(x: 6, y: y + 1, width: max(0, bounds.width - 24 - w), height: 16)
+        name.frame = NSRect(x: 6, y: y + 1, width: max(0, inner - w - (w > 0 ? 12 : 0)), height: 16)
     }
 }
 

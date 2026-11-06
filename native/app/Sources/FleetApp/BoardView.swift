@@ -119,14 +119,13 @@ final class BoardController: NSViewController, NSTableViewDataSource, NSTableVie
         }
     }
 
-    /// The 30 s tick: the 48 h fold is re-read (through the model, coalesced), and the visible rows' ages move.
-    /// Nothing else is redrawn.
+    /// The 30 s tick: the 48 h fold is re-read (through the model, coalesced), and the ages of the rows the table has
+    /// prepared (on screen, and the few it keeps ready around them) move. Nothing else is redrawn.
     func tick() {
         model.refresh()
         let now = Date()
-        let visible = table.rows(in: table.visibleRect)
-        for r in visible.lowerBound..<visible.upperBound {
-            (table.view(atColumn: 0, row: r, makeIfNecessary: false) as? RowCell)?.tick(now: now)
+        table.enumerateAvailableRowViews { rowView, _ in
+            (rowView.view(atColumn: 0) as? RowCell)?.tick(now: now)
         }
     }
 

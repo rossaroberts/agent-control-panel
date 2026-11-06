@@ -60,6 +60,42 @@ impl Drop for SocketGuard {
     }
 }
 
+/// Makes the socket's folder, 0700 for every level it creates. An existing folder is tightened to 0700 only when it is
+/// fleetd's own (named `Fleet` or `fleet`, as the defaults are) and owned by this user: the app keeps its board cache
+/// (session titles) beside the socket, and a `FLEETD_SOCK` in a shared folder such as `/tmp` must never chmod it.
+pub fn private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    match std::fs::metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+            // The mode passes through the umask; set it outright.
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        }
+        Err(e) => Err(e),
+        Ok(m) => {
+            let ours = matches!(
+                dir.file_name().and_then(|n| n.to_str()),
+                Some("Fleet" | "fleet")
+            );
+            // SAFETY: getuid has no preconditions.
+            if ours
+                && m.is_dir()
+                && m.uid() == unsafe { libc::getuid() }
+                && m.mode() & 0o777 != 0o700
+            {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Binds the socket with mode 0600 under an exclusive lock on `<path>.lock` (`AddrInUse` if another daemon holds it).
 /// A leftover socket is replaced only when it is a socket and nothing answers (refused or gone); any other file at the
 /// path, or any other connect error, is left alone and reported.
@@ -67,7 +103,7 @@ pub fn bind(path: &Path) -> io::Result<(UnixListener, SocketGuard)> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::FileTypeExt;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        private_dir(dir)?;
     }
     let mut lock_name = path.as_os_str().to_owned();
     lock_name.push(".lock");
