@@ -504,3 +504,48 @@ fn a_running_muse_is_a_working_session_of_its_pid() {
     );
     assert_eq!(s.reason, "working: running process");
 }
+
+/// `RolloutView::due` is when the clock alone may change a Codex session: over every fixture, held open or not, the
+/// state, liveness and reason are the same at every time from `now` up to (not including) `due`, and with no `due` at
+/// every time at all.
+#[test]
+fn a_rollout_holds_still_until_due() {
+    let g = golden();
+    let home = home_with_fixtures(&g);
+    let (min, day) = (60_000i64, 86_400_000i64);
+    let mut armed = 0;
+    for fx in &g.fixtures {
+        let v = RolloutTail::open(&home.path().join("sessions").join(&fx.rel))
+            .unwrap()
+            .view();
+        for open in [true, false] {
+            let now = g.now_ms;
+            let d = v.due(open, now);
+            assert!(d.is_none_or(|d| d > now));
+            armed += d.is_some() as usize;
+            let at = |t: i64| {
+                let s = v.session(open, t);
+                (s.state, s.live, s.reason)
+            };
+            let w = v.written_at().unwrap_or(0);
+            let mut times = vec![now + 1, now + 1_000 * day];
+            for off in [10 * min, 3 * day] {
+                times.extend([w + off - 1, w + off, w + off + 1]);
+            }
+            for t in times.into_iter().filter(|t| *t >= now) {
+                if d.is_none_or(|d| t < d) {
+                    assert_eq!(
+                        at(t),
+                        at(now),
+                        "{} open {open}: changed at {t} before {d:?}",
+                        fx.rel
+                    );
+                }
+            }
+            if let Some(d) = d {
+                assert_ne!(at(d), at(now), "{} open {open}: armed for nothing", fx.rel);
+            }
+        }
+    }
+    assert!(armed > 0, "some fixture is live by age");
+}

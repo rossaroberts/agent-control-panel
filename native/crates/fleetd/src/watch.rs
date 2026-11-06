@@ -18,7 +18,14 @@
 //!   exactly one more run after it (R4);
 //! - every 30 s a reconcile pass re-reads files only (hooks, status files, tails against their fingerprints, pid
 //!   liveness, the jobs' records, the process scan: Codex's open logs and Muse) and emits only real differences; every 5
-//!   minutes it also re-reads each roster (R4).
+//!   minutes it also re-reads each roster (R4);
+//! - a transcript write to a session the board shows as needing you also asks for its profile's roster (at most once a
+//!   second per profile): a permission given goes on with the tool and no hook, and only the roster says it is busy;
+//! - what changes with the clock alone (`decide`'s quiet thresholds, a Codex log's age) is re-decided by one one-shot
+//!   timer armed to the nearest such time across sessions (`Fleet::dues`), re-deciding only the sessions whose time
+//!   came; a hook that needs you and has been quiet for 3 s also asks for its roster then. With nothing due it sleeps;
+//! - on macOS each live session's process is watched for its exit (kqueue `NOTE_EXIT`): a session that crashes is
+//!   re-decided at once. On Linux that waits for the reconcile's liveness check.
 //!
 //! The board (`Fleet`) sits behind one lock, held only to look up handles, to merge values read before and to write the
 //! store. Once `watch_with` returns, no file is read and no tail's lock is waited on while it is held: a tail is read
@@ -41,6 +48,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use fleet_model::types::State;
 use fleet_read::codex::{is_yours, muse_installed, RolloutTail};
 use fleet_read::profiles::claude_profiles;
 use fleet_read::roster::{default_source, RosterSource};
@@ -51,7 +59,7 @@ use crate::machine::machine_name;
 use crate::procscan::scan;
 use crate::sessions::{
     follow_cap, gone, jobs_signature, new_rollout, new_tail, now_ms, read_hook_file,
-    read_status_file, reconcile_read, sig_of, transcript_of, Fleet, RosterGot,
+    read_status_file, reconcile_read, sig_of, transcript_of, DueKey, Fleet, RosterGot,
 };
 use crate::store::Store;
 
@@ -59,6 +67,11 @@ pub const RECONCILE_EVERY: Duration = Duration::from_secs(30);
 pub const ROSTER_SAFETY_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How long `Drop` waits for roster and scan runs under way (a roster run gives up after 8 s).
 const WORKER_GRACE: Duration = Duration::from_secs(10);
+/// A transcript write asks for a needing-you session's roster at most this often per profile.
+const NUDGE_EVERY: Duration = Duration::from_secs(1);
+/// A due time this far in the past is still taken as just come (once): the timer woke late, or the time passed between
+/// a session's last decide and the timer's look at it.
+const DUE_SLACK_MS: i64 = 5_000;
 
 pub struct Options {
     pub roster: Box<dyn RosterSource + Send + Sync>,
@@ -110,6 +123,10 @@ struct Shared {
     entries: Mutex<HashMap<PathBuf, HashMap<String, u64>>>,
     stop: AtomicBool,
     wake: (Mutex<()>, Condvar),
+    /// The one-shot timer's wait, poked when the board changed in a way that may move a due time.
+    alarm: crate::alarm::Alarm,
+    /// When each profile's roster was last asked for by a transcript write (F3's nudge).
+    nudged: Mutex<HashMap<usize, Instant>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -158,6 +175,14 @@ impl WatchHandle {
         true
     }
 
+    /// Processes watched for their exit now (macOS; 0 elsewhere).
+    pub fn watched_pids(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        return self.shared.kq.pids();
+        #[cfg(not(target_os = "macos"))]
+        0
+    }
+
     /// Files the hot path follows now.
     pub fn followed(&self) -> usize {
         #[cfg(target_os = "macos")]
@@ -175,6 +200,7 @@ impl Drop for WatchHandle {
             self.shared.stop.store(true, Ordering::SeqCst);
             self.shared.wake.1.notify_all();
         }
+        self.shared.alarm.poke();
         // Dropping the watcher closes the event channel, which ends the dispatcher.
         self.shared.watcher.lock().unwrap().take();
         #[cfg(target_os = "macos")]
@@ -272,6 +298,8 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         entries: Mutex::new(HashMap::new()),
         stop: AtomicBool::new(false),
         wake: (Mutex::new(()), Condvar::new()),
+        alarm: crate::alarm::Alarm::new()?,
+        nudged: Mutex::new(HashMap::new()),
         workers: Mutex::new(vec![]),
     });
 
@@ -318,6 +346,12 @@ pub fn watch_with(home: &Path, store: Arc<Store>, opts: Options) -> io::Result<W
         thread::Builder::new()
             .name("fleetd-reconcile".into())
             .spawn(move || timer(&sh, every, safety))?,
+    );
+    let sh = shared.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("fleetd-due".into())
+            .spawn(move || due_loop(&sh))?,
     );
     Ok(WatchHandle { shared, threads })
 }
@@ -521,6 +555,7 @@ fn on_hooks(sh: &Arc<Shared>, pi: usize, sids: Vec<String>) {
         }
         sh.store.upsert(out);
     }
+    poke(sh);
     if roster {
         request(sh, Job::Roster(pi));
     }
@@ -591,6 +626,7 @@ fn on_transcripts(sh: &Arc<Shared>, items: Vec<(usize, String, PathBuf)>) {
         }
     }
     let mut follow = vec![];
+    let mut needs_you = HashSet::new();
     {
         let mut f = sh.fleet.lock().unwrap();
         for (pi, sid, t) in &failed {
@@ -605,10 +641,15 @@ fn on_transcripts(sh: &Arc<Shared>, items: Vec<(usize, String, PathBuf)>) {
             }
         }
         let now = now_ms();
-        let out: Vec<_> = touched
-            .iter()
-            .filter_map(|(pi, sid)| f.claude_session(*pi, sid, now))
-            .collect();
+        let mut out = vec![];
+        for (pi, sid) in &touched {
+            if let Some(s) = f.claude_session(*pi, sid, now) {
+                if s.state == State::NeedsYou {
+                    needs_you.insert(*pi);
+                }
+                out.push(s);
+            }
+        }
         sh.store.upsert(out);
     }
     #[cfg(target_os = "macos")]
@@ -617,6 +658,23 @@ fn on_transcripts(sh: &Arc<Shared>, items: Vec<(usize, String, PathBuf)>) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = follow;
+    // Written to while it needs you: the roster's word on it (waiting, or busy once a permission is given) may be old.
+    for pi in needs_you {
+        nudge(sh, pi);
+    }
+}
+
+/// Asks for a profile's roster on a transcript write, at most once per `NUDGE_EVERY`; one asked for less than that
+/// after the last is left to the due timer's run (a quiet hook that needs you asks again at 3 s).
+fn nudge(sh: &Arc<Shared>, pi: usize) {
+    {
+        let mut n = sh.nudged.lock().unwrap();
+        if n.get(&pi).is_some_and(|t| t.elapsed() < NUDGE_EVERY) {
+            return;
+        }
+        n.insert(pi, Instant::now());
+    }
+    request(sh, Job::Roster(pi));
 }
 
 /// Rollouts changed: each followed one advances under its own lock, a new one of yours is opened without the board.
@@ -673,6 +731,7 @@ fn on_rollouts(sh: &Arc<Shared>, paths: Vec<PathBuf>) {
         let os = f.others(now);
         sh.store.replace(f.in_others(), os);
     }
+    poke(sh);
     #[cfg(target_os = "macos")]
     for p in follow {
         sh.kq.follow(&p);
@@ -690,6 +749,7 @@ fn kq_loop(sh: &Arc<Shared>) {
     while !sh.stop.load(Ordering::SeqCst) {
         let events = sh.kq.wait();
         let mut routes = vec![];
+        let mut exited = vec![];
         for t in events {
             match t {
                 Target::Dir(d) => {
@@ -717,7 +777,11 @@ fn kq_loop(sh: &Arc<Shared>) {
                     let f = sh.fleet.lock().unwrap();
                     routes.extend(route(&sh.home, &f, &p));
                 }
+                Target::Pid(p) => exited.push(p),
             }
+        }
+        if !exited.is_empty() {
+            on_exits(sh, exited);
         }
         if !routes.is_empty() {
             handle(sh, routes);
@@ -725,15 +789,106 @@ fn kq_loop(sh: &Arc<Shared>) {
     }
 }
 
-/// Follows exactly the files the board says are worth it (live or recent sessions, newest first, capped).
-fn sync_follows(sh: &Shared) {
+/// Processes that exited: each session held as alive on one is re-decided at once, and its profile's roster asked for
+/// (a session Claude Code still lists as running stays open until the roster says it is not: R7).
+fn on_exits(sh: &Arc<Shared>, pids: Vec<u32>) {
+    let mut profiles = HashSet::new();
+    {
+        let mut f = sh.fleet.lock().unwrap();
+        let now = now_ms();
+        let mut out = vec![];
+        for p in pids {
+            for (pi, sid) in f.pid_exited(p) {
+                out.extend(f.claude_session(pi, &sid, now));
+                profiles.insert(pi);
+            }
+        }
+        sh.store.upsert(out);
+    }
+    poke(sh);
+    for pi in profiles {
+        request(sh, Job::Roster(pi));
+    }
+}
+
+/// Follows exactly the files the board says are worth it (live or recent sessions, newest first, capped), and watches
+/// exactly the live sessions' processes; then lets the due timer look again (what was read may move a due time).
+fn sync_follows(sh: &Arc<Shared>) {
     #[cfg(target_os = "macos")]
     {
-        let want = sh.fleet.lock().unwrap().follows(now_ms());
+        let (want, pids) = {
+            let f = sh.fleet.lock().unwrap();
+            (f.follows(now_ms()), f.live_pids())
+        };
         sh.kq.set_follows(&want);
+        // Gone before it could be watched; a zombie (still answering `kill 0`) is left to the reconcile, as before.
+        let gone: Vec<u32> = sh
+            .kq
+            .set_pids(&pids)
+            .into_iter()
+            .filter(|p| !fleet_read::roster::pid_alive(*p))
+            .collect();
+        if !gone.is_empty() {
+            on_exits(sh, gone);
+        }
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = sh;
+    poke(sh);
+}
+
+/// Wakes the due timer to look again.
+fn poke(sh: &Shared) {
+    sh.alarm.poke();
+}
+
+/// The one-shot timer: sleeps until the nearest due time across sessions (or a poke), re-decides only the sessions whose
+/// time came (each due time once), asks for the roster of a quiet hook that needs you, and arms again. With nothing due
+/// it sleeps until poked: idle is idle.
+fn due_loop(sh: &Arc<Shared>) {
+    // The due times already acted on, so one in the slack window is acted on once.
+    let mut handled: HashMap<DueKey, i64> = HashMap::new();
+    while !sh.stop.load(Ordering::SeqCst) {
+        let now = now_ms();
+        let mut rosters = HashSet::new();
+        let next = {
+            let f = sh.fleet.lock().unwrap();
+            let dues = f.dues(now - DUE_SLACK_MS);
+            let (mut out, mut codex, mut next) = (vec![], false, None::<i64>);
+            let mut keep = HashMap::new();
+            for d in dues {
+                if d.at > now {
+                    next = Some(next.map_or(d.at, |n| n.min(d.at)));
+                    continue;
+                }
+                if handled.get(&d.key) != Some(&d.at) {
+                    match &d.key {
+                        DueKey::Claude(pi, sid) => {
+                            out.extend(f.claude_session(*pi, sid, now));
+                            if d.roster {
+                                rosters.insert(*pi);
+                            }
+                        }
+                        DueKey::Codex(_) => codex = true,
+                    }
+                }
+                keep.insert(d.key, d.at);
+            }
+            handled = keep;
+            sh.store.upsert(out);
+            if codex {
+                let os = f.others(now);
+                sh.store.replace(f.in_others(), os);
+            }
+            next
+        };
+        for pi in rosters {
+            request(sh, Job::Roster(pi));
+        }
+        if sh.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let after = next.map(|at| Duration::from_millis((at - now_ms()).max(0) as u64));
+        sh.alarm.wait(after);
+    }
 }
 
 /// Asks for a background run: one starts now unless one is under way, in which case exactly one more runs after it.
@@ -777,7 +932,7 @@ fn request(sh: &Arc<Shared>, job: Job) {
 
 /// One roster read of a profile: the read, the new transcripts' first reads and every listed session's hook and status
 /// file outside the lock, then the board updated.
-fn run_roster(sh: &Shared, pi: usize) {
+fn run_roster(sh: &Arc<Shared>, pi: usize) {
     sh.roster_runs.fetch_add(1, Ordering::SeqCst);
     let profile = sh.fleet.lock().unwrap().profiles[pi].profile.clone();
     // The jobs' records as this run starts, read without the board: the reconcile compares against it.
@@ -818,7 +973,7 @@ fn run_roster(sh: &Shared, pi: usize) {
 
 /// One process scan (Codex's open logs, Muse), off the event threads: logs newly held open are opened without the
 /// board, then Codex and Muse re-decided.
-fn run_scan(sh: &Shared) {
+fn run_scan(sh: &Arc<Shared>) {
     sh.scan_runs.fetch_add(1, Ordering::SeqCst);
     let Some(found) = scan() else {
         return; // R14: keep the last good result
@@ -874,6 +1029,17 @@ fn reconcile(sh: &Arc<Shared>, rosters: bool) {
 }
 
 fn timer(sh: &Arc<Shared>, every: Duration, safety: Duration) {
+    // Test seam, debug builds only: `FLEETD_TEST_PANIC=<ms>` makes this thread panic that long after start, holding the
+    // board's lock, as a bug would (tests/panic.rs: the process must exit, not serve a poisoned board).
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("FLEETD_TEST_PANIC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        thread::sleep(Duration::from_millis(ms));
+        let _board = sh.fleet.lock().unwrap();
+        panic!("FLEETD_TEST_PANIC");
+    }
     let mut last_safety = Instant::now();
     loop {
         {

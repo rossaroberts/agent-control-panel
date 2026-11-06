@@ -69,6 +69,33 @@ pub fn decide(
     (s, true, reason)
 }
 
+/// How long a hook that needs you may be quiet before a roster that says `busy` makes it working (Node's `quiet > 3000`).
+pub const NEEDS_YOU_QUIET_MS: i64 = 3000;
+/// How long a working hook may be quiet before a roster that says `idle` makes it waiting (Node's `quiet > 60_000`).
+pub const WORKING_QUIET_MS: i64 = 60_000;
+
+/// The first time after `now` (epoch ms) at which `decide` may answer otherwise with nothing read anew: when the quiet
+/// of a current hook passes one of its thresholds. `None` when nothing in `decide` waits on the clock. It does not ask
+/// whether the answer will change at that time (that also depends on the roster's word then), only that it may.
+pub fn due(r: &RosterRow, t: &TailFacts, h: Option<&HookEvent>, now: i64) -> Option<i64> {
+    let stopped = matches!(r.state.as_deref(), Some("stopped" | "failed"));
+    let pid_live = r.pid.is_some_and(|p| p > 0) && r.pid_alive;
+    // Closed (as `decide` decides it) has no clock in it.
+    if !(pid_live || (r.active && !stopped)) {
+        return None;
+    }
+    let (h, hs) = current_hook(h, t)?;
+    let quiet_from = h.at.max(t.written_at.unwrap_or(0));
+    let after = match hs {
+        HookSays::NeedsYou => NEEDS_YOU_QUIET_MS,
+        HookSays::Working => WORKING_QUIET_MS,
+        _ => return None,
+    };
+    // `quiet > after` first holds at `quiet_from + after + 1`.
+    let at = quiet_from + after + 1;
+    (at > now).then_some(at)
+}
+
 /// The last hook event and what it says, while it is current: it says something other than closed, and nothing was
 /// written to the transcript more than 15 s after it.
 fn current_hook<'a>(h: Option<&'a HookEvent>, t: &TailFacts) -> Option<(&'a HookEvent, HookSays)> {
@@ -108,11 +135,11 @@ fn open_state(r: &RosterRow, t: &TailFacts, h: Option<&HookEvent>, now: i64) -> 
     if let Some((h, hs)) = hook {
         let quiet = now - h.at.max(t.written_at.unwrap_or(0));
         // A permission given goes on with the tool and no event until it ends: the roster says busy, so it works.
-        if hs == HookSays::NeedsYou && status == Some("busy") && quiet > 3000 {
+        if hs == HookSays::NeedsYou && status == Some("busy") && quiet > NEEDS_YOU_QUIET_MS {
             return (State::Working, "working: roster busy".into());
         }
         // A turn stopped with Esc fires nothing: still "working" a minute on with the roster idle, it is waiting.
-        if hs == HookSays::Working && status == Some("idle") && quiet > 60_000 {
+        if hs == HookSays::Working && status == Some("idle") && quiet > WORKING_QUIET_MS {
             return (State::Waiting, "idle at prompt".into());
         }
         return match hs {

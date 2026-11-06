@@ -1,5 +1,10 @@
-//! The socket protocol between `fleetd` and its clients. A frame is a `u32` little-endian length, then that many bytes of
-//! postcard `Frame`. Postcard is positional: append variants at the end, and bump `PROTO` when a shape changes.
+//! The socket protocol between `fleetd` and its clients (`native/PROTOCOL.md` is the contract the Swift app reads). A
+//! frame is a `u32` little-endian length, then that many bytes of postcard `Frame`.
+//!
+//! Postcard is positional: field order and variant order are the format. The bytes are pinned by the golden frames in
+//! `crates/fleet-model/tests/golden/`; **any change to those bytes is a `PROTO` bump** (and new golden files). Two
+//! things never move, so that a client of any version can be told it is out of date: `Hello` is variant 0 and starts
+//! with `proto`, and `Error` is variant 3 with one `message` string.
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -7,19 +12,25 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::types::{Delta, Session};
 
-pub const PROTO: u16 = 1;
+/// 2: `run` in `Hello` and `Snapshot` (Ruling R24).
+pub const PROTO: u16 = 2;
 
 /// The biggest frame a reader accepts, so a corrupt length cannot ask for gigabytes.
 pub const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
-    /// Client to server, first and only: `since` is the `seq` of the last delta the client holds.
+    /// Client to server, first and only: `since` is the `seq` of the last delta the client holds, and `run` the run of
+    /// the daemon it came from. `since` is honoured only when `run` is this daemon's; otherwise the client gets a
+    /// snapshot.
     Hello {
         proto: u16,
         since: Option<u64>,
+        run: Option<u64>,
     },
+    /// The whole board. `run` is the daemon run (random at each start): a `seq` means something only within one run.
     Snapshot {
+        run: u64,
         seq: u64,
         machine: String,
         sessions: Vec<Session>,
@@ -30,7 +41,8 @@ pub enum Frame {
     },
 }
 
-pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> io::Result<()> {
+/// A frame as it goes on the wire: length, then body.
+pub fn encode(frame: &Frame) -> io::Result<Vec<u8>> {
     let body = postcard::to_stdvec(frame).map_err(io::Error::other)?;
     let len = u32::try_from(body.len())
         .ok()
@@ -39,13 +51,36 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> io:
     let mut out = Vec::with_capacity(4 + body.len());
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(&body);
-    w.write_all(&out).await?;
+    Ok(out)
+}
+
+/// A frame's body (what follows the length).
+pub fn decode(body: &[u8]) -> io::Result<Frame> {
+    postcard::from_bytes(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// The `proto` of a body that starts as a `Hello` of any version does (variant 0, then `proto`), even when the rest is
+/// another version's shape: what lets an old client be told which version this is.
+pub fn hello_proto(body: &[u8]) -> Option<u16> {
+    match postcard::take_from_bytes::<(u32, u16)>(body) {
+        Ok(((0, proto), _)) => Some(proto),
+        _ => None,
+    }
+}
+
+pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> io::Result<()> {
+    w.write_all(&encode(frame)?).await?;
     w.flush().await
 }
 
 /// The next frame, whose body may be at most `max` bytes (a peer's length is not trusted: memory grows only as bytes
 /// arrive). `UnexpectedEof` when the peer closed between frames or mid-frame.
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, max: u32) -> io::Result<Frame> {
+    decode(&read_body(r, max).await?)
+}
+
+/// The next frame's body, undecoded (as `read_frame`).
+pub async fn read_body<R: AsyncRead + Unpin>(r: &mut R, max: u32) -> io::Result<Vec<u8>> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
     let len = u32::from_le_bytes(len);
@@ -60,5 +95,5 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, max: u32) -> io::Result
     if got < len as usize {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
-    postcard::from_bytes(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    Ok(body)
 }

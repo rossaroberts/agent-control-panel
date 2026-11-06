@@ -360,3 +360,84 @@ fn reasons_name_what_said_so() {
     assert_eq!(reason(&dead("stopped"), &t, None), "stopped by Claude Code");
     assert_eq!(reason(&dead("failed"), &t, None), "failed");
 }
+
+/// `due` is when the clock alone may change `decide`: over every golden row and scenario, `decide` answers the same at
+/// every time from `now` up to (not including) `due`, and with no `due` at every time at all. So a timer armed at `due`
+/// never misses a change that only time makes.
+#[test]
+fn decide_holds_still_until_due() {
+    use fleet_model::decide::due;
+    let g = golden();
+    let mut checked = 0;
+    for r in &g.rows {
+        for sc in &g.scenarios {
+            let d = due(r, &sc.t, sc.h.as_ref(), sc.now);
+            assert!(d.is_none_or(|d| d > sc.now));
+            let first = decide(r, &sc.t, sc.h.as_ref(), sc.now);
+            let q0 =
+                sc.h.as_ref()
+                    .map_or(0, |h| h.at.max(sc.t.written_at.unwrap_or(0)));
+            let mut times = vec![sc.now + 1, sc.now + 1_000_000_000];
+            for base in [sc.now, q0] {
+                for off in [2999, 3000, 3001, 3002, 59_999, 60_000, 60_001, 60_002] {
+                    times.push(base + off);
+                }
+            }
+            for t in times.into_iter().filter(|t| *t >= sc.now) {
+                if d.is_none_or(|d| t < d) {
+                    assert_eq!(
+                        decide(r, &sc.t, sc.h.as_ref(), t),
+                        first,
+                        "{r:?} {:?} {:?}: changed at {t} before due {d:?}",
+                        sc.t,
+                        sc.h
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 1000, "{checked}");
+}
+
+/// The two thresholds `due` arms, at the first millisecond `decide`'s `quiet > n` holds.
+#[test]
+fn due_is_the_first_millisecond_past_each_threshold() {
+    use fleet_model::decide::due;
+    let r = RosterRow {
+        pid: Some(1),
+        pid_alive: true,
+        status: Some("busy".into()),
+        ..RosterRow::default()
+    };
+    let t = TailFacts::default();
+    let hook = |e: &str| HookEvent {
+        e: e.into(),
+        t: None,
+        n: None,
+        r: None,
+        i: None,
+        at: 10_000,
+    };
+    let h = hook("PermissionRequest");
+    assert_eq!(due(&r, &t, Some(&h), 10_000), Some(13_001));
+    assert_eq!(decide(&r, &t, Some(&h), 13_000).0, State::NeedsYou);
+    assert_eq!(decide(&r, &t, Some(&h), 13_001).0, State::Working);
+    assert_eq!(due(&r, &t, Some(&h), 13_001), None, "passed");
+    let idle = RosterRow {
+        status: Some("idle".into()),
+        ..r.clone()
+    };
+    let h = hook("PreToolUse");
+    assert_eq!(due(&idle, &t, Some(&h), 10_000), Some(70_001));
+    assert_eq!(decide(&idle, &t, Some(&h), 70_000).0, State::Working);
+    assert_eq!(decide(&idle, &t, Some(&h), 70_001).0, State::Waiting);
+    // Closed, or no current hook: nothing waits on the clock.
+    let dead = RosterRow {
+        pid_alive: false,
+        ..idle
+    };
+    assert_eq!(due(&dead, &t, Some(&h), 10_000), None);
+    assert_eq!(due(&r, &t, None, 10_000), None);
+    assert_eq!(due(&r, &t, Some(&hook("Stop")), 10_000), None);
+}

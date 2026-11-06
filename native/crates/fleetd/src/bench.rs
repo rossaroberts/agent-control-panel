@@ -27,9 +27,24 @@ struct Opts {
     transcript: PathBuf,
 }
 
+/// The user's real home folder, from the password database (not `$HOME`, which a caller sets at will).
+fn real_home() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: getpwuid returns a pointer into static storage or null; it is read at once, before any other call.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let dir = CStr::from_ptr((*pw).pw_dir).to_bytes();
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
+    }
+}
+
 /// The bench writes hook files and appends to transcripts, so it is for fixtures only: it runs only with `FLEETD_HOME`
-/// set, and only on a profile and a transcript that lie under it (Global Constraints: fleetd never writes to Claude
-/// Code's or Codex's records). `home` is the value of `FLEETD_HOME`, if any.
+/// set to something other than the user's real home, and only on a profile and a transcript that lie under it (Global
+/// Constraints: fleetd never writes to Claude Code's or Codex's records). `home` is the value of `FLEETD_HOME`, if any.
 fn opts(args: &[String], home: Option<PathBuf>) -> Result<Opts, String> {
     let home = home
         .filter(|h| !h.as_os_str().is_empty())
@@ -37,6 +52,12 @@ fn opts(args: &[String], home: Option<PathBuf>) -> Result<Opts, String> {
     let home = home
         .canonicalize()
         .map_err(|e| format!("bench: FLEETD_HOME: {e}"))?;
+    if real_home().and_then(|r| r.canonicalize().ok()).as_ref() == Some(&home) {
+        return Err(
+            "bench: refusing to run: FLEETD_HOME is your real home (it is for fixture homes only)"
+                .into(),
+        );
+    }
     let mode = args.first().cloned().ok_or("bench: a mode is needed")?;
     let get = |k: &str| {
         args.windows(2)
@@ -300,6 +321,17 @@ mod tests {
             Some(h.path().into())
         )
         .contains("not under FLEETD_HOME"));
+    }
+
+    #[test]
+    fn it_refuses_the_real_home_even_by_another_spelling() {
+        let real = real_home().expect("a password entry");
+        assert!(err(&["snapshot"], Some(real.clone())).contains("real home"));
+        // Through a symlink and a trailing `.`: the canonical path is what is compared.
+        let (h, _) = fixture();
+        let link = h.path().join("me");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(err(&["snapshot"], Some(link.join("."))).contains("real home"));
     }
 
     #[test]

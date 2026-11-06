@@ -93,10 +93,12 @@ async fn hello_without_since_gets_a_snapshot() {
     let mut c = Client::connect(&s.path, None).await.unwrap();
     match next(&mut c).await {
         Frame::Snapshot {
+            run,
             seq,
             machine,
             sessions,
         } => {
+            assert_eq!(run, s.store.run());
             assert_eq!(seq, 1);
             assert_eq!(machine, "fixture-mac");
             assert_eq!(sessions.len(), 3);
@@ -110,7 +112,8 @@ async fn hello_with_since_gets_only_what_came_after() {
     let s = Server::start(2);
     s.store.upsert(vec![sess(0, "second")]); // seq 2
     s.store.upsert(vec![sess(1, "third")]); // seq 3
-    let mut c = Client::connect(&s.path, Some(2)).await.unwrap();
+    let run = s.store.run();
+    let mut c = Client::connect(&s.path, Some((run, 2))).await.unwrap();
     match next(&mut c).await {
         Frame::Delta(Delta {
             seq,
@@ -125,7 +128,7 @@ async fn hello_with_since_gets_only_what_came_after() {
         f => panic!("{f:?}"),
     }
     // Fully current: an empty delta at once as the acknowledgement (R18), then the next change when it comes.
-    let mut cur = Client::connect(&s.path, Some(3)).await.unwrap();
+    let mut cur = Client::connect(&s.path, Some((run, 3))).await.unwrap();
     assert_eq!(
         next(&mut cur).await,
         Frame::Delta(Delta {
@@ -141,11 +144,57 @@ async fn hello_with_since_gets_only_what_came_after() {
         f => panic!("{f:?}"),
     }
     // A since this board never reached (another run) gets a snapshot.
-    let mut ahead = Client::connect(&s.path, Some(99)).await.unwrap();
+    let mut ahead = Client::connect(&s.path, Some((run, 99))).await.unwrap();
     assert!(matches!(
         next(&mut ahead).await,
         Frame::Snapshot { seq: 4, .. }
     ));
+}
+
+/// Ruling R24: a `seq` counts within one daemon run. A Hello from another run (a restarted daemon starts at 0 again),
+/// or with no run, gets the whole board, never a delta applied over a board of the old run, nor a "caught up".
+#[tokio::test]
+async fn since_from_another_run_gets_a_snapshot() {
+    let s = Server::start(2);
+    s.store.upsert(vec![sess(0, "second")]); // seq 2
+    let other = s.store.run() ^ 1;
+    for resume in [Some((other, 1)), Some((other, 2))] {
+        let mut c = Client::connect(&s.path, resume).await.unwrap();
+        match next(&mut c).await {
+            Frame::Snapshot { run, seq, .. } => assert_eq!((run, seq), (s.store.run(), 2)),
+            f => panic!("{resume:?}: {f:?}"),
+        }
+    }
+    // A Hello with a since and no run: also the board.
+    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
+    let hello = Frame::Hello {
+        proto: PROTO,
+        since: Some(2),
+        run: None,
+    };
+    write_frame(&mut st, &hello).await.unwrap();
+    assert!(matches!(
+        read_frame(&mut st, MAX_FRAME).await.unwrap(),
+        Frame::Snapshot { seq: 2, .. }
+    ));
+}
+
+/// A client of proto 1 (whose Hello has no `run`, so does not decode as proto 2's) is told the version, by name.
+#[tokio::test]
+async fn a_proto_1_hello_gets_an_error_naming_proto_2() {
+    use tokio::io::AsyncWriteExt;
+    let s = Server::start(1);
+    let mut st = tokio::net::UnixStream::connect(&s.path).await.unwrap();
+    // Proto 1's Hello { proto: 1, since: Some(5) }, length-prefixed.
+    st.write_all(&[4, 0, 0, 0, 0x00, 0x01, 0x01, 0x05])
+        .await
+        .unwrap();
+    match read_frame(&mut st, MAX_FRAME).await.unwrap() {
+        Frame::Error { message } => {
+            assert_eq!(message, "protocol 1 not supported; this is 2")
+        }
+        f => panic!("{f:?}"),
+    }
 }
 
 #[tokio::test]

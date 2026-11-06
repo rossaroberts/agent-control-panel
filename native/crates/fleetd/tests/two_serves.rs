@@ -1,5 +1,5 @@
 //! Two `fleetd serve` processes started together: exactly one serves, the other exits non-zero, and the socket is
-//! never replaced.
+//! never replaced; the one that exits did no startup read.
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -47,6 +47,8 @@ fn exactly_one_of_two_serves_runs() {
         s
     };
     assert!(msg.contains("another fleetd holds"), "{msg}");
+    // It stopped at the lock, before the watcher's startup read (which logs the open-files limit first).
+    assert!(!msg.contains("open files limit"), "{msg}");
     // The winner is serving, and keeps the same socket.
     let t = Instant::now();
     while !sock.exists() {

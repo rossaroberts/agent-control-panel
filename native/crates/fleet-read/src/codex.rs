@@ -720,6 +720,23 @@ impl RolloutView {
         self.written
     }
 
+    /// The first time after `now` at which `session(open, _)` may answer otherwise with nothing read anew: when its age
+    /// passes ten minutes, or three days with a question up. `None` when its liveness does not wait on the clock.
+    pub fn due(&self, open: bool, now: i64) -> Option<i64> {
+        let exited = self.meta.source.as_deref() == Some("exec") && !open;
+        if exited || open {
+            return None;
+        }
+        // `age < n` first fails at `written + n`; a question up keeps it live the longer of the two.
+        let n = if self.r.asking.is_some() {
+            3 * DAY
+        } else {
+            CODEX_LIVE_MS
+        };
+        let at = self.written.unwrap_or(0) + n;
+        (at > now).then_some(at)
+    }
+
     /// The session as of `now` (epoch milliseconds). `open`: a running Codex holds this rollout open.
     ///
     /// Open while a running Codex holds its log, else while it was written in the last ten minutes; a question to you stays

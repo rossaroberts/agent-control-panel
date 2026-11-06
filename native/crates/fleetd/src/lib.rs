@@ -1,6 +1,7 @@
 //! fleetd: the session board as a daemon. The watcher turns file events into re-read sessions; the store keeps one
 //! truthful `Session` per session and the numbered deltas between; the socket serves both to clients.
 
+pub mod alarm;
 pub mod bench;
 pub mod client;
 #[cfg(target_os = "macos")]

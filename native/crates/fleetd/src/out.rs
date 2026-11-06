@@ -35,8 +35,9 @@ pub fn sessions(list: &[Session]) -> Vec<Value> {
     list.iter().map(session).collect()
 }
 
-pub fn snapshot(seq: u64, machine: &str, list: &[Session]) -> Value {
-    json!({"type": "snapshot", "seq": seq, "machine": machine, "sessions": sessions(list)})
+/// `run` as a string: a u64 does not survive JSON readers that take numbers as doubles.
+pub fn snapshot(run: u64, seq: u64, machine: &str, list: &[Session]) -> Value {
+    json!({"type": "snapshot", "run": format!("{run:016x}"), "seq": seq, "machine": machine, "sessions": sessions(list)})
 }
 
 pub fn delta(d: &Delta) -> Value {

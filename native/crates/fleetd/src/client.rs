@@ -14,14 +14,24 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connects and says Hello with `since`.
-    pub async fn connect(path: &Path, since: Option<u64>) -> io::Result<Client> {
-        Self::connect_proto(path, PROTO, since).await
+    /// Connects and says Hello: `None` for the board, or `Some((run, seq))` (the run of the last snapshot, the `seq` of
+    /// the last frame) to be sent only what came after, when the daemon is still that run.
+    pub async fn connect(path: &Path, resume: Option<(u64, u64)>) -> io::Result<Client> {
+        Self::connect_proto(path, PROTO, resume).await
     }
 
-    pub async fn connect_proto(path: &Path, proto: u16, since: Option<u64>) -> io::Result<Client> {
+    pub async fn connect_proto(
+        path: &Path,
+        proto: u16,
+        resume: Option<(u64, u64)>,
+    ) -> io::Result<Client> {
         let (r, mut w) = UnixStream::connect(path).await?.into_split();
-        write_frame(&mut w, &Frame::Hello { proto, since }).await?;
+        let hello = Frame::Hello {
+            proto,
+            since: resume.map(|r| r.1),
+            run: resume.map(|r| r.0),
+        };
+        write_frame(&mut w, &hello).await?;
         Ok(Client { r, _w: w })
     }
 

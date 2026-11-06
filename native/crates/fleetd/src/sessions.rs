@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fleet_model::decide::{decide, hh_mm_utc, RosterRow};
+use fleet_model::decide::{decide, due, hh_mm_utc, RosterRow};
 use fleet_model::hook::hook_state;
-use fleet_model::types::{Engine, HookEvent, Session, SessionKey};
+use fleet_model::types::{Engine, HookEvent, HookSays, Session, SessionKey};
 use fleet_read::codex::{muse_session, recent_rollouts, RolloutTail, RolloutView, RECENT_CODEX_MS};
 use fleet_read::profiles::Profile;
 use fleet_read::roster::{pid_alive, RosterError, RosterRead};
@@ -356,6 +356,70 @@ impl Fleet {
             .collect()
     }
 
+    // ------------------------------------------------------------ the clock and the processes
+
+    /// Each session whose state waits on the clock, and when (`decide::due`, `RolloutView::due`): what the one-shot timer
+    /// is armed to. `roster`: a hook that needs you is quiet at that time, so the roster's word on it is wanted again (a
+    /// permission given runs the tool with no event: only the roster says it is busy).
+    pub fn dues(&self, now: i64) -> Vec<Due> {
+        let mut out = vec![];
+        for (pi, ps) in self.profiles.iter().enumerate() {
+            for (sid, c) in &ps.sessions {
+                let facts = c
+                    .view
+                    .as_ref()
+                    .map(|v| v.v.facts.clone())
+                    .unwrap_or_default();
+                if let Some(at) = due(&c.row, &facts, c.hook.as_ref(), now) {
+                    let roster = c.hook.as_ref().and_then(hook_state) == Some(HookSays::NeedsYou);
+                    out.push(Due {
+                        key: DueKey::Claude(pi, sid.clone()),
+                        at,
+                        roster,
+                    });
+                }
+            }
+        }
+        for (f, (_, seen)) in &self.codex.tails {
+            if let Some(at) = seen.v.due(self.codex.open.contains(f), now) {
+                out.push(Due {
+                    key: DueKey::Codex(f.clone()),
+                    at,
+                    roster: false,
+                });
+            }
+        }
+        out
+    }
+
+    /// The pids of the Claude Code sessions held as alive: what is watched for its exit.
+    pub fn live_pids(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self
+            .profiles
+            .iter()
+            .flat_map(|ps| ps.sessions.values())
+            .filter(|c| c.row.pid_alive)
+            .filter_map(|c| c.row.pid)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// A process exited: each session held as alive on that pid is not any more. Those sessions.
+    pub fn pid_exited(&mut self, pid: u32) -> Vec<(usize, String)> {
+        let mut out = vec![];
+        for (pi, ps) in self.profiles.iter_mut().enumerate() {
+            for (sid, c) in ps.sessions.iter_mut() {
+                if c.row.pid == Some(pid) && c.row.pid_alive {
+                    c.row.pid_alive = false;
+                    out.push((pi, sid.clone()));
+                }
+            }
+        }
+        out
+    }
+
     // ------------------------------------------------------------ Claude Code in
 
     /// The versions held of these sessions' hook files (`None` inside: none held; outer `None`: not listed).
@@ -667,6 +731,21 @@ impl Fleet {
         }
         rosters
     }
+}
+
+/// Which session a due time is for.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DueKey {
+    Claude(usize, String),
+    Codex(PathBuf),
+}
+
+/// When a session's state may change with the clock alone (`Fleet::dues`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Due {
+    pub key: DueKey,
+    pub at: i64,
+    pub roster: bool,
 }
 
 /// What a roster run read without the board.

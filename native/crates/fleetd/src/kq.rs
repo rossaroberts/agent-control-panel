@@ -2,7 +2,9 @@
 //! (a hook or status file replaced by a rename is a write to its folder) and on each followed transcript and rollout
 //! (`NOTE_WRITE | NOTE_EXTEND | NOTE_DELETE | NOTE_RENAME`). The kernel says so at once; FSEvents, which waits ~11 ms
 //! under steady activity, stays for discovery. A file renamed or deleted is let go and, when its path names a file
-//! again, followed anew. The folders and files are opened `O_EVTONLY`, so nothing is held against a volume.
+//! again, followed anew. The folders and files are opened `O_EVTONLY`, so nothing is held against a volume. Each live
+//! session's process is watched for its exit (`EVFILT_PROC` `NOTE_EXIT`, one shot), so a session that crashes (no
+//! `SessionEnd`) shows ended at once rather than at the next reconcile.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, CString};
@@ -18,6 +20,8 @@ pub enum Target {
     Dir(PathBuf),
     /// A followed file was written to, grew, or was replaced.
     File(PathBuf),
+    /// A watched process exited (or was gone when it was to be watched).
+    Pid(u32),
 }
 
 const FFLAGS: u32 = libc::NOTE_WRITE | libc::NOTE_EXTEND | libc::NOTE_DELETE | libc::NOTE_RENAME;
@@ -28,6 +32,7 @@ struct Inner {
     by_fd: HashMap<c_int, Target>,
     files: HashMap<PathBuf, c_int>,
     dirs: HashMap<PathBuf, c_int>,
+    pids: HashSet<u32>,
 }
 
 pub struct Kq {
@@ -174,6 +179,46 @@ impl Kq {
         }
     }
 
+    /// Watches exactly these processes for their exit. The ones that are already gone are returned: as good as exited.
+    pub fn set_pids(&self, want: &[u32]) -> Vec<u32> {
+        let want: HashSet<u32> = want.iter().copied().filter(|p| *p > 0).collect();
+        let (add, drop): (Vec<u32>, Vec<u32>) = {
+            let i = self.inner.lock().unwrap();
+            (
+                want.difference(&i.pids).copied().collect(),
+                i.pids.difference(&want).copied().collect(),
+            )
+        };
+        for p in drop {
+            // A one-shot that fired, or a process gone, has no knote left: the error says only that.
+            let _ = self.submit(change(p as usize, libc::EVFILT_PROC, libc::EV_DELETE, 0));
+            self.inner.lock().unwrap().pids.remove(&p);
+        }
+        let mut gone = vec![];
+        for p in add {
+            let ev = change(
+                p as usize,
+                libc::EVFILT_PROC,
+                libc::EV_ADD | libc::EV_ONESHOT,
+                libc::NOTE_EXIT,
+            );
+            match self.submit(ev) {
+                Ok(()) => {
+                    self.inner.lock().unwrap().pids.insert(p);
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => gone.push(p),
+                // Not ours to watch (another user's): the reconcile's liveness check stands for it.
+                Err(_) => {}
+            }
+        }
+        gone
+    }
+
+    /// Processes watched for their exit now.
+    pub fn pids(&self) -> usize {
+        self.inner.lock().unwrap().pids.len()
+    }
+
     /// Makes a `wait` under way return (empty).
     pub fn wake(&self) {
         let _ = self.submit(change(WAKE, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER));
@@ -202,6 +247,12 @@ impl Kq {
             if ev.filter == libc::EVFILT_USER {
                 continue;
             }
+            if ev.filter == libc::EVFILT_PROC {
+                let pid = ev.ident as u32;
+                self.inner.lock().unwrap().pids.remove(&pid);
+                out.push(Target::Pid(pid));
+                continue;
+            }
             let fd = ev.ident as c_int;
             let Some(t) = self.inner.lock().unwrap().by_fd.get(&fd).cloned() else {
                 continue;
@@ -218,6 +269,7 @@ impl Kq {
                             self.close_fd(fd);
                         }
                     }
+                    Target::Pid(_) => {}
                 }
             }
             if !out.contains(&t) {

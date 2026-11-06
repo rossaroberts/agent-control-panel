@@ -31,6 +31,8 @@ struct Inner {
 /// between the two calls. A reader coming back with a `seq` asks `since(seq)` (after subscribing, likewise) and falls
 /// back to a snapshot on `None`.
 pub struct Store {
+    /// This run of the board: random at each start, so a `seq` from another run is never taken for one of this (R24).
+    run: u64,
     inner: Mutex<Inner>,
     tx: broadcast::Sender<Delta>,
 }
@@ -45,9 +47,23 @@ fn bytes(s: &Session) -> Vec<u8> {
     serde_json::to_vec(s).expect("a Session serializes")
 }
 
+/// A random, non-zero run id. `RandomState` is seeded from the OS's randomness once per process, and differently each run.
+fn new_run() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    h.write_u32(std::process::id());
+    h.finish().max(1)
+}
+
 impl Store {
     pub fn new() -> Store {
         Store {
+            run: new_run(),
             inner: Mutex::new(Inner {
                 seq: 0,
                 sessions: BTreeMap::new(),
@@ -55,6 +71,11 @@ impl Store {
             }),
             tx: broadcast::channel(RING).0,
         }
+    }
+
+    /// This board's run id.
+    pub fn run(&self) -> u64 {
+        self.run
     }
 
     /// Every session, ordered by key, and the `seq` of the last delta they include.

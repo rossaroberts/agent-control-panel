@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_model::wire::{read_frame, write_frame, Frame, PROTO};
+use fleet_model::wire::{decode, hello_proto, read_body, write_frame, Frame, PROTO};
 
 /// The most a Hello can weigh.
 const HELLO_MAX: u32 = 4096;
@@ -158,6 +158,7 @@ fn snapshot(store: &Store, machine: &str) -> (u64, Frame) {
     (
         seq,
         Frame::Snapshot {
+            run: store.run(),
             seq,
             machine,
             sessions,
@@ -167,12 +168,21 @@ fn snapshot(store: &Store, machine: &str) -> (u64, Frame) {
 
 async fn handle(stream: UnixStream, store: Arc<Store>, machine: String) -> io::Result<()> {
     let (mut r, mut w) = stream.into_split();
-    let hello = timeout(HELLO_WITHIN, read_frame(&mut r, HELLO_MAX))
+    let body = timeout(HELLO_WITHIN, read_body(&mut r, HELLO_MAX))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello"))??;
-    let since = match hello {
-        Frame::Hello { proto, since } if proto == PROTO => since,
-        Frame::Hello { proto, .. } => {
+    // A Hello of another version may not decode as this one's: its `proto` is still read (wire.rs), to say so.
+    let hello = decode(&body);
+    let proto = match &hello {
+        Ok(Frame::Hello { proto, .. }) => Some(*proto),
+        _ => hello_proto(&body),
+    };
+    let since = match (hello, proto) {
+        // `since` counts within one run only (R24): from another run, or with no run, it gets a snapshot.
+        (Ok(Frame::Hello { since, run, .. }), Some(PROTO)) => {
+            since.filter(|_| run == Some(store.run()))
+        }
+        (_, Some(proto)) => {
             let message = format!("protocol {proto} not supported; this is {PROTO}");
             return send(&mut w, &Frame::Error { message }).await;
         }

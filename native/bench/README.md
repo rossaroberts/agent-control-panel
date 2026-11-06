@@ -30,7 +30,8 @@ is never a gate and cannot ratchet.
 
 `--ratchet` sets each budget to max(median p95 x 1.25, floor), never above what it was, and leaves a budget that is
 currently over alone (`ratchet.mjs`). `budgets.json` holds each budget and its floor; the idle floor is 20 ms because
-`ps` reports CPU time in 10 ms steps. A budget only moves down. Only `results/before.json` is committed.
+`ps` reports CPU time in 10 ms steps, and the latency floors are 2 ms (hook, transcript, snapshot) and RSS 20 MB so that
+a ratchet never lands inside the run-to-run spread (Ruling R23). A budget only moves down. Only `results/before.json` is committed.
 
 ## Not in a budget
 

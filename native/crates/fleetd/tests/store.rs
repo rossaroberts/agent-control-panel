@@ -104,13 +104,35 @@ impl Home {
 
     /// A hook event, written as hook.sh writes it: a temp file renamed over `<session>.json`. Its `at`.
     fn hook(&self, n: usize, e: &str, t: Option<&str>) -> i64 {
-        let at = now_ms();
+        self.hook_at(n, e, t, now_ms())
+    }
+
+    /// `hook`, saying it was written at `at` (a hook written a while ago, without the wait).
+    fn hook_at(&self, n: usize, e: &str, t: Option<&str>, at: i64) -> i64 {
         let d = self.profile().join("fleet-state");
         let tmp = d.join(format!(".{}.{}", sid(n), std::process::id()));
         let ev = json!({"e": e, "t": t, "n": null, "r": null, "i": null, "at": at});
         fs::write(&tmp, format!("{ev}\n")).unwrap();
         fs::rename(&tmp, d.join(format!("{}.json", sid(n)))).unwrap();
         at
+    }
+
+    /// What the stand-in roster says from now on: one interactive session `sid(0)` with `pid` and `status`, listed as
+    /// running when `running`.
+    fn roster(&self, pid: u32, status: &str, running: bool) {
+        let s = self.stand_in();
+        let rows = json!([{"sessionId": sid(0), "pid": pid, "kind": "interactive", "status": status,
+                           "name": "fixture 0", "cwd": CWD, "startedAt": STARTED}]);
+        let run = if running {
+            json!([{"sessionId": sid(0)}])
+        } else {
+            json!([])
+        };
+        // Renamed into place, so a run never reads half a file.
+        for (name, v) in [("all.json", rows), ("running.json", run)] {
+            fs::write(s.join(".tmp"), v.to_string()).unwrap();
+            fs::rename(s.join(".tmp"), s.join(name)).unwrap();
+        }
     }
 
     fn transcript(&self, n: usize) -> PathBuf {
@@ -1114,4 +1136,165 @@ fn a_reconcile_of_an_unchanged_home_reads_no_hook_file_bodies() {
     hook(15, now_ms());
     reconcile_read_with(&plan, None, false, now_ms(), &count);
     assert_eq!(reads.get(), 2);
+}
+
+/// The time `f` was last written, epoch ms (what the tail's `written_at` is).
+fn mtime_ms(f: &Path) -> i64 {
+    fs::metadata(f)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// F4: a session whose process dies with no `SessionEnd` (a crash) is not live within 100 ms: its pid is watched for
+/// its exit (kqueue `NOTE_EXIT`), not left for the 30 s reconcile.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_whose_process_dies_is_not_live_within_100ms() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(0);
+    let work = home.root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let held = common::Held::start(&home.root.join("claude-session"), &[], &work);
+    home.roster(held.pid(), "idle", true);
+    let (store, h, mut rx) = home.start();
+    let s = &store.snapshot().1[0];
+    assert_eq!(
+        (s.state.clone(), s.live),
+        (State::Waiting, true),
+        "{}",
+        s.reason
+    );
+    assert!(h.watched_pids() >= 1, "its pid is watched");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drain(&mut rx, Duration::from_millis(100)).await;
+
+    // It crashes: Claude Code no longer lists it as running, and nothing writes a hook or a jobs/ record.
+    home.roster(held.pid(), "idle", false);
+    let t0 = Instant::now();
+    // SAFETY: the helper this test started.
+    unsafe { libc::kill(held.pid() as libc::pid_t, libc::SIGKILL) };
+    let (s, at) = wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.key.session_id == sid(0) && !s.live
+    })
+    .await
+    .expect("a delta that it is not live");
+    let ms = at.duration_since(t0).as_secs_f64() * 1000.0;
+    eprintln!("process exit -> not live: {ms:.2} ms ({})", s.reason);
+    assert_eq!(s.state, State::Ended);
+    assert!(ms < 100.0, "{ms:.2} ms");
+    drop(held);
+}
+
+/// F4: what the clock alone changes comes at its time, not at the next reconcile. A turn stopped with Esc fires
+/// nothing: a working hook with the roster idle is waiting once it has been quiet 60 s (`decide`'s own threshold). The
+/// hook says it was written 59.5 s ago, so the threshold comes half a second in; the delta must come within 100 ms of
+/// it, and not before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_working_hook_with_the_roster_idle_is_waiting_at_60s_within_100ms() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(1);
+    let (_store, _h, mut rx) = home.start();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drain(&mut rx, Duration::from_millis(100)).await;
+    let at = home.hook_at(0, "PreToolUse", Some("Bash"), now_ms() - 59_500);
+    let (s, _) = wait_for(&mut rx, Duration::from_secs(1), |s| s.hook_at == Some(at))
+        .await
+        .expect("the hook's delta");
+    assert_eq!(s.state, State::Working, "{}", s.reason);
+    let due = at + 60_001;
+    let (s, _) = wait_for(&mut rx, Duration::from_secs(2), |s| {
+        s.key.session_id == sid(0) && s.state == State::Waiting
+    })
+    .await
+    .expect("waiting at its threshold");
+    let late = now_ms() - due;
+    eprintln!("60 s threshold -> delta: {late} ms after it");
+    assert_eq!(s.reason, "idle at prompt");
+    assert!((0..100).contains(&late), "{late} ms after the threshold");
+}
+
+/// F3, the grant: a permission prompt (hook `PermissionRequest`, roster `waiting`) needs you. Ross grants; the tool
+/// runs with no hook and no jobs/ change, and the roster now says `busy`. A transcript write to the session asks for
+/// its roster at once (within 500 ms), so the stale `waiting` row goes; the session is working as soon as `decide`'s
+/// own rule allows (a hook that needs you, quiet for 3 s, beside a busy roster), within 100 ms of that time. The write
+/// itself restarts the quiet (Node's `quiet` counts from the last write too), so "working" cannot come sooner than 3 s
+/// after it without changing the oracle's rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_granted_permission_reads_working_after_a_transcript_write() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(0);
+    home.roster(std::process::id(), "waiting", true);
+    let f = home.transcript(0);
+    append(&f, &assistant("I need to run the build."));
+    let (_store, _h, mut rx) = home.start();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drain(&mut rx, Duration::from_millis(100)).await;
+    let at = home.hook(0, "PermissionRequest", Some("Bash"));
+    let (s, _) = wait_for(&mut rx, Duration::from_secs(1), |s| s.hook_at == Some(at))
+        .await
+        .unwrap();
+    assert_eq!(s.state, State::NeedsYou, "{}", s.reason);
+
+    // Granted: the roster says busy, and the session writes to its transcript.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    home.roster(std::process::id(), "busy", true);
+    let calls = home.calls("agents --json --all");
+    let t0 = Instant::now();
+    append(
+        &f,
+        &json!({"type":"progress","timestamp":"2026-11-06T12:00:01.000Z"}),
+    );
+    let w = mtime_ms(&f);
+    while home.calls("agents --json --all") == calls {
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "no roster run within 500 ms of the write"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    eprintln!(
+        "transcript write on a needing-you session -> roster run: {:.2} ms",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+    let (s, _) = wait_for(&mut rx, Duration::from_secs(5), |s| {
+        s.key.session_id == sid(0) && s.state == State::Working
+    })
+    .await
+    .expect("working once quiet");
+    let late = now_ms() - (w + 3_001);
+    eprintln!("granted -> working: {late} ms after quiet passed 3 s");
+    assert_eq!(s.reason, "working: roster busy");
+    assert!((0..100).contains(&late), "{late} ms");
+}
+
+/// F3/F4, the grant with no write at all (a long tool run): when the hook that needs you has been quiet 3 s, the timer
+/// asks for the roster once, and the busy row makes it working within 500 ms of that time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_granted_permission_reads_working_once_quiet_with_no_write() {
+    let _g = SERIAL.lock().await;
+    let home = Home::new(0);
+    home.roster(std::process::id(), "waiting", true);
+    let (_store, _h, mut rx) = home.start();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drain(&mut rx, Duration::from_millis(100)).await;
+    let at = home.hook(0, "PermissionRequest", Some("Bash"));
+    wait_for(&mut rx, Duration::from_secs(1), |s| {
+        s.hook_at == Some(at) && s.state == State::NeedsYou
+    })
+    .await
+    .unwrap();
+    home.roster(std::process::id(), "busy", true);
+    let (s, _) = wait_for(&mut rx, Duration::from_secs(5), |s| {
+        s.key.session_id == sid(0) && s.state == State::Working
+    })
+    .await
+    .expect("working once quiet");
+    let late = now_ms() - (at + 3_001);
+    eprintln!("granted, no write -> working: {late} ms after quiet passed 3 s");
+    assert_eq!(s.reason, "working: roster busy");
+    assert!((0..500).contains(&late), "{late} ms");
 }
