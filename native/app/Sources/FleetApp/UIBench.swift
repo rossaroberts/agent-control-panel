@@ -23,7 +23,8 @@ import FleetKit
 @MainActor final class EchoBackend: TermBackend {
     private var terms: [UInt32: PaneTerm] = [:]
     private(set) var typed: [UInt32: [UInt8]] = [:]
-    var onConnection: ((_ machine: String?, _ up: Bool) -> Void)?
+    var onConnection: ((_ link: TermLink?, _ up: Bool) -> Void)?
+    func link(for machine: String) -> TermLink? { nil }
 
     func open(_ term: PaneTerm, target: AttachTarget, cols: UInt16, rows: UInt16) {
         terms[term.ref] = term

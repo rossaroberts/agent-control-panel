@@ -27,10 +27,16 @@ import SwiftTerm
     func input(_ ref: UInt32, _ data: Data)
     func size(_ ref: UInt32, cols: UInt16, rows: UInt16)
     func close(_ ref: UInt32)
-    /// Told whether a machine's Terminals connection is up, now and at every change: the machine (nil when the
-    /// backend has one connection for every terminal), and whether it is up.
-    var onConnection: ((_ machine: String?, _ up: Bool) -> Void)? { get set }
+    /// Told whether a Terminals connection is up, now and at every change: which connection (its link, fixed when the
+    /// connection is made, so it is known before its machine has a name; nil for a backend with one connection for
+    /// every terminal), and whether it is up.
+    var onConnection: ((_ link: TermLink?, _ up: Bool) -> Void)? { get set }
+    /// The connection `machine`'s terminals go through (nil: the one connection).
+    func link(for machine: String) -> TermLink?
 }
+
+/// Which Terminals connection: one per machine's endpoint, by the identity of its client.
+typealias TermLink = ObjectIdentifier
 
 /// The app's backend: one TermClient per machine (Ruling A-R1: a remote session's terminal goes through its machine's
 /// endpoint, over TCP, with nothing added between the keystroke and the socket). Every operation goes through one
@@ -50,12 +56,15 @@ import SwiftTerm
     private var watched: Set<ObjectIdentifier> = []
     /// Bytes sent to programs: keystrokes and the terminal's replies to live queries (the live check counts them).
     private(set) var bytesTyped = 0
-    var onConnection: ((_ machine: String?, _ up: Bool) -> Void)?
+    var onConnection: ((_ link: TermLink?, _ up: Bool) -> Void)?
+    /// The one client of the single-client backend: its connection is told as nil.
+    private var single: TermClient?
 
     /// One client for every terminal.
     convenience init(client: TermClient) {
         self.init { _ in client }
-        watch(client) { nil }
+        single = client
+        watch(client)
     }
 
     /// `route` gives the client of a machine; `watch` each client to hear of its connection.
@@ -82,12 +91,18 @@ import SwiftTerm
         }
     }
 
-    /// Follows `client`'s connection, told as `machine()`'s (its name once its board has one).
-    func watch(_ client: TermClient, machine: @escaping @MainActor () -> String?) {
+    /// Follows `client`'s connection, told by its link (the client's identity; nil for the single client).
+    func watch(_ client: TermClient) {
         guard watched.insert(ObjectIdentifier(client)).inserted else { return }
+        let link: TermLink? = client === single ? nil : ObjectIdentifier(client)
         Task { @MainActor [weak self] in
-            for await up in await client.connections() { self?.onConnection?(machine(), up) }
+            for await up in await client.connections() { self?.onConnection?(link, up) }
         }
+    }
+
+    func link(for machine: String) -> TermLink? {
+        guard single == nil, let c = route(machine) else { return nil }
+        return ObjectIdentifier(c)
     }
 
     func open(_ term: PaneTerm, target: AttachTarget, cols: UInt16, rows: UInt16) {
@@ -446,31 +461,32 @@ final class TerminalPaneController: NSViewController {
     private var catchUp: DispatchWorkItem?
     /// Called when a terminal's phase moves or output is fed (the bench).
     var onFed: (() -> Void)?
-    /// Per machine (nil: the one connection of a single-connection backend), whether its Terminals connection is up
+    /// Per Terminals connection (its link; nil: the one connection of a single-connection backend), whether it is up
     /// (M2: "reconnecting…" follows it, not only the board's), whether it has been up, and whether it went down since.
-    private var termUp: [String?: Bool] = [:]
-    private var termEverUp: Set<String?> = []
-    private var wasDown: Set<String?> = []
+    private var termUp: [TermLink?: Bool] = [:]
+    private var termEverUp: Set<TermLink?> = []
+    private var wasDown: Set<TermLink?> = []
 
     init(model: BoardModel, backend: TermBackend) {
         self.model = model
         self.backend = backend
         super.init(nibName: nil, bundle: nil)
-        backend.onConnection = { [weak self] machine, up in self?.connection(machine, up) }
+        backend.onConnection = { [weak self] link, up in self?.connection(link, up) }
     }
 
     /// Whether the shown terminal's connection is up (the checks).
     var termConnected: Bool { shownKey.map { termIsUp($0.machine) } ?? true }
 
-    private func termIsUp(_ machine: String) -> Bool { termUp[machine] ?? termUp[nil] ?? true }
-    private func termWasUp(_ machine: String) -> Bool { termEverUp.contains(machine) || termEverUp.contains(nil) }
+    private func termIsUp(_ machine: String) -> Bool { termUp[backend.link(for: machine)] ?? true }
+    private func termWasUp(_ machine: String) -> Bool { termEverUp.contains(backend.link(for: machine)) }
 
-    private func connection(_ machine: String?, _ up: Bool) {
-        termUp[machine] = up
-        if up { termEverUp.insert(machine) }
-        if !up, termEverUp.contains(machine) { wasDown.insert(machine) }
-        if up, wasDown.remove(machine) != nil {
-            for t in terms.values where machine == nil || t.key.machine == machine { t.reopened() }
+    private func connection(_ link: TermLink?, _ up: Bool) {
+        termUp[link] = up
+        if up { termEverUp.insert(link) }
+        if !up, termEverUp.contains(link) { wasDown.insert(link) }
+        if up, wasDown.remove(link) != nil {
+            // Only that connection's terminals: each is a replay again (P3-R11), the others carry on.
+            for t in terms.values where link == nil || backend.link(for: t.key.machine) == link { t.reopened() }
         }
         refreshStatus()
     }

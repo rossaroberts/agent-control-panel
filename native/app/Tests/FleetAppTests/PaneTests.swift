@@ -11,7 +11,8 @@ import Testing
 @MainActor final class RecordingBackend: TermBackend {
     var opened: [UInt32] = []
     var sent: [UInt32: [UInt8]] = [:]
-    var onConnection: ((_ machine: String?, _ up: Bool) -> Void)?
+    var onConnection: ((_ link: TermLink?, _ up: Bool) -> Void)?
+    func link(for machine: String) -> TermLink? { nil }
     func open(_ term: PaneTerm, target: AttachTarget, cols: UInt16, rows: UInt16) { opened.append(term.ref) }
     func input(_ ref: UInt32, _ data: Data) { sent[ref, default: []] += Array(data) }
     func size(_ ref: UInt32, cols: UInt16, rows: UInt16) {}

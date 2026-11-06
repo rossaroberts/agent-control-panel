@@ -217,6 +217,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             watches.append(machines.merged.$machines.receive(on: RunLoop.main).sink { [weak self] _ in self?.showChrome() })
             machineList?.nameOf = { [weak machines] e in machines?.node(for: e)?.source.machine }
+            machineList?.duplicateOf = { [weak machines] e in
+                guard let machines, let n = machines.node(for: e) else { return nil }
+                return machines.duplicate(n)
+            }
             machineList?.onChange = { [weak self] in self?.machinesChanged() }
             machines.start()
         }
@@ -277,17 +281,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showChrome()
     }
 
-    /// The pane hears of each machine's Terminals connection (by its machine's name once its board has one).
+    /// The pane hears of each machine's Terminals connection, by its client (known before the machine has a name).
     private func watchTerminals() {
         guard let machines, let live = backend as? LiveBackend else { return }
-        for n in machines.nodes { live.watch(n.terms) { [weak n] in n?.source.machine } }
+        for n in machines.nodes { live.watch(n.terms) }
     }
 
     private func showChrome() {
-        // A machine not yet reached has no name from its board: the Machines list's (its Tailscale host name) stands in.
+        // A machine not yet reached has no name from its board, and a duplicate has another's: the Machines list's
+        // name (its Tailscale host name) stands in. Lines and nodes are paired by their source board (M4).
         var lines = machines?.merged.machines ?? []
         if let machines, let machineList {
-            for (i, n) in machines.nodes.enumerated() where lines.indices.contains(i) && lines[i].machine.isEmpty {
+            for (i, src) in machines.merged.sources.enumerated() where lines.indices.contains(i) {
+                guard lines[i].machine.isEmpty || lines[i].duplicateOf != nil,
+                    let n = machines.nodes.first(where: { $0.source === src })
+                else { continue }
                 lines[i].machine = machineList.entries.first { $0.endpoint == n.endpoint }?.name ?? n.endpoint.description
             }
         }

@@ -286,79 +286,41 @@ private func key(_ m: String, _ id: String) -> SessionKey { SessionKey(machine: 
         #expect(model.status(of: "m1") == .live)
         #expect(model.status(of: "m2") == .reconnecting)
     }
-}
 
-@Suite struct RemoteAttachTests {
-    /// A remote machine's job opens through its own fleetd (the caller names its machine as local); while it cannot be
-    /// reached it says so instead of offering a terminal.
-    @Test func aRemoteJobOpensAndAnUnreachableOneSaysWhy() {
-        var s = session("m2", "c")
-        s.jobId = "0a1b2c3d"
-        #expect(Attach.of(s, local: "m2") == .open(.claude(profile: "p", job: "0a1b2c3d")))
-        guard case .none = Attach.of(s, local: "m1") else {
-            Issue.record("a machine with no endpoint opens nothing")
-            return
-        }
-        let u = MergedBoard.unreachable(s, since: Date(timeIntervalSince1970: 0))
-        #expect(Attach.of(u, local: "m2") == .none("m2 cannot be reached now: its terminal opens here when it is back."))
-    }
-}
-
-@Suite struct TailscalePeersTests {
-    /// Synthetic `tailscale status --json`: this node, a Linux and a macOS node of the same user, an iOS node, a
-    /// tagged node, another user's node.
-    private let status = """
-        {"Self": {"HostName": "this-mac", "OS": "macOS", "UserID": 11, "TailscaleIPs": ["100.64.0.1", "fd7a::1"]},
-         "Peer": {
-           "k1": {"HostName": "linux-box", "OS": "linux", "UserID": 11, "TailscaleIPs": ["100.64.0.2", "fd7a::2"]},
-           "k2": {"HostName": "other-mac", "OS": "macOS", "UserID": 11, "Tags": [], "TailscaleIPs": ["fd7a::3", "100.64.0.3"]},
-           "k3": {"HostName": "phone", "OS": "iOS", "UserID": 11, "TailscaleIPs": ["100.64.0.4"]},
-           "k4": {"HostName": "tagged", "OS": "linux", "UserID": 11, "Tags": ["tag:server"], "TailscaleIPs": ["100.64.0.5"]},
-           "k5": {"HostName": "theirs", "OS": "linux", "UserID": 22, "TailscaleIPs": ["100.64.0.6"]}
-         }}
-        """
-
-    @Test func onlyLinuxAndMacNodesOfThisUserUntaggedAndNotSelf() throws {
-        let peers = try #require(Tailscale.peers(fromStatus: Data(status.utf8)))
-        #expect(peers == [
-            Tailscale.Peer(name: "linux-box", address: "100.64.0.2"),
-            Tailscale.Peer(name: "other-mac", address: "100.64.0.3"),
-        ])
-        #expect(peers[0].endpoint == .tcp(host: "100.64.0.2", port: 47470))
+    /// M2: a second source reporting a machine already on the board (the same fleetd reached twice, or this Mac over
+    /// TCP) is marked a duplicate, and its rows are never merged over the first's. The first leaving frees the name.
+    @Test func aSecondSourceOfTheSameMachineIsADuplicateNotMerged() async {
+        let first = source("m1", ["a", "b"])
+        let twin = Board()
+        _ = twin.apply(.snapshot(run: 9, seq: 0, machine: "m1", sessions: [session("m1", "a", state: .needsYou)]))
+        let merged = MergedBoard(sources: [first, twin])
+        #expect(merged.machines[1].duplicateOf == "m1")
+        #expect(merged.machines[0].duplicateOf == nil)
+        #expect(merged.output.sessions[key("m1", "a")]?.state == .working)
+        #expect(merged.output.sessions.count == 2)
+        _ = twin.apply(.delta(Delta(seq: 1, upsert: [session("m1", "z")], remove: [key("m1", "a")])))
+        await turn()
+        #expect(merged.output.sessions[key("m1", "z")] == nil)
+        #expect(merged.output.sessions[key("m1", "a")] != nil)
+        merged.remove(first)
+        await turn()
+        #expect(merged.machines[0].duplicateOf == nil)
+        #expect(Set(merged.output.sessions.keys) == [key("m1", "z")])
     }
 
-    @Test func notAStatusIsNil() {
-        #expect(Tailscale.peers(fromStatus: Data("[]".utf8)) == nil)
-        #expect(Tailscale.peers(fromStatus: Data("{}".utf8)) == nil)
-        #expect(Tailscale.peers(fromStatus: Data(#"{"Self": {"UserID": 1}}"#.utf8)) == [])
-    }
-
-    @Test func aMissingCLIIsNil() async {
-        #expect(await Tailscale.discover(cli: ["/nonexistent/tailscale"]) == nil)
-    }
-
-    /// A CLI that hangs is stopped at the time limit.
-    @Test func aSlowCLIIsStopped() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ts-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let cli = dir.appendingPathComponent("tailscale")
-        try "#!/bin/sh\nexec sleep 10\n".write(to: cli, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
-        let t0 = ContinuousClock.now
-        #expect(await Tailscale.discover(timeout: .milliseconds(200), cli: [cli.path]) == nil)
-        #expect(ContinuousClock.now - t0 < .seconds(2))
-    }
-
-    @Test func aCLIThatAnswersIsRead() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ts-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try status.write(to: dir.appendingPathComponent("status.json"), atomically: true, encoding: .utf8)
-        let cli = dir.appendingPathComponent("tailscale")
-        try "#!/bin/sh\ncat '\(dir.path)/status.json'\n".write(to: cli, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
-        let peers = await Tailscale.discover(cli: [cli.path])
-        #expect(peers?.map(\.name) == ["linux-box", "other-mac"])
+    /// M6: a health reading on a machine changes its line, not the board's rows: no groups recompute.
+    @Test func aHealthReadingDoesNotRenderTheBoard() async throws {
+        let m1 = source("m1", ["a"])
+        let merged = MergedBoard(sources: [m1])
+        let model = BoardModel(merged: merged, cachedAt: nil)
+        merged.set(status: .live, cachedAt: nil, forSource: m1)
+        try await Task.sleep(for: .milliseconds(40))
+        await turn()
+        let renders = model.renders
+        _ = m1.apply(.meta(Meta(health: Health(cpuPct: 50, memPct: 1, diskPct: 1, dev: 0, db: 0))))
+        try await Task.sleep(for: .milliseconds(40))
+        await turn()
+        #expect(merged.machines[0].health?.cpuPct == 50)
+        #expect(model.renders == renders)
     }
 }

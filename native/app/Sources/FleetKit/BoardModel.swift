@@ -71,14 +71,27 @@ public final class BoardModel: ObservableObject {
         self.cachedAt = cachedAt
         coalescer = Coalescer { [weak self] in self?.render() }
         watch = board.objectWillChange.sink { [weak self] _ in self?.coalescer.mark() }
-        // A machine going live (or out of reach) changes what is cached without a row changing.
-        mergedWatch = merged.objectWillChange.sink { [weak self] _ in self?.coalescer.mark() }
+        // A machine going live changes what is cached, and one added or named changes how rows read, without a row
+        // changing. A health reading changes neither: the toolbar takes it, and the groups are not recomputed (M6).
+        mergedWatch = merged.$machines
+            .map { lines in Shape(live: lines.contains { $0.status == .live && $0.duplicateOf == nil },
+                                  count: lines.count, first: lines.first?.machine) }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.coalescer.mark() }
         render()  // the preloaded rows are there before the window is
+    }
+
+    /// What of a merged board's machines a render reads.
+    private struct Shape: Equatable {
+        var live: Bool
+        var count: Int
+        var first: String?
     }
 
     /// Whether the board shown is live: the board's own Snapshot, or for a merged board, a machine that is live.
     private var isLive: Bool {
-        if let merged { return merged.machines.contains { $0.status == .live } }
+        if let merged { return merged.machines.contains { $0.status == .live && $0.duplicateOf == nil } }
         return board.run != nil
     }
 

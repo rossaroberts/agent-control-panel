@@ -26,6 +26,9 @@ public struct MachineLine: Equatable, Sendable {
     public var downSince: Date?
     /// Not live for `unreachableAfter` or more: its rows are shown as unreachable.
     public var unreachable: Bool
+    /// The machine an earlier source already reports under this source's name (the same fleetd reached twice, or
+    /// this Mac dialled over TCP): this source's rows are not merged. Nil for a source of its own.
+    public var duplicateOf: String? = nil
 
     public init(
         machine: String, status: BoardClient.Status, cachedAt: Date?, health: Health?, downSince: Date? = nil,
@@ -218,11 +221,23 @@ public final class MergedBoard: ObservableObject {
         var upsert: [Session] = []
         var remove = dropped
         dropped = []
+        // A source reporting the name of an earlier one is a duplicate (M2): the first keeps the name, and the second's
+        // rows are never merged over it. Re-read every pass (a name comes with a Snapshot; a source may leave).
+        var named = Set<String>()
+        for i in sources.indices {
+            let m = sources[i].machine.flatMap { $0.isEmpty ? nil : $0 }
+            let dup = m.flatMap { named.contains($0) ? $0 : nil }
+            if dup == nil, let m { named.insert(m) }
+            if machines[i].duplicateOf != dup {
+                machines[i].duplicateOf = dup
+                dirty.insert(ObjectIdentifier(sources[i]))
+            }
+        }
         if !dirty.isEmpty {
             for i in sources.indices where dirty.contains(ObjectIdentifier(sources[i])) {
                 let line = machines[i]
                 let since = line.downSince ?? clock()
-                let raw = sources[i].sessions
+                let raw = line.duplicateOf == nil ? sources[i].sessions : [:]
                 let now = line.unreachable ? raw.mapValues { Self.unreachable($0, since: since) } : raw
                 let was = mirrored[i]
                 for (k, s) in now where was[k] != s { upsert.append(s) }
@@ -250,11 +265,14 @@ public final class MergedBoard: ObservableObject {
     }
 
     /// Ruling P5-R1: epics and groups from the first source that has a board (the Mac's own, first in the list);
-    /// accounts unioned by (engine, name), in source order; no health (it is per machine, in `machines`).
+    /// accounts unioned by (engine, name), in source order; no health (it is per machine, in `machines`). With no
+    /// board from the Mac (no cache, fleetd not running) the first other machine's epics and groups stand in: an
+    /// accepted fallback (controller, M5), so a board is still grouped.
     private func mergedMeta() -> Meta {
-        let primary = sources.first { $0.run != nil }
+        let own = sources.indices.filter { machines[$0].duplicateOf == nil }.map { sources[$0] }
+        let primary = own.first { $0.run != nil }
         var accounts: [Account] = []
-        for b in sources {
+        for b in own {
             for a in b.meta.accounts where !accounts.contains(where: { $0.name == a.name && $0.engine == a.engine }) {
                 accounts.append(a)
             }

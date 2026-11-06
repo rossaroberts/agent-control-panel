@@ -310,4 +310,28 @@ private func ms(_ d: Duration) -> Double {
         #expect(await until(5) { out.sessions.count == 3 && out.sessions.keys.allSatisfy { $0.machine == "fixture-a" } })
         #expect(machines.nodes.count == 1)
     }
+
+    /// M1/M2: the same fleetd reached twice (its socket, and its TCP listener, as this Mac dialled over the tailnet
+    /// would be): the second is a duplicate, its rows are not merged, and it stops dialling.
+    @Test func theSameFleetdTwiceIsADuplicate() async throws {
+        let m = try Machine("fixture-twice")
+        let port = try freePort()
+        try m.start(tcpPort: port)
+        defer { m.stop() }
+        #expect(await until(20) { m.log.contains("listening tcp 127.0.0.1:\(port)") && m.key() != nil }, "\(m.log)")
+        let tcp = Endpoint.keyedTCP(host: "127.0.0.1", port: port, key: try #require(m.key()))
+        let machines = Machines(endpoints: [.unix(m.socket), tcp], cacheURL: { _ in nil })
+        machines.start()
+        defer { machines.stop() }
+        let out = machines.merged.output
+        #expect(await until(20) { machines.merged.machines.last?.duplicateOf == "fixture-twice" },
+                "\(machines.merged.machines)")
+        #expect(out.sessions.count == 3)
+        let twin = try #require(machines.node(for: tcp))
+        #expect(machines.duplicate(twin) == "fixture-twice")
+        #expect(machines.duplicate(machines.nodes[0]) == nil)
+        // Stopped dialling.
+        #expect(!twin.dialling)
+        #expect(machines.nodes[0].dialling)
+    }
 }

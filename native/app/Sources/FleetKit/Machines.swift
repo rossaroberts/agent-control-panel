@@ -26,6 +26,8 @@ public final class Machines {
         fileprivate var watch: Task<Void, Never>?
         fileprivate var changes: AnyCancellable?
         fileprivate var started = false
+        /// Whether its clients are started (false once stopped, or halted as a duplicate).
+        public var dialling: Bool { started }
 
         init(endpoint: Endpoint, cache: BoardCache?) {
             self.endpoint = endpoint
@@ -100,6 +102,12 @@ public final class Machines {
 
     public func node(for endpoint: Endpoint) -> Node? { nodes.first { $0.endpoint == endpoint } }
 
+    /// The machine an earlier node already reports under `n`'s name, if any (the first of two keeps the name).
+    public func duplicate(_ n: Node) -> String? {
+        guard let m = n.source.machine, !m.isEmpty, let i = nodes.firstIndex(where: { $0 === n }) else { return nil }
+        return nodes[..<i].contains { $0.source.machine == m } ? m : nil
+    }
+
     /// Writes every pending cache now (on quit).
     public func flush() {
         for n in nodes { n.cache?.flush() }
@@ -162,6 +170,15 @@ public final class Machines {
         let was = n.status
         guard s != was else { return }
         n.status = s
+        if s == .live, duplicate(n) != nil {
+            // The same fleetd reached twice, or this Mac over TCP (M1, M2): stop dialling it. Its line says whose
+            // duplicate it is (MergedBoard never merges its rows); it is not cached under its own name.
+            halt(n)
+            n.cachedAt = nil
+            merged.set(status: s, cachedAt: nil, forSource: n.source)
+            onStatus?(n, was)
+            return
+        }
         if s == .live {
             n.cachedAt = nil
             n.cache?.note(n.source)  // the Snapshot that made it live landed before this status did

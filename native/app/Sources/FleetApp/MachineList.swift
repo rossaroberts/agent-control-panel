@@ -28,6 +28,8 @@ final class MachineList: NSObject, NSMenuDelegate {
     var onChange: (() -> Void)?
     /// The machine names as the board knows them, by endpoint (for the menu; "" until known).
     var nameOf: ((Endpoint) -> String?)?
+    /// The machine an endpoint duplicates, when its fleetd reports another's name (for the menu).
+    var duplicateOf: ((Endpoint) -> String?)?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -52,17 +54,45 @@ final class MachineList: NSObject, NSMenuDelegate {
 
     var usesTailscale: Bool { chosen == nil }
 
+    /// This Mac's names and addresses on the tailnet (from the last status read); with `localNames`, what is never
+    /// dialled over TCP (M1): this Mac's board is its Unix socket.
+    var tailnetSelf: Set<String> = []
+
+    /// This Mac's own names and loopback: gethostname(2), which asks no resolver (launch must not wait on DNS).
+    static let localNames: Set<String> = {
+        var out: Set<String> = ["localhost", "127.0.0.1", "::1"]
+        var buf = [CChar](repeating: 0, count: 256)
+        if gethostname(&buf, buf.count) == 0 {
+            let host = String(cString: buf).lowercased()
+            out.insert(host)
+            if let short = host.split(separator: ".").first {
+                out.insert(String(short))
+                out.insert("\(short).local")
+            }
+        }
+        return out
+    }()
+
+    /// Whether `e` is this Mac itself (its Tailscale address or name, its host name, loopback).
+    func isSelf(_ e: Entry) -> Bool {
+        let h = e.host.lowercased()
+        let bare = h.hasSuffix(".") ? String(h.dropLast()) : h
+        return tailnetSelf.contains(bare) || Self.localNames.contains(bare) || bare.hasPrefix("127.")
+    }
+
     /// The machines now (besides this Mac).
-    var entries: [Entry] { chosen ?? discovered }
+    var entries: [Entry] { (chosen ?? discovered).filter { !isSelf($0) } }
     var endpoints: [Endpoint] { entries.map(\.endpoint) }
 
     /// Reads the tailnet (off the main thread); when its peers differ from the last, and the list is the tailnet's,
     /// the board follows.
     func discover() {
         Task { @MainActor [weak self] in
-            guard let peers = await Tailscale.discover() else { return }
+            guard let status = await Tailscale.discover() else { return }
             guard let self else { return }
-            let found = peers.map { Entry(name: $0.name, host: $0.address, port: Tailscale.fleetdPort) }
+            self.tailnetSelf = status.me
+            let found = status.peers.map { Entry(name: $0.name, host: $0.address, port: Tailscale.fleetdPort) }
+                .filter { !self.isSelf($0) }
             guard found != self.discovered else { return }
             self.discovered = found
             if self.usesTailscale { self.onChange?() }
@@ -92,17 +122,23 @@ final class MachineList: NSObject, NSMenuDelegate {
         return Entry(name: host, host: host, port: port)
     }
 
-    func add(_ e: Entry) {
+    enum AddResult: Equatable { case added, already, isThisMac }
+
+    /// Adds `e`, unless it is already listed or is this Mac (whose board is its own socket, never TCP).
+    @discardableResult func add(_ e: Entry) -> AddResult {
+        guard !isSelf(e) else { return .isThisMac }
         var list = entries
-        guard !list.contains(where: { $0.host == e.host && $0.port == e.port }) else { return }
+        guard !list.contains(where: { $0.host == e.host && $0.port == e.port }) else { return .already }
         list.append(e)
         chosen = list
         onChange?()
+        return .added
     }
 
-    func remove(at i: Int) {
+    /// Removes the machine at `host`:`port` (whatever its place in the list now, M3).
+    func remove(host: String, port: UInt16) {
         var list = entries
-        guard list.indices.contains(i) else { return }
+        guard let i = list.firstIndex(where: { $0.host == host && $0.port == port }) else { return }
         list.remove(at: i)
         chosen = list
         onChange?()
@@ -131,12 +167,13 @@ final class MachineList: NSObject, NSMenuDelegate {
         let here = NSMenuItem(title: "This Mac (its own fleetd)", action: nil, keyEquivalent: "")
         here.isEnabled = false
         menu.addItem(here)
-        for (i, e) in entries.enumerated() {
+        for e in entries {
             let known = nameOf?(e.endpoint).flatMap { $0.isEmpty ? nil : $0 }
-            let title = "Remove \(known ?? e.name) (\(e.host):\(e.port))…"
+            let twin = duplicateOf?(e.endpoint).map { ", duplicate of \($0)" } ?? ""
+            let title = "Remove \(known ?? e.name) (\(e.host):\(e.port)\(twin))…"
             let item = NSMenuItem(title: title, action: #selector(removeChosen(_:)), keyEquivalent: "")
             item.target = self
-            item.tag = i
+            item.representedObject = [e.name, e.host, String(e.port)]
             menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -164,19 +201,25 @@ final class MachineList: NSObject, NSMenuDelegate {
             NSSound.beep()
             return
         }
-        add(e)
+        if add(e) == .isThisMac {
+            let no = NSAlert()
+            no.messageText = "That is this Mac"
+            no.informativeText = "This Mac's board is always on, through its own fleetd. Add another machine."
+            no.runModal()
+        }
     }
 
     @objc private func removeChosen(_ sender: NSMenuItem) {
-        guard entries.indices.contains(sender.tag) else { return }
-        let e = entries[sender.tag]
+        // The entry the item was made for, by host and port: never a place in a list that may have changed since.
+        guard let r = sender.representedObject as? [String], r.count == 3, let port = UInt16(r[2]) else { return }
+        let e = Entry(name: r[0], host: r[1], port: port)
         let alert = NSAlert()
         alert.messageText = "Remove \(e.name) from the board?"
         alert.informativeText = "Its rows leave the board. Nothing on \(e.name) changes; add it again any time."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        remove(at: sender.tag)
+        remove(host: e.host, port: e.port)
     }
 
     @objc private func useTailscalePeers(_ sender: Any?) { useTailscale() }

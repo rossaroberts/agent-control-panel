@@ -23,9 +23,18 @@ public enum Tailscale {
         public var endpoint: Endpoint { .tcp(host: address, port: Tailscale.fleetdPort) }
     }
 
+    /// What a status says: the peers that may run a fleetd, and every name and address of this machine (its host name,
+    /// its MagicDNS name and its short form, its Tailscale addresses; lower-cased), so it is never dialled as another.
+    public struct Status: Equatable, Sendable {
+        public var peers: [Peer]
+        public var me: Set<String>
+    }
+
     /// The peers in a `tailscale status --json` document that may run a fleetd, in host-name order. Nil when it is not
     /// such a document.
-    public static func peers(fromStatus data: Data) -> [Peer]? {
+    public static func peers(fromStatus data: Data) -> [Peer]? { status(from: data)?.peers }
+
+    public static func status(from data: Data) -> Status? {
         guard let doc = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let me = doc["Self"] as? [String: Any]
         else { return nil }
@@ -42,7 +51,14 @@ public enum Tailscale {
             let name = (p["HostName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? ip
             out.append(Peer(name: name, address: ip))
         }
-        return out.sorted { ($0.name, $0.address) < ($1.name, $1.address) }
+        var names = Set(mine.map { $0.lowercased() })
+        if let h = me["HostName"] as? String, !h.isEmpty { names.insert(h.lowercased()) }
+        if let d = me["DNSName"] as? String, !d.isEmpty {
+            let full = d.lowercased().hasSuffix(".") ? String(d.lowercased().dropLast()) : d.lowercased()
+            names.insert(full)
+            if let short = full.split(separator: ".").first { names.insert(String(short)) }
+        }
+        return Status(peers: out.sorted { ($0.name, $0.address) < ($1.name, $1.address) }, me: names)
     }
 
     private static func isIPv4(_ s: String) -> Bool {
@@ -58,9 +74,9 @@ public enum Tailscale {
 
     /// Runs `tailscale status --json` on a thread of its own (never the main one), killed after `timeout`; the peers,
     /// or nil when there is no CLI, it fails, or it is too slow.
-    public static func discover(timeout: Duration = .seconds(2), cli: [String] = cliPaths) async -> [Peer]? {
+    public static func discover(timeout: Duration = .seconds(2), cli: [String] = cliPaths) async -> Status? {
         guard let path = cli.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
-        return await withCheckedContinuation { (c: CheckedContinuation<[Peer]?, Never>) in
+        return await withCheckedContinuation { (c: CheckedContinuation<Status?, Never>) in
             let t = Thread { c.resume(returning: run(path, timeout: timeout)) }
             t.name = "FleetKit.Tailscale"
             t.qualityOfService = .utility
@@ -68,7 +84,7 @@ public enum Tailscale {
         }
     }
 
-    private static func run(_ path: String, timeout: Duration) -> [Peer]? {
+    private static func run(_ path: String, timeout: Duration) -> Status? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = ["status", "--json"]
@@ -95,7 +111,7 @@ public enum Tailscale {
         }
         _ = read.wait(timeout: .now() + 1)
         guard p.terminationStatus == 0 else { return nil }
-        return peers(fromStatus: box.get())
+        return status(from: box.get())
     }
 
     private final class Box: @unchecked Sendable {

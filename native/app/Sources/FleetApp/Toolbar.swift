@@ -77,6 +77,9 @@ final class BoardToolbar: NSObject, NSToolbarDelegate {
         func piece(_ l: MachineLine, _ level: Int) -> [RunsView.Run] {
             let name = l.machine.isEmpty ? "…" : l.machine
             var out: [RunsView.Run] = [.text(name, .secondaryLabelColor, Fonts.small)]
+            if let twin = l.duplicateOf {
+                return out + [.gap(6), .text("duplicate of \(twin)", Palette.orange, Fonts.small)]
+            }
             switch l.status {
             case .live:
                 guard let h = l.health, level < 2 else { break }
@@ -102,6 +105,7 @@ final class BoardToolbar: NSObject, NSToolbarDelegate {
         vitals.fit(chosen, maxWidth: room.vitals, gap: gap)
         vitals.toolTip = lines.map { l -> String in
             let name = l.machine.isEmpty ? "a machine" : l.machine
+            if let twin = l.duplicateOf { return "\(name): duplicate of \(twin), its rows not shown twice" }
             switch l.status {
             case .live:
                 return l.health.map { "\(name): live, \($0.dev) dev servers, \($0.db) database stacks" } ?? "\(name): live"
