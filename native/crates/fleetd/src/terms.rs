@@ -49,8 +49,8 @@ pub const SINK_HIGH: usize = 1 << 20;
 pub const SINK_LOW: usize = SINK_HIGH / 2;
 /// Sizes are applied at most this often per pty.
 pub const RESIZE_EVERY: Duration = Duration::from_millis(16);
-/// Input queued for a program that is not reading, at most; more is dropped (a program that has not taken 1 MiB of
-/// keystrokes is wedged).
+/// Input queued for one pty at most. Past it `input` refuses with `InputFull` (nothing of that call is taken) and the
+/// socket layer stops reading the connection until `input_pending` drains: keystrokes are never dropped (Ruling P2-R4).
 pub const INPUT_MAX: usize = 1 << 20;
 /// The most one `TermOut` carries (ring replays are cut to this).
 const CHUNK: usize = 64 * 1024;
@@ -63,6 +63,11 @@ pub const ERR_CODEX_OPEN: &str = "It is open in another Fleet terminal already."
 /// `fleet.mjs` `codexBusy`'s reason for a thread a running Codex holds.
 pub const ERR_CODEX_BUSY: &str =
     "It is open in Codex (the app or a terminal): finish there, or close it there first.";
+
+/// `Terms::input` refused: the terminal holds `INPUT_MAX` of input its program has not read yet. None of the refused
+/// call's bytes were taken; send them again once `Terms::input_pending` has gone down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputFull;
 
 /// `term.mjs` `clamp` for the wire's integers.
 fn clamp_size(cols: u16, rows: u16) -> (u16, u16) {
@@ -138,6 +143,16 @@ impl TermSink {
 
     fn bytes(&self) -> usize {
         lock(&self.0.q).bytes
+    }
+
+    /// Nothing more goes to this sink, and nothing waits on it.
+    fn close(&self) {
+        let mut q = lock(&self.0.q);
+        q.closed = true;
+        drop(q);
+        self.0.drained.notify_all();
+        self.0.ready.notify_one();
+        self.0.arrived.notify_all();
     }
 
     /// Blocks until this sink is down to `SINK_LOW` (or closed), or `d` passes.
@@ -246,9 +261,9 @@ struct SizeSt {
 }
 
 struct InputQ {
-    buf: Vec<u8>,
+    /// Input not yet written, the part being written included (so `input_pending` counts what the program has not taken).
+    buf: VecDeque<u8>,
     closed: bool,
-    dropped: bool,
 }
 
 struct Term {
@@ -262,25 +277,24 @@ struct Term {
 }
 
 impl Term {
-    fn push_input(&self, data: &[u8]) {
+    /// Queues `data` whole, or refuses it whole when it would take the queue past `INPUT_MAX` (an empty queue takes any
+    /// one call, so an oversized call cannot wait forever). Input for a program that has gone is let go.
+    fn push_input(&self, data: &[u8]) -> Result<(), InputFull> {
         let mut q = lock(&self.input);
         if q.closed {
-            return;
+            return Ok(());
         }
-        if q.buf.len() + data.len() > INPUT_MAX {
-            if !q.dropped {
-                eprintln!(
-                    "fleetd: terminal {} is not reading its input; dropping keys",
-                    self.id
-                );
-            }
-            q.dropped = true;
-            return;
+        if !q.buf.is_empty() && q.buf.len() + data.len() > INPUT_MAX {
+            return Err(InputFull);
         }
-        q.dropped = false;
-        q.buf.extend_from_slice(data);
+        q.buf.extend(data);
         drop(q);
         self.input_cv.notify_one();
+        Ok(())
+    }
+
+    fn input_pending(&self) -> usize {
+        lock(&self.input).buf.len()
     }
 
     fn close_input(&self) {
@@ -340,16 +354,17 @@ impl Term {
         s.last = Some(Instant::now());
     }
 
-    /// Replays the ring to `sink` as `ref`'s output.
+    /// Replays the end of the ring to `sink` as `ref`'s output: as much as the sink has room for below `SINK_HIGH`, so a
+    /// client that never reads but keeps reopening cannot grow its queue (the size kick redraws what is left out).
     fn replay(st: &TermSt, r#ref: u32, sink: &TermSink) {
-        let (a, b) = st.ring.as_slices();
-        for part in [a, b] {
-            for c in part.chunks(CHUNK) {
-                sink.push(Frame::TermOut {
-                    r#ref,
-                    data: c.to_vec(),
-                });
-            }
+        let room = SINK_HIGH.saturating_sub(sink.bytes());
+        let skip = st.ring.len().saturating_sub(room);
+        let tail: Vec<u8> = st.ring.range(skip..).copied().collect();
+        for c in tail.chunks(CHUNK) {
+            sink.push(Frame::TermOut {
+                r#ref,
+                data: c.to_vec(),
+            });
         }
     }
 }
@@ -519,11 +534,12 @@ impl Terms {
                 return Err(ERR_CODEX_BUSY.into());
             }
         }
+        let pty = Pty::spawn(&cmd, size.0, size.1).map_err(|e| e.to_string())?;
+        let reader = pty.reader().map_err(|e| e.to_string())?;
+        // Only now that the new one runs: a failed spawn evicts nothing (MAX + 1 live for a moment).
         if live >= MAX {
             st.evict_oldest_live();
         }
-        let pty = Pty::spawn(&cmd, size.0, size.1).map_err(|e| e.to_string())?;
-        let reader = pty.reader().map_err(|e| e.to_string())?;
         let id = st.next_id;
         st.next_id += 1;
         let t = Arc::new(Term {
@@ -546,9 +562,8 @@ impl Terms {
                 armed: false,
             }),
             input: Mutex::new(InputQ {
-                buf: vec![],
+                buf: VecDeque::new(),
                 closed: false,
-                dropped: false,
             }),
             input_cv: Condvar::new(),
         });
@@ -610,10 +625,27 @@ impl Terms {
     }
 
     /// Keystrokes for terminal `ref` (ignored if it is not open). Never blocks: a writer thread per pty feeds it.
-    pub fn input(&self, conn: ConnId, r#ref: u32, data: &[u8]) {
-        if let Some(t) = self.term(conn, r#ref) {
-            t.push_input(data);
+    /// `Err(InputFull)`: refused whole, the terminal already holds `INPUT_MAX` its program has not read; stop reading
+    /// this connection and send them again once `input_pending` has gone down.
+    pub fn input(&self, conn: ConnId, r#ref: u32, data: &[u8]) -> Result<(), InputFull> {
+        match self.term(conn, r#ref) {
+            Some(t) => t.push_input(data),
+            None => Ok(()),
         }
+    }
+
+    /// Input queued and not yet taken by the programs, over the terminals connection `conn` has open (the most of any
+    /// one of them: that is the one `InputFull` is about).
+    pub fn input_pending(&self, conn: ConnId) -> usize {
+        let terms: Vec<Arc<Term>> = {
+            let st = lock(&self.sh.st);
+            st.conns
+                .iter()
+                .filter(|((c, _), _)| *c == conn)
+                .filter_map(|(_, id)| st.terms.get(id).cloned())
+                .collect()
+        };
+        terms.iter().map(|t| t.input_pending()).max().unwrap_or(0)
     }
 
     /// Terminal `ref`'s window is now `cols` x `rows` (coalesced: at most one size per 16 ms reaches the program, the
@@ -682,7 +714,9 @@ impl Terms {
             Key::Claude(..) => {
                 st.warm.push_back((id, Instant::now()));
                 while st.warm.len() > WARM_MAX {
-                    let (old, _) = st.warm[0];
+                    let Some((old, _)) = st.warm.pop_front() else {
+                        break;
+                    };
                     if let Some(o) = st.remove(old) {
                         stop_detached(o);
                     }
@@ -738,6 +772,10 @@ impl Drop for Terms {
         let ids: Vec<u64> = st.terms.keys().copied().collect();
         for id in ids {
             if let Some(t) = st.remove(id) {
+                // A reader parked on a full sink wakes, finds nothing attached, and reads on to the hang-up.
+                for a in std::mem::take(&mut lock(&t.st).refs) {
+                    a.sink.close();
+                }
                 stop_detached(t);
             }
         }
@@ -867,19 +905,21 @@ fn read_loop(t: Arc<Term>, mut f: File, sh: Weak<Shared>) {
 /// Input to the program, from its queue. A program that does not read blocks only this thread.
 fn write_loop(t: Arc<Term>) {
     loop {
-        let data = {
+        // A chunk is copied out and stays queued until it is written, so `input_pending` never undercounts.
+        let data: Vec<u8> = {
             let q = lock(&t.input);
-            let mut q = t
+            let q = t
                 .input_cv
                 .wait_while(q, |q| q.buf.is_empty() && !q.closed)
                 .unwrap_or_else(|e| e.into_inner());
             if q.closed {
                 return;
             }
-            std::mem::take(&mut q.buf)
+            q.buf.range(..q.buf.len().min(CHUNK)).copied().collect()
         };
         if t.pty.write(&data).is_err() {
             return;
         }
+        lock(&t.input).buf.drain(..data.len());
     }
 }

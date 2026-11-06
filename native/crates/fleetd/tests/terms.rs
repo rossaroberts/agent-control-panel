@@ -3,240 +3,15 @@
 //! `attach_cmd::command` looks first): `claude` and `codex` both run `stand-in.py`, which logs each start, prints a
 //! banner, answers lines with `GOT <line>`, and prints `REDRAW <cols>x<rows>` on SIGWINCH.
 
-use std::collections::{HashMap, HashSet};
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+mod terms_home;
+
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fleet_model::types::AttachTarget;
-use fleet_model::wire::Frame;
-use fleetd::terms::{self, term_sink, Options, TermSink, TermSource, Terms};
-
-const STAND_IN: &str = r#"#!/usr/bin/python3
-import os, sys, signal, time, fcntl, termios, struct
-LOG = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'starts.log')
-with open(LOG, 'a') as f: f.write('%s %d\n' % (' '.join(sys.argv[1:]), os.getpid()))
-def size():
-    r, c, _, _ = struct.unpack('HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, b'\0' * 8))
-    return c, r
-def winch(*_):
-    c, r = size()
-    with open(LOG + '.winch', 'a') as f: f.write('%.6f %d %d\n' % (time.monotonic(), c, r))
-    os.write(1, ('REDRAW %dx%d\r\n' % (c, r)).encode())
-signal.signal(signal.SIGWINCH, winch)
-os.write(1, ('BANNER %s\r\n' % ' '.join(sys.argv[1:])).encode())
-while True:
-    line = sys.stdin.buffer.readline()
-    if not line: break
-    l = line.strip()
-    if l == b'flood':
-        os.write(1, b'X' * 5000000 + b'\r\nFLOODED\r\n')
-    elif l == b'exit-soon':
-        time.sleep(0.3); os.write(1, b'LAST WORDS\r\n'); sys.exit(0)
-    else:
-        os.write(1, b'GOT ' + l + b'\r\n')
-"#;
-
-struct Home {
-    dir: tempfile::TempDir,
-}
-
-impl Home {
-    fn new() -> Home {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(".local/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let script = bin.join("stand-in.py");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for name in ["claude", "codex"] {
-            std::os::unix::fs::symlink(&script, bin.join(name)).unwrap();
-        }
-        std::fs::create_dir_all(dir.path().join("work")).unwrap();
-        Home { dir }
-    }
-
-    fn path(&self) -> PathBuf {
-        self.dir.path().to_path_buf()
-    }
-
-    fn starts(&self) -> Vec<String> {
-        std::fs::read_to_string(self.dir.path().join("starts.log"))
-            .unwrap_or_default()
-            .lines()
-            .map(String::from)
-            .collect()
-    }
-
-    /// Starts whose argv mentions `word`.
-    fn starts_of(&self, word: &str) -> Vec<i32> {
-        self.starts()
-            .iter()
-            .filter(|l| l.split(' ').any(|w| w == word))
-            .map(|l| l.rsplit(' ').next().unwrap().parse().unwrap())
-            .collect()
-    }
-
-    /// (seconds, cols, rows) of each SIGWINCH the stand-ins saw.
-    fn winches(&self) -> Vec<(f64, u16, u16)> {
-        std::fs::read_to_string(self.dir.path().join("starts.log.winch"))
-            .unwrap_or_default()
-            .lines()
-            .map(|l| {
-                let v: Vec<&str> = l.split(' ').collect();
-                (
-                    v[0].parse().unwrap(),
-                    v[1].parse().unwrap(),
-                    v[2].parse().unwrap(),
-                )
-            })
-            .collect()
-    }
-
-    fn terms(&self) -> Terms {
-        Terms::new(self.path(), |_| false).unwrap()
-    }
-}
-
-fn claude(job: &str) -> AttachTarget {
-    AttachTarget::Claude {
-        profile: "default".into(),
-        job: job.into(),
-    }
-}
-
-fn codex(sid: &str) -> AttachTarget {
-    AttachTarget::Codex {
-        profile: "codex".into(),
-        session_id: sid.into(),
-        cwd: "~/work".into(),
-    }
-}
-
-fn job(n: usize) -> String {
-    format!("{n:08x}")
-}
-
-/// Seconds a cold stand-in gets to print its banner (python starts slowly when the suite runs 25 at once).
-const BOOT: f64 = 20.0;
-
-const SID: &str = "0199aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-
-/// One connection's view: its sink for opens, and what has come out of its source, per ref.
-struct Conn {
-    id: u64,
-    sink: TermSink,
-    src: TermSource,
-    /// Each frame received, in order: (ref, Some(payload length)) for output, (ref, None) for an end.
-    got: Vec<(u32, Option<usize>)>,
-    outs: HashMap<u32, Vec<u8>>,
-}
-
-impl Conn {
-    fn new(id: u64) -> Conn {
-        let (sink, src) = term_sink();
-        Conn {
-            id,
-            sink,
-            src,
-            got: vec![],
-            outs: HashMap::new(),
-        }
-    }
-
-    fn open(&self, t: &Terms, r: u32, target: AttachTarget) -> Result<(), String> {
-        t.open(self.id, r, target, 100, 30, self.sink.clone())
-    }
-
-    fn output(&self, r: u32) -> &[u8] {
-        self.outs.get(&r).map_or(&[], |v| v.as_slice())
-    }
-
-    fn ended(&self, r: u32) -> bool {
-        self.got.iter().any(|(x, d)| *x == r && d.is_none())
-    }
-
-    /// Receives one frame, waiting until `end` at most; false if none came.
-    fn take(&mut self, end: Instant) -> bool {
-        let now = Instant::now();
-        if now >= end {
-            return false;
-        }
-        match self.src.recv_timeout(end - now) {
-            Some(Frame::TermOut { r#ref, data }) => {
-                self.got.push((r#ref, Some(data.len())));
-                self.outs.entry(r#ref).or_default().extend(data);
-            }
-            Some(Frame::TermEnd { r#ref, .. }) => self.got.push((r#ref, None)),
-            Some(f) => panic!("unexpected {f:?}"),
-            None => {}
-        }
-        true
-    }
-
-    /// Receives until `done(self)` or `secs` pass; whether it was done.
-    fn until(&mut self, secs: f64, done: impl Fn(&Conn) -> bool) -> bool {
-        let end = Instant::now() + Duration::from_secs_f64(secs);
-        while !done(self) {
-            if !self.take(end) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Receives until `ref`'s output holds `needle` (looking only at what is new each time).
-    fn until_has(&mut self, r: u32, needle: &str, secs: f64) -> bool {
-        let end = Instant::now() + Duration::from_secs_f64(secs);
-        let mut from = 0;
-        loop {
-            let out = self.output(r);
-            if has(&out[from..], needle) {
-                return true;
-            }
-            from = out.len().saturating_sub(needle.len());
-            if !self.take(end) {
-                return false;
-            }
-        }
-    }
-}
-
-fn has(all: &[u8], needle: &str) -> bool {
-    all.windows(needle.len()).any(|w| w == needle.as_bytes())
-}
-
-fn pos(all: &[u8], needle: &str) -> Option<usize> {
-    all.windows(needle.len())
-        .position(|w| w == needle.as_bytes())
-}
-
-fn alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-fn gone_within(pid: i32, d: Duration) -> bool {
-    let end = Instant::now() + d;
-    while Instant::now() < end {
-        if !alive(pid) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    !alive(pid)
-}
-
-fn wait_for(d: Duration, f: impl Fn() -> bool) -> bool {
-    let end = Instant::now() + d;
-    while Instant::now() < end {
-        if f() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    f()
-}
+use fleetd::terms::{self, InputFull, Options, Terms};
+use terms_home::*;
 
 // (a)
 #[test]
@@ -250,7 +25,7 @@ fn a_cold_terminal_shows_the_banner_and_echoes() {
         "{:?}",
         String::from_utf8_lossy(c.output(1))
     );
-    t.input(1, 1, b"hello\n");
+    t.input(1, 1, b"hello\n").unwrap();
     assert!(c.until_has(1, "GOT hello", 5.0));
     assert_eq!(h.starts_of("0000000a").len(), 1);
 }
@@ -263,7 +38,7 @@ fn a_warm_reopen_replays_the_ring_then_redraws_without_a_new_process() {
     let mut c = Conn::new(1);
     c.open(&t, 1, claude("0000000b")).unwrap();
     assert!(c.until_has(1, "BANNER", BOOT));
-    t.input(1, 1, b"before\n");
+    t.input(1, 1, b"before\n").unwrap();
     assert!(c.until_has(1, "GOT before", 5.0));
     t.close(1, 1);
     assert!(c.until(2.0, |c| c.ended(1)), "a close gets its TermEnd");
@@ -297,13 +72,6 @@ fn a_warm_reopen_replays_the_ring_then_redraws_without_a_new_process() {
     assert_eq!(h.starts_of("0000000b").len(), 1);
 }
 
-impl Conn {
-    fn open_sized(&self, t: &Terms, r: u32, target: AttachTarget, cols: u16, rows: u16) {
-        t.open(self.id, r, target, cols, rows, self.sink.clone())
-            .unwrap();
-    }
-}
-
 // (c)
 #[test]
 fn two_connections_on_one_job_share_one_process() {
@@ -316,14 +84,14 @@ fn two_connections_on_one_job_share_one_process() {
     assert!(b.until_has(9, "BANNER", BOOT), "the newcomer gets the ring");
     assert_eq!(h.starts_of("0000000c").len(), 1, "one process");
     assert_eq!(t.live_count(), 1);
-    t.input(1, 7, b"from-a\n");
-    t.input(2, 9, b"from-b\n");
+    t.input(1, 7, b"from-a\n").unwrap();
+    t.input(2, 9, b"from-b\n").unwrap();
     assert!(a.until_has(7, "GOT from-a", 5.0) && a.until_has(7, "GOT from-b", 5.0));
     assert!(b.until_has(9, "GOT from-a", 5.0) && b.until_has(9, "GOT from-b", 5.0));
     // One letting go leaves the other attached, not warm.
     t.close(1, 7);
     assert_eq!(t.warm_count(), 0);
-    t.input(2, 9, b"still\n");
+    t.input(2, 9, b"still\n").unwrap();
     assert!(b.until_has(9, "GOT still", 5.0));
     t.drop_conn(2);
     assert_eq!(
@@ -341,7 +109,7 @@ fn a_program_that_exits_while_warm_tells_the_next_opener_then_starts_fresh() {
     let mut c = Conn::new(1);
     c.open(&t, 1, claude("0000000d")).unwrap();
     assert!(c.until_has(1, "BANNER", BOOT));
-    t.input(1, 1, b"exit-soon\n");
+    t.input(1, 1, b"exit-soon\n").unwrap();
     assert!(
         c.until_has(1, "exit-soon", 5.0),
         "echoed before release: {:?}",
@@ -612,7 +380,7 @@ fn a_full_sink_stops_the_reading_and_loses_nothing() {
     let mut c = Conn::new(1);
     c.open(&t, 1, claude("000000f1")).unwrap();
     assert!(c.until_has(1, "BANNER", BOOT));
-    t.input(1, 1, b"flood\n");
+    t.input(1, 1, b"flood\n").unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     let held = c.src.pending_bytes();
     assert!(
@@ -633,7 +401,7 @@ fn a_full_sink_stops_the_reading_and_loses_nothing() {
 }
 
 #[test]
-fn input_to_a_program_that_does_not_read_wedges_only_that_terminal() {
+fn input_to_a_program_that_does_not_read_is_refused_past_1_mib_and_never_dropped() {
     let h = Home::new();
     let t = h.terms();
     let mut c = Conn::new(1);
@@ -642,21 +410,97 @@ fn input_to_a_program_that_does_not_read_wedges_only_that_terminal() {
     assert!(c.until_has(1, "BANNER", BOOT) && c.until_has(2, "BANNER", BOOT));
     let pid = h.starts_of("000000f3")[0];
     unsafe { libc::kill(pid, libc::SIGSTOP) };
-    let big = vec![b'k'; 60 * 1024];
+    // 2 MiB of numbered 512-byte lines (a tty line holds at most 1024), in 64 KiB calls.
+    let lines: Vec<Vec<u8>> = (0..4096)
+        .map(|i| {
+            let mut l = format!("L{i:06}").into_bytes();
+            l.resize(511, b'.');
+            l.push(b'\n');
+            l
+        })
+        .collect();
+    let calls: Vec<Vec<u8>> = lines.chunks(128).map(|c| c.concat()).collect();
     let s = Instant::now();
-    for _ in 0..40 {
-        t.input(1, 1, &big); // far more than the tty takes while nobody reads
+    let mut taken = 0;
+    let mut next = 0;
+    while next < calls.len() {
+        match t.input(1, 1, &calls[next]) {
+            Ok(()) => {
+                taken += calls[next].len();
+                next += 1;
+            }
+            Err(InputFull) => break,
+        }
     }
     assert!(
         s.elapsed() < Duration::from_millis(500),
         "input never blocks the caller"
     );
-    t.input(1, 2, b"other\n");
+    assert!(next < calls.len(), "refused before 2 MiB");
+    let pending = t.input_pending(1);
+    assert!(pending <= terms::INPUT_MAX, "{pending} queued");
+    assert!(
+        pending + 64 * 1024 > terms::INPUT_MAX,
+        "refused only at the 1 MiB mark ({pending} queued)"
+    );
+    assert!(
+        taken >= pending,
+        "what the tty holds is the rest of what was taken"
+    );
+    t.input(1, 2, b"other\n").unwrap();
     assert!(
         c.until_has(2, "GOT other", 5.0),
         "the other terminal still gets its keys"
     );
+
+    // The program reads again; the refused calls are sent again as the queue goes down, as the socket layer will.
     unsafe { libc::kill(pid, libc::SIGCONT) };
+    let end = Instant::now() + Duration::from_secs(30);
+    while next < calls.len() && Instant::now() < end {
+        match t.input(1, 1, &calls[next]) {
+            Ok(()) => next += 1,
+            Err(InputFull) => {
+                let _ = c.until(0.01, |_| false);
+            }
+        }
+    }
+    assert_eq!(next, calls.len());
+    let last = format!("GOT L{:06}", lines.len() - 1);
+    assert!(c.until_has(1, &last, 30.0));
+    // Echoes interleave with the answers, so each `GOT L` is looked for anywhere.
+    let got: Vec<usize> = String::from_utf8_lossy(c.output(1))
+        .split("GOT L")
+        .skip(1)
+        .map(|l| l[..6].parse().unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        (0..lines.len()).collect::<Vec<_>>(),
+        "every line, in order"
+    );
+}
+
+#[test]
+fn a_client_that_never_reads_cannot_grow_its_queue_by_reopening() {
+    let h = Home::new();
+    let t = h.terms();
+    let mut a = Conn::new(1);
+    a.open(&t, 1, claude("000000f7")).unwrap();
+    assert!(a.until_has(1, "BANNER", BOOT));
+    t.input(1, 1, b"flood\n").unwrap();
+    assert!(a.until_has(1, "FLOODED", 30.0));
+    t.close(1, 1); // warm, with a full 1 MiB ring
+    let b = Conn::new(2);
+    for r in 1..=50 {
+        b.open(&t, r, claude("000000f7")).unwrap();
+        t.close(2, r);
+        let held = b.src.pending_bytes();
+        assert!(
+            held <= terms::SINK_HIGH + 64 * 1024,
+            "reopen {r}: {held} queued"
+        );
+    }
+    assert_eq!(h.starts_of("000000f7").len(), 1);
 }
 
 #[test]

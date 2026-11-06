@@ -178,7 +178,12 @@ impl WatchHandle {
     /// A running Codex holds thread `session_id` open (the open set of the last process scan that worked, R14). Takes
     /// the board lock only for an in-memory look.
     pub fn codex_held(&self, session_id: &str) -> bool {
-        self.shared.fleet.lock().unwrap().codex_held(session_id)
+        // Asked under the terminals' lock: a poisoned board must not take the terminals down with it.
+        self.shared
+            .fleet
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .codex_held(session_id)
     }
 
     /// Processes watched for their exit now (macOS; 0 elsewhere).
